@@ -1,0 +1,1742 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BeeStore — Supplier Manager</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+:root {
+  --bg: #0C0E12;
+  --surface: #13161C;
+  --panel: #1A1E26;
+  --border: #252A35;
+  --border2: #2E3545;
+  --yellow: #F5C400;
+  --yellow-dim: rgba(245,196,0,0.12);
+  --blue: #3B8BFF;
+  --blue-dim: rgba(59,139,255,0.12);
+  --green: #22C55E;
+  --green-dim: rgba(34,197,94,0.12);
+  --red: #EF4444;
+  --red-dim: rgba(239,68,68,0.12);
+  --orange: #F97316;
+  --orange-dim: rgba(249,115,22,0.12);
+  --text: #E8ECF4;
+  --text2: #8B93A8;
+  --text3: #4A5268;
+  --radius: 10px;
+  --shadow: 0 4px 24px rgba(0,0,0,0.4);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Outfit', sans-serif;
+  font-size: 14px;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* ── LAYOUT ── */
+.app { display: flex; min-height: 100vh; }
+
+.sidebar {
+  width: 220px;
+  min-width: 220px;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  position: fixed;
+  top: 0; left: 0; bottom: 0;
+  z-index: 50;
+}
+
+.main {
+  margin-left: 220px;
+  flex: 1;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── SIDEBAR ── */
+.logo {
+  padding: 24px 20px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.logo-text {
+  font-family: 'Syne', sans-serif;
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: -0.5px;
+}
+.logo-text span:first-child { color: var(--yellow); }
+.logo-text span:last-child { color: var(--text2); font-weight: 600; }
+.logo-sub {
+  font-size: 10px;
+  color: var(--text3);
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  margin-top: 4px;
+  font-family: 'DM Mono', monospace;
+}
+
+.nav { padding: 16px 12px; flex: 1; }
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text2);
+  transition: all 0.15s;
+  margin-bottom: 2px;
+  position: relative;
+}
+.nav-item:hover { background: var(--panel); color: var(--text); }
+.nav-item.active {
+  background: var(--yellow-dim);
+  color: var(--yellow);
+}
+.nav-item .icon { font-size: 16px; width: 20px; text-align: center; }
+.nav-badge {
+  margin-left: auto;
+  background: var(--red);
+  color: white;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 10px;
+  font-family: 'DM Mono', monospace;
+}
+
+.sidebar-footer {
+  padding: 16px;
+  border-top: 1px solid var(--border);
+}
+.connection-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text3);
+  font-family: 'DM Mono', monospace;
+}
+.dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--text3);
+  flex-shrink: 0;
+}
+.dot.ok { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.dot.err { background: var(--red); box-shadow: 0 0 6px var(--red); }
+
+/* ── TOPBAR ── */
+.topbar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 0 32px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  position: sticky;
+  top: 0;
+  z-index: 40;
+}
+.page-title {
+  font-family: 'Syne', sans-serif;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+}
+.topbar-actions { display: flex; gap: 8px; align-items: center; }
+
+/* ── BUTTONS ── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: none;
+  font-family: 'Outfit', sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-primary { background: var(--yellow); color: #0C0E12; }
+.btn-primary:hover:not(:disabled) { background: #ffd91a; transform: translateY(-1px); }
+.btn-ghost { background: var(--panel); color: var(--text2); border: 1px solid var(--border); }
+.btn-ghost:hover:not(:disabled) { border-color: var(--yellow); color: var(--yellow); }
+.btn-danger { background: var(--red-dim); color: var(--red); border: 1px solid rgba(239,68,68,0.2); }
+.btn-danger:hover:not(:disabled) { background: var(--red); color: white; }
+.btn-success { background: var(--green-dim); color: var(--green); border: 1px solid rgba(34,197,94,0.2); }
+.btn-success:hover:not(:disabled) { background: var(--green); color: white; }
+.btn-sm { padding: 5px 10px; font-size: 12px; }
+
+/* ── CONTENT ── */
+.content { padding: 28px 32px; flex: 1; }
+
+/* ── CARDS ── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+.card-title {
+  font-family: 'Syne', sans-serif;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text2);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  margin-bottom: 16px;
+}
+
+/* ── STATS ROW ── */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 12px;
+  margin-bottom: 24px;
+}
+.stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+}
+.stat-card.highlight { border-color: var(--yellow); background: var(--yellow-dim); }
+.stat-card.alert { border-color: var(--red); background: var(--red-dim); }
+.stat-card.warn { border-color: var(--orange); background: var(--orange-dim); }
+.stat-num {
+  font-family: 'Syne', sans-serif;
+  font-size: 28px;
+  font-weight: 800;
+  line-height: 1;
+  color: var(--text);
+}
+.stat-card.highlight .stat-num { color: var(--yellow); }
+.stat-card.alert .stat-num { color: var(--red); }
+.stat-card.warn .stat-num { color: var(--orange); }
+.stat-lbl { font-size: 11px; color: var(--text2); margin-top: 5px; text-transform: uppercase; letter-spacing: 1px; }
+
+/* ── TABLE ── */
+.table-wrap {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.table-header {
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+table { width: 100%; border-collapse: collapse; }
+th {
+  background: var(--panel);
+  padding: 10px 14px;
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text3);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  font-family: 'DM Mono', monospace;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+td {
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  vertical-align: middle;
+}
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: rgba(255,255,255,0.02); }
+.mono { font-family: 'DM Mono', monospace; font-size: 12px; }
+
+/* ── BADGES ── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+.badge-green { background: var(--green-dim); color: var(--green); }
+.badge-red { background: var(--red-dim); color: var(--red); }
+.badge-yellow { background: var(--yellow-dim); color: var(--yellow); }
+.badge-blue { background: var(--blue-dim); color: var(--blue); }
+.badge-orange { background: var(--orange-dim); color: var(--orange); }
+.badge-gray { background: var(--panel); color: var(--text2); border: 1px solid var(--border); }
+
+/* ── FORMS ── */
+.form-grid { display: grid; gap: 14px; }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.form-group { display: flex; flex-direction: column; gap: 6px; }
+.form-group label { font-size: 12px; font-weight: 600; color: var(--text2); letter-spacing: 0.3px; }
+input[type=text], input[type=number], input[type=password], select, textarea {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 9px 12px;
+  border-radius: 8px;
+  font-family: 'Outfit', sans-serif;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.2s;
+  width: 100%;
+}
+input:focus, select:focus, textarea:focus { border-color: var(--yellow); }
+select option { background: var(--panel); }
+
+/* ── MODAL ── */
+.modal-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.7);
+  backdrop-filter: blur(4px);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s;
+}
+.modal-overlay.open { opacity: 1; pointer-events: all; }
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border2);
+  border-radius: 14px;
+  padding: 28px;
+  width: 100%;
+  max-width: 520px;
+  max-height: 90vh;
+  overflow-y: auto;
+  transform: translateY(12px);
+  transition: transform 0.2s;
+  box-shadow: var(--shadow);
+}
+.modal-overlay.open .modal { transform: translateY(0); }
+.modal-title {
+  font-family: 'Syne', sans-serif;
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 20px;
+}
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+
+/* ── UPLOAD ZONE ── */
+.upload-zone {
+  border: 2px dashed var(--border2);
+  border-radius: 10px;
+  padding: 32px 20px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s;
+  background: var(--panel);
+}
+.upload-zone:hover, .upload-zone.drag {
+  border-color: var(--yellow);
+  background: var(--yellow-dim);
+}
+.upload-zone .up-icon { font-size: 36px; margin-bottom: 10px; }
+.upload-zone p { color: var(--text2); font-size: 13px; }
+.upload-zone strong { color: var(--yellow); }
+
+/* ── PROGRESS ── */
+.progress-bar {
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+.progress-fill {
+  height: 100%;
+  background: var(--yellow);
+  border-radius: 2px;
+  transition: width 0.3s;
+}
+
+/* ── ALERT CARDS ── */
+.alert-list { display: flex; flex-direction: column; gap: 10px; }
+.alert-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.alert-card.new-product { border-left: 3px solid var(--green); }
+.alert-card.no-update { border-left: 3px solid var(--orange); }
+.alert-card.match-found { border-left: 3px solid var(--blue); }
+.alert-icon { font-size: 20px; flex-shrink: 0; margin-top: 1px; }
+.alert-body { flex: 1; }
+.alert-title { font-weight: 600; font-size: 13px; color: var(--text); }
+.alert-desc { font-size: 12px; color: var(--text2); margin-top: 3px; }
+.alert-actions { display: flex; gap: 6px; margin-top: 10px; }
+
+/* ── TABS ── */
+.tabs { display: flex; gap: 2px; background: var(--panel); padding: 4px; border-radius: 10px; width: fit-content; margin-bottom: 20px; }
+.tab {
+  padding: 7px 16px;
+  border-radius: 7px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  color: var(--text2);
+  transition: all 0.15s;
+  border: none;
+  background: none;
+}
+.tab.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 4px rgba(0,0,0,0.3); }
+
+/* ── EMPTY STATE ── */
+.empty-state {
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--text3);
+}
+.empty-state .empty-icon { font-size: 48px; margin-bottom: 12px; opacity: 0.5; }
+.empty-state p { font-size: 14px; }
+
+/* ── SEARCH ── */
+.search-input {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.search-input input { padding-left: 32px; width: 220px; }
+.search-icon { position: absolute; left: 10px; color: var(--text3); font-size: 14px; }
+
+/* ── SETTINGS PAGE ── */
+.settings-section { margin-bottom: 28px; }
+.settings-label {
+  font-family: 'DM Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--text3);
+  margin-bottom: 12px;
+}
+
+/* ── TOAST ── */
+#toast {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 999;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.toast-item {
+  background: var(--surface);
+  border: 1px solid var(--border2);
+  border-radius: 10px;
+  padding: 12px 16px;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-shadow: var(--shadow);
+  animation: slideIn 0.2s ease;
+  min-width: 280px;
+  max-width: 380px;
+}
+.toast-item.success { border-left: 3px solid var(--green); }
+.toast-item.error { border-left: 3px solid var(--red); }
+.toast-item.info { border-left: 3px solid var(--blue); }
+@keyframes slideIn { from { transform: translateX(20px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+/* ── SCROLLBAR ── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+/* ── RESPONSIVE ── */
+@media (max-width: 900px) {
+  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  .form-row { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<div class="app">
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+    <div class="logo">
+      <div class="logo-text"><span>Bee</span><span>Store</span></div>
+      <div class="logo-sub">Supplier Manager</div>
+    </div>
+    <nav class="nav">
+      <div class="nav-item active" onclick="navigate('dashboard')" id="nav-dashboard">
+        <span class="icon">⬡</span> Dashboard
+      </div>
+      <div class="nav-item" onclick="navigate('suppliers')" id="nav-suppliers">
+        <span class="icon">🏭</span> Fornecedores
+      </div>
+      <div class="nav-item" onclick="navigate('upload')" id="nav-upload">
+        <span class="icon">⬆</span> Processar Ficheiro
+      </div>
+      <div class="nav-item" onclick="navigate('alerts')" id="nav-alerts">
+        <span class="icon">🔔</span> Alertas
+        <span class="nav-badge" id="alert-badge" style="display:none">0</span>
+      </div>
+      <div class="nav-item" onclick="navigate('orphans')" id="nav-orphans">
+        <span class="icon">⚠</span> Sem Atualizações
+        <span class="nav-badge" id="orphan-badge" style="display:none">0</span>
+      </div>
+      <div class="nav-item" onclick="navigate('matching')" id="nav-matching">
+        <span class="icon">🔗</span> Matching
+      </div>
+      <div class="nav-item" onclick="navigate('settings')" id="nav-settings">
+        <span class="icon">⚙</span> Configurações
+      </div>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="connection-status">
+        <div class="dot" id="conn-dot"></div>
+        <span id="conn-text">Não ligado</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <div class="main">
+    <div class="topbar">
+      <div class="page-title" id="page-title">Dashboard</div>
+      <div class="topbar-actions" id="topbar-actions"></div>
+    </div>
+    <div class="content" id="content"></div>
+  </div>
+</div>
+
+<!-- MODALS -->
+<div class="modal-overlay" id="modal-overlay" onclick="closeModal(event)">
+  <div class="modal" id="modal-content"></div>
+</div>
+
+<!-- TOAST -->
+<div id="toast"></div>
+
+<script>
+// ═══════════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════════
+const DB = {
+  get: (k, d = null) => { try { const v = localStorage.getItem('bsm_' + k); return v ? JSON.parse(v) : d; } catch { return d; } },
+  set: (k, v) => localStorage.setItem('bsm_' + k, JSON.stringify(v)),
+};
+
+let state = {
+  page: 'dashboard',
+  suppliers: DB.get('suppliers', []),
+  alerts: DB.get('alerts', []),
+  uploadHistory: DB.get('uploadHistory', []),
+  orphans: DB.get('orphans', []),
+  matches: DB.get('matches', []),
+  shopifyProducts: DB.get('shopifyProducts', []),
+  settings: DB.get('settings', { shop: '', token: '', apiVersion: '2026-01' }),
+  processing: false,
+};
+
+function save() {
+  DB.set('suppliers', state.suppliers);
+  DB.set('alerts', state.alerts);
+  DB.set('uploadHistory', state.uploadHistory);
+  DB.set('orphans', state.orphans);
+  DB.set('matches', state.matches);
+  DB.set('shopifyProducts', state.shopifyProducts);
+  DB.set('settings', state.settings);
+}
+
+// ═══════════════════════════════════════════════════════════
+// SHOPIFY API
+// ═══════════════════════════════════════════════════════════
+async function shopifyGQL(query, variables = {}) {
+  const { shop, token, apiVersion } = state.settings;
+  if (!shop || !token) throw new Error('Configura a loja nas Configurações primeiro.');
+  const resp = await fetch(`https://${shop}/admin/api/${apiVersion}/graphql.json`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token },
+    body: JSON.stringify({ query, variables }),
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const json = await resp.json();
+  if (json.errors) throw new Error(json.errors[0].message);
+  return json.data;
+}
+
+async function testConnection() {
+  try {
+    const data = await shopifyGQL(`{ shop { name } }`);
+    return { ok: true, name: data.shop.name };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+async function fetchShopifyProducts() {
+  toast('A carregar produtos do Shopify...', 'info');
+  let products = [], cursor = null, hasNext = true;
+  while (hasNext) {
+    const q = `query($cursor: String) {
+      products(first: 250, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        edges { node {
+          id title vendor
+          variants(first: 5) { edges { node { id sku barcode price inventoryQuantity inventoryItem { id } } } }
+        }}
+      }
+    }`;
+    const data = await shopifyGQL(q, { cursor });
+    const page = data.products;
+    products.push(...page.edges.map(e => ({
+      id: e.node.id,
+      title: e.node.title,
+      vendor: e.node.vendor,
+      variants: e.node.variants.edges.map(v => ({
+        id: v.node.id,
+        sku: v.node.sku,
+        barcode: v.node.barcode,
+        price: v.node.price,
+        stock: v.node.inventoryQuantity,
+        inventoryItemId: v.node.inventoryItem?.id,
+      }))
+    })));
+    hasNext = page.pageInfo.hasNextPage;
+    cursor = page.pageInfo.endCursor;
+    if (products.length > 5000) break;
+  }
+  state.shopifyProducts = products;
+  save();
+  toast(`${products.length} produtos carregados do Shopify`, 'success');
+  return products;
+}
+
+async function updateVariantStock(inventoryItemId, locationId, delta) {
+  const q = `mutation($input: InventoryAdjustQuantityInput!) {
+    inventoryAdjustQuantity(input: $input) {
+      inventoryLevel { available }
+      userErrors { message }
+    }
+  }`;
+  return shopifyGQL(q, { input: { inventoryItemId, locationId, availableDelta: delta } });
+}
+
+async function updateVariantPrice(productId, variantId, price) {
+  const q = `mutation($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+      productVariants { id price }
+      userErrors { message }
+    }
+  }`;
+  return shopifyGQL(q, { productId, variants: [{ id: variantId, price: String(price) }] });
+}
+
+async function updateVariantSKU(inventoryItemId, sku) {
+  const q = `mutation($id: ID!, $input: InventoryItemInput!) {
+    inventoryItemUpdate(id: $id, input: $input) {
+      inventoryItem { id sku }
+      userErrors { message }
+    }
+  }`;
+  return shopifyGQL(q, { id: inventoryItemId, input: { sku } });
+}
+
+async function getLocationId() {
+  const data = await shopifyGQL(`{ locations(first: 1) { edges { node { id } } } }`);
+  return data.locations.edges[0]?.node.id;
+}
+
+async function archiveProduct(productId) {
+  const q = `mutation($input: ProductInput!) { productUpdate(product: $input) { product { id status } userErrors { message } } }`;
+  return shopifyGQL(q, { input: { id: productId, status: 'ARCHIVED' } });
+}
+
+async function deleteProduct(productId) {
+  const q = `mutation($input: ProductDeleteInput!) { productDelete(input: $input) { deletedProductId userErrors { message } } }`;
+  return shopifyGQL(q, { input: { id: productId } });
+}
+
+// ═══════════════════════════════════════════════════════════
+// NAVIGATION
+// ═══════════════════════════════════════════════════════════
+function navigate(page) {
+  state.page = page;
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  const navEl = document.getElementById('nav-' + page);
+  if (navEl) navEl.classList.add('active');
+  const titles = { dashboard: 'Dashboard', suppliers: 'Fornecedores', upload: 'Processar Ficheiro', alerts: 'Alertas', orphans: 'Produtos Sem Atualizações', matching: 'Matching Inteligente', settings: 'Configurações' };
+  document.getElementById('page-title').textContent = titles[page] || page;
+  render();
+}
+
+function render() {
+  const pages = { dashboard, suppliers, upload, alerts, orphans, matching, settings };
+  const fn = pages[state.page];
+  if (fn) fn();
+  updateBadges();
+}
+
+function updateBadges() {
+  const alertCount = state.alerts.filter(a => !a.dismissed).length;
+  const orphanCount = state.orphans.filter(o => !o.dismissed).length;
+  const ab = document.getElementById('alert-badge');
+  const ob = document.getElementById('orphan-badge');
+  if (ab) { ab.textContent = alertCount; ab.style.display = alertCount > 0 ? 'flex' : 'none'; }
+  if (ob) { ob.textContent = orphanCount; ob.style.display = orphanCount > 0 ? 'flex' : 'none'; }
+  const connDot = document.getElementById('conn-dot');
+  const connText = document.getElementById('conn-text');
+  if (state.settings.shop && state.settings.token) {
+    connDot.className = 'dot ok';
+    connText.textContent = state.settings.shop.replace('.myshopify.com', '');
+  } else {
+    connDot.className = 'dot err';
+    connText.textContent = 'Não ligado';
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// PAGES
+// ═══════════════════════════════════════════════════════════
+
+// ── DASHBOARD ──
+function dashboard() {
+  const topbar = document.getElementById('topbar-actions');
+  topbar.innerHTML = `<button class="btn btn-ghost btn-sm" onclick="fetchShopifyProducts()">↻ Sincronizar Shopify</button>`;
+
+  const totalSuppliers = state.suppliers.filter(s => s.active).length;
+  const alertCount = state.alerts.filter(a => !a.dismissed).length;
+  const orphanCount = state.orphans.filter(o => !o.dismissed).length;
+  const lastUpload = state.uploadHistory[0];
+  const totalProducts = state.shopifyProducts.length;
+
+  const recentHistory = state.uploadHistory.slice(0, 5);
+
+  document.getElementById('content').innerHTML = `
+    <div class="stats-grid">
+      <div class="stat-card highlight">
+        <div class="stat-num">${totalSuppliers}</div>
+        <div class="stat-lbl">Fornecedores Ativos</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num">${totalProducts}</div>
+        <div class="stat-lbl">Produtos Shopify</div>
+      </div>
+      <div class="stat-card ${alertCount > 0 ? 'warn' : ''}">
+        <div class="stat-num">${alertCount}</div>
+        <div class="stat-lbl">Alertas Ativos</div>
+      </div>
+      <div class="stat-card ${orphanCount > 0 ? 'alert' : ''}">
+        <div class="stat-num">${orphanCount}</div>
+        <div class="stat-lbl">Sem Atualizações</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num">${lastUpload ? timeAgo(lastUpload.date) : '—'}</div>
+        <div class="stat-lbl">Último Upload</div>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div class="table-wrap">
+        <div class="table-header">
+          <span style="font-family:'Syne',sans-serif;font-weight:700;font-size:13px">Fornecedores</span>
+          <button class="btn btn-ghost btn-sm" onclick="navigate('suppliers')">Ver todos →</button>
+        </div>
+        <table>
+          <thead><tr><th>Nome</th><th>Margem</th><th>Último Ficheiro</th><th>Estado</th></tr></thead>
+          <tbody>
+            ${state.suppliers.length === 0 ? `<tr><td colspan="4"><div class="empty-state" style="padding:30px"><div class="empty-icon">🏭</div><p>Sem fornecedores</p></div></td></tr>` :
+              state.suppliers.map(s => `
+                <tr>
+                  <td style="font-weight:600">${s.name}</td>
+                  <td class="mono">${s.priceType === 'pvp' ? 'PVP Sugerido' : '+' + s.margin + '%'}</td>
+                  <td class="mono" style="color:var(--text2)">${s.lastUpload ? new Date(s.lastUpload).toLocaleDateString('pt-PT') : '—'}</td>
+                  <td><span class="badge ${s.active ? 'badge-green' : 'badge-gray'}">${s.active ? 'Ativo' : 'Inativo'}</span></td>
+                </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="table-wrap">
+        <div class="table-header">
+          <span style="font-family:'Syne',sans-serif;font-weight:700;font-size:13px">Histórico de Uploads</span>
+        </div>
+        <table>
+          <thead><tr><th>Fornecedor</th><th>Data</th><th>Linhas</th><th>Resultado</th></tr></thead>
+          <tbody>
+            ${recentHistory.length === 0 ? `<tr><td colspan="4"><div class="empty-state" style="padding:30px"><div class="empty-icon">📂</div><p>Sem uploads ainda</p></div></td></tr>` :
+              recentHistory.map(h => `
+                <tr>
+                  <td style="font-weight:600">${h.supplierName}</td>
+                  <td class="mono" style="color:var(--text2)">${new Date(h.date).toLocaleDateString('pt-PT')}</td>
+                  <td class="mono">${h.total}</td>
+                  <td><span class="badge badge-green">✓ ${h.updated} atualizados</span></td>
+                </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+// ── SUPPLIERS ──
+function suppliers() {
+  document.getElementById('topbar-actions').innerHTML = `
+    <button class="btn btn-primary" onclick="openSupplierModal()">+ Novo Fornecedor</button>
+  `;
+  document.getElementById('content').innerHTML = `
+    <div class="table-wrap">
+      <div class="table-header">
+        <span style="font-family:'Syne',sans-serif;font-weight:700;font-size:14px">${state.suppliers.length} fornecedor(es)</span>
+      </div>
+      <table>
+        <thead><tr>
+          <th>Nome</th><th>Tipo de Preço</th><th>Margem</th>
+          <th>Colunas CSV</th><th>Último Upload</th><th>Estado</th><th></th>
+        </tr></thead>
+        <tbody>
+          ${state.suppliers.length === 0 ? `<tr><td colspan="7">
+            <div class="empty-state"><div class="empty-icon">🏭</div><p>Nenhum fornecedor criado ainda.<br>Clica em "+ Novo Fornecedor" para começar.</p></div>
+          </td></tr>` :
+            state.suppliers.map(s => `
+              <tr>
+                <td><div style="font-weight:600">${s.name}</div><div style="font-size:11px;color:var(--text3)">${s.id}</div></td>
+                <td><span class="badge ${s.priceType === 'pvp' ? 'badge-blue' : 'badge-yellow'}">${s.priceType === 'pvp' ? 'PVP Sugerido' : 'Custo + Margem'}</span></td>
+                <td class="mono">${s.priceType === 'pvp' ? '—' : '+' + s.margin + '%'}</td>
+                <td style="font-size:11px;color:var(--text2)">${[s.colSku||'',s.colBarcode||'',s.colStock||'',s.colPrice||''].filter(Boolean).join(', ') || '—'}</td>
+                <td class="mono" style="color:var(--text2)">${s.lastUpload ? new Date(s.lastUpload).toLocaleDateString('pt-PT') : '—'}</td>
+                <td><span class="badge ${s.active ? 'badge-green' : 'badge-gray'}">${s.active ? 'Ativo' : 'Inativo'}</span></td>
+                <td>
+                  <div style="display:flex;gap:6px">
+                    <button class="btn btn-ghost btn-sm" onclick="openSupplierModal('${s.id}')">✏ Editar</button>
+                    <button class="btn btn-danger btn-sm" onclick="deleteSupplier('${s.id}')">✕</button>
+                  </div>
+                </td>
+              </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function openSupplierModal(id = null) {
+  const s = id ? state.suppliers.find(x => x.id === id) : null;
+  const title = s ? 'Editar Fornecedor' : 'Novo Fornecedor';
+  document.getElementById('modal-content').innerHTML = `
+    <div class="modal-title">${title}</div>
+    <div class="form-grid">
+      <div class="form-row">
+        <div class="form-group">
+          <label>Nome do Fornecedor *</label>
+          <input type="text" id="s-name" value="${s?.name||''}" placeholder="ex: Depau, Ingram...">
+        </div>
+        <div class="form-group">
+          <label>Estado</label>
+          <select id="s-active">
+            <option value="true" ${(!s || s.active) ? 'selected' : ''}>Ativo</option>
+            <option value="false" ${s && !s.active ? 'selected' : ''}>Inativo</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Tipo de Preço</label>
+        <select id="s-pricetype" onchange="toggleMarginField()">
+          <option value="cost" ${s?.priceType !== 'pvp' ? 'selected' : ''}>Preço de Custo + Margem</option>
+          <option value="pvp" ${s?.priceType === 'pvp' ? 'selected' : ''}>PVP Sugerido (usar diretamente)</option>
+        </select>
+      </div>
+
+      <div class="form-group" id="margin-field" style="${s?.priceType === 'pvp' ? 'display:none' : ''}">
+        <label>Margem Mínima (%)</label>
+        <input type="number" id="s-margin" value="${s?.margin||7}" min="0" max="100" step="0.5" placeholder="7">
+      </div>
+
+      <div style="border-top:1px solid var(--border);padding-top:14px">
+        <div class="card-title">Mapeamento de Colunas CSV/XLS</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Coluna SKU / Part Number</label>
+            <input type="text" id="s-colsku" value="${s?.colSku||''}" placeholder="ex: Part Number, SKU">
+          </div>
+          <div class="form-group">
+            <label>Coluna Barcode / EAN</label>
+            <input type="text" id="s-colbarcode" value="${s?.colBarcode||''}" placeholder="ex: Codigo 5, EAN">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Coluna Stock</label>
+            <input type="text" id="s-colstock" value="${s?.colStock||''}" placeholder="ex: Stock almacen principal">
+          </div>
+          <div class="form-group">
+            <label>Coluna Preço</label>
+            <input type="text" id="s-colprice" value="${s?.colPrice||''}" placeholder="ex: PVP PuntoD (IVA Incluido)">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Coluna Nome / Artigo</label>
+            <input type="text" id="s-colname" value="${s?.colName||''}" placeholder="ex: Articulo, Nome">
+          </div>
+          <div class="form-group">
+            <label>Coluna Estado</label>
+            <input type="text" id="s-colstatus" value="${s?.colStatus||''}" placeholder="ex: Estado">
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary" onclick="saveSupplier('${id||''}')">Guardar</button>
+    </div>
+  `;
+  openModal();
+}
+
+function toggleMarginField() {
+  const pt = document.getElementById('s-pricetype')?.value;
+  const mf = document.getElementById('margin-field');
+  if (mf) mf.style.display = pt === 'pvp' ? 'none' : '';
+}
+
+function saveSupplier(id) {
+  const name = document.getElementById('s-name').value.trim();
+  if (!name) { toast('Nome obrigatório', 'error'); return; }
+  const data = {
+    id: id || 'sup_' + Date.now(),
+    name,
+    active: document.getElementById('s-active').value === 'true',
+    priceType: document.getElementById('s-pricetype').value,
+    margin: parseFloat(document.getElementById('s-margin')?.value || 7),
+    colSku: document.getElementById('s-colsku').value.trim(),
+    colBarcode: document.getElementById('s-colbarcode').value.trim(),
+    colStock: document.getElementById('s-colstock').value.trim(),
+    colPrice: document.getElementById('s-colprice').value.trim(),
+    colName: document.getElementById('s-colname').value.trim(),
+    colStatus: document.getElementById('s-colstatus').value.trim(),
+    lastUpload: id ? state.suppliers.find(s => s.id === id)?.lastUpload : null,
+  };
+  if (id) {
+    state.suppliers = state.suppliers.map(s => s.id === id ? data : s);
+    toast('Fornecedor atualizado', 'success');
+  } else {
+    state.suppliers.push(data);
+    toast('Fornecedor criado', 'success');
+  }
+  save(); closeModal(); render();
+}
+
+function deleteSupplier(id) {
+  if (!confirm('Eliminar este fornecedor?')) return;
+  state.suppliers = state.suppliers.filter(s => s.id !== id);
+  save(); render(); toast('Fornecedor eliminado', 'info');
+}
+
+// ── UPLOAD ──
+function upload() {
+  const activeSuppliers = state.suppliers.filter(s => s.active);
+  document.getElementById('topbar-actions').innerHTML = '';
+  document.getElementById('content').innerHTML = `
+    <div style="max-width:640px">
+      <div class="card" style="margin-bottom:20px">
+        <div class="card-title">1. Selecionar Fornecedor</div>
+        <div class="form-group">
+          <select id="upload-supplier">
+            <option value="">— Escolher fornecedor —</option>
+            ${activeSuppliers.map(s => `<option value="${s.id}">${s.name}</option>`).join('')}
+          </select>
+        </div>
+        ${activeSuppliers.length === 0 ? '<p style="color:var(--orange);font-size:12px;margin-top:8px">⚠ Nenhum fornecedor ativo. Cria um primeiro em Fornecedores.</p>' : ''}
+      </div>
+
+      <div class="card" style="margin-bottom:20px">
+        <div class="card-title">2. Fazer Upload do Ficheiro</div>
+        <div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()"
+          ondragover="event.preventDefault();this.classList.add('drag')"
+          ondragleave="this.classList.remove('drag')"
+          ondrop="handleDrop(event)">
+          <div class="up-icon">📂</div>
+          <p><strong>Clica para selecionar</strong> ou arrasta aqui</p>
+          <p style="margin-top:4px;font-size:12px;color:var(--text3)">.xls, .xlsx, .csv</p>
+        </div>
+        <input type="file" id="file-input" accept=".xls,.xlsx,.csv" style="display:none" onchange="handleFile(this.files[0])">
+        <div id="file-info" style="display:none;margin-top:12px"></div>
+      </div>
+
+      <div class="card" style="display:none" id="preview-card">
+        <div class="card-title">3. Pré-visualização</div>
+        <div id="preview-content"></div>
+        <div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end">
+          <button class="btn btn-ghost" onclick="clearUpload()">Cancelar</button>
+          <button class="btn btn-primary" id="btn-process" onclick="processUpload()">
+            Processar e Atualizar Shopify
+          </button>
+        </div>
+      </div>
+
+      <div id="processing-status" style="display:none">
+        <div class="card">
+          <div id="process-log" style="font-family:'DM Mono',monospace;font-size:12px;color:var(--text2);line-height:1.8"></div>
+          <div class="progress-bar" style="margin-top:12px"><div class="progress-fill" id="progress-fill" style="width:0%"></div></div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+let parsedRows = [];
+
+function handleDrop(e) {
+  e.preventDefault();
+  document.getElementById('upload-zone').classList.remove('drag');
+  const file = e.dataTransfer.files[0];
+  if (file) handleFile(file);
+}
+
+function handleFile(file) {
+  if (!file) return;
+  const suppId = document.getElementById('upload-supplier')?.value;
+  if (!suppId) { toast('Seleciona um fornecedor primeiro', 'error'); return; }
+
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const data = new Uint8Array(e.target.result);
+    const wb = XLSX.read(data, { type: 'array', raw: false });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false });
+    parsedRows = rows;
+    showPreview(rows, suppId);
+  };
+  reader.readAsArrayBuffer(file);
+
+  document.getElementById('file-info').style.display = 'block';
+  document.getElementById('file-info').innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;background:var(--panel);padding:10px 14px;border-radius:8px;border:1px solid var(--border)">
+      <span>📄</span>
+      <span style="font-weight:600">${file.name}</span>
+      <span style="color:var(--text2);font-size:12px">${(file.size/1024).toFixed(0)} KB</span>
+    </div>`;
+}
+
+function showPreview(rows, suppId) {
+  const supp = state.suppliers.find(s => s.id === suppId);
+  if (!rows.length) { toast('Ficheiro sem dados', 'error'); return; }
+
+  const colSku = supp?.colSku || '';
+  const colBarcode = supp?.colBarcode || '';
+  const colStock = supp?.colStock || '';
+  const colPrice = supp?.colPrice || '';
+  const colName = supp?.colName || '';
+
+  // Auto-detect columns if not configured
+  const headers = Object.keys(rows[0]);
+  const detectCol = (hints) => headers.find(h => hints.some(hint => h.toLowerCase().includes(hint.toLowerCase()))) || '';
+  const skuCol = colSku || detectCol(['Part Number', 'SKU', 'Referencia', 'Articulo', 'Codigo 3']);
+  const barcodeCol = colBarcode || detectCol(['Codigo 5', 'EAN', 'Barcode', 'Codigo 4']);
+  const stockCol = colStock || detectCol(['Stock', 'Unidades', 'Existencias', 'Cantidad']);
+  const priceCol = colPrice || detectCol(['PVP', 'Precio', 'Price', 'Custo', 'Cost']);
+  const nameCol = colName || detectCol(['Articulo', 'Nombre', 'Name', 'Descripcion', 'Title']);
+
+  const sample = rows.slice(0, 5);
+  const card = document.getElementById('preview-card');
+  card.style.display = 'block';
+  document.getElementById('preview-content').innerHTML = `
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:16px">
+      <div style="font-size:11px;color:var(--text2)">Total de linhas<br><strong style="color:var(--text);font-size:16px">${rows.length}</strong></div>
+      <div style="font-size:11px;color:var(--text2)">Coluna SKU<br><strong style="color:var(--yellow);font-size:12px">${skuCol||'—'}</strong></div>
+      <div style="font-size:11px;color:var(--text2)">Coluna Barcode<br><strong style="color:var(--yellow);font-size:12px">${barcodeCol||'—'}</strong></div>
+      <div style="font-size:11px;color:var(--text2)">Coluna Stock<br><strong style="color:var(--yellow);font-size:12px">${stockCol||'—'}</strong></div>
+      <div style="font-size:11px;color:var(--text2)">Coluna Preço<br><strong style="color:var(--yellow);font-size:12px">${priceCol||'—'}</strong></div>
+    </div>
+    <div class="table-wrap" style="max-height:220px;overflow:auto">
+      <table>
+        <thead><tr>
+          <th>${nameCol||'Nome'}</th><th>${skuCol||'SKU'}</th><th>${barcodeCol||'Barcode'}</th>
+          <th>${stockCol||'Stock'}</th><th>${priceCol||'Preço'}</th>
+        </tr></thead>
+        <tbody>
+          ${sample.map(r => `<tr>
+            <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r[nameCol]||'—'}</td>
+            <td class="mono">${r[skuCol]||'—'}</td>
+            <td class="mono">${r[barcodeCol]||'—'}</td>
+            <td class="mono">${r[stockCol]||'—'}</td>
+            <td class="mono">${r[priceCol]||'—'}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:11px;color:var(--text3);margin-top:8px">Mostrando 5 de ${rows.length} linhas</p>
+  `;
+  card.dataset.sku = skuCol;
+  card.dataset.barcode = barcodeCol;
+  card.dataset.stock = stockCol;
+  card.dataset.price = priceCol;
+  card.dataset.name = nameCol;
+}
+
+function clearUpload() {
+  parsedRows = [];
+  document.getElementById('preview-card').style.display = 'none';
+  document.getElementById('file-info').style.display = 'none';
+  document.getElementById('file-input').value = '';
+}
+
+async function processUpload() {
+  const suppId = document.getElementById('upload-supplier')?.value;
+  const supp = state.suppliers.find(s => s.id === suppId);
+  if (!supp || !parsedRows.length) { toast('Sem dados para processar', 'error'); return; }
+  if (!state.settings.shop || !state.settings.token) { toast('Configura a ligação Shopify primeiro', 'error'); return; }
+
+  const card = document.getElementById('preview-card');
+  const skuCol = card.dataset.sku;
+  const barcodeCol = card.dataset.barcode;
+  const stockCol = card.dataset.stock;
+  const priceCol = card.dataset.price;
+  const nameCol = card.dataset.name;
+
+  document.getElementById('preview-card').style.display = 'none';
+  document.getElementById('processing-status').style.display = 'block';
+
+  const log = (msg) => {
+    const el = document.getElementById('process-log');
+    if (el) el.innerHTML += msg + '<br>';
+  };
+  const setProgress = (pct) => {
+    const el = document.getElementById('progress-fill');
+    if (el) el.style.width = pct + '%';
+  };
+
+  log('🔍 A carregar produtos do Shopify...');
+  let shopifyProds = state.shopifyProducts;
+  if (!shopifyProds.length) {
+    try { shopifyProds = await fetchShopifyProducts(); }
+    catch (e) { log('❌ Erro ao carregar Shopify: ' + e.message); return; }
+  }
+
+  // Build lookup maps
+  const bySku = {}, byBarcode = {};
+  shopifyProds.forEach(p => {
+    p.variants.forEach(v => {
+      if (v.sku) bySku[v.sku.trim().toLowerCase()] = { product: p, variant: v };
+      if (v.barcode) byBarcode[v.barcode.trim()] = { product: p, variant: v };
+    });
+  });
+
+  log(`📦 ${shopifyProds.length} produtos carregados. A processar ${parsedRows.length} linhas...`);
+
+  let locationId;
+  try { locationId = await getLocationId(); }
+  catch (e) { log('⚠ Não foi possível obter localização do stock: ' + e.message); }
+
+  let updated = 0, notFound = 0, errors = 0, newProducts = [];
+  const updatedSkus = new Set();
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  // Track known SKUs for orphan detection
+  const knownSkus = new Set(parsedRows.map(r => (r[skuCol] || '').trim().toLowerCase()).filter(Boolean));
+
+  for (let i = 0; i < parsedRows.length; i++) {
+    const row = parsedRows[i];
+    const sku = (row[skuCol] || '').trim();
+    const barcode = (row[barcodeCol] || '').trim();
+    const stockRaw = (row[stockCol] || '0').replace(/[^0-9]/g, '');
+    const stock = parseInt(stockRaw) || 0;
+    const priceRaw = (row[priceCol] || '').replace(',', '.');
+    const costPrice = parseFloat(priceRaw) || 0;
+
+    const finalPrice = supp.priceType === 'pvp'
+      ? costPrice
+      : parseFloat((costPrice * (1 + supp.margin / 100)).toFixed(2));
+
+    // Find match
+    let match = bySku[sku.toLowerCase()] || byBarcode[barcode];
+
+    if (!match) {
+      notFound++;
+      const name = row[nameCol] || sku;
+      // Check if it's truly new vs just not matched
+      const isNewProduct = !state.alerts.some(a => a.type === 'new_product' && a.sku === sku);
+      if (isNewProduct && name) {
+        newProducts.push({ sku, barcode, name, price: finalPrice, stock, suppId, suppName: supp.name });
+      }
+      continue;
+    }
+
+    const { product, variant } = match;
+    updatedSkus.add(sku.toLowerCase());
+
+    try {
+      // Update price
+      if (finalPrice > 0) {
+        await updateVariantPrice(product.id, variant.id, finalPrice.toFixed(2));
+      }
+      // Update stock
+      if (locationId && variant.inventoryItemId) {
+        const delta = stock - (variant.stock || 0);
+        if (delta !== 0) {
+          await updateVariantStock(variant.inventoryItemId, locationId, delta);
+        }
+      }
+      updated++;
+      // Update local cache
+      variant.stock = stock;
+      variant.price = String(finalPrice);
+    } catch (e) {
+      errors++;
+      log(`❌ Erro em ${sku}: ${e.message}`);
+    }
+
+    setProgress(Math.round((i + 1) / parsedRows.length * 100));
+    if (i % 3 === 0) log(`⚡ ${i + 1}/${parsedRows.length} — atualizados: ${updated}, não encontrados: ${notFound}`);
+    await sleep(300);
+  }
+
+  // Add new product alerts
+  newProducts.forEach(p => {
+    state.alerts.push({
+      id: 'alert_' + Date.now() + Math.random(),
+      type: 'new_product',
+      title: 'Novo produto detetado',
+      desc: `${p.name} (SKU: ${p.sku}) — ${p.suppName} — €${p.price}`,
+      sku: p.sku, barcode: p.barcode, name: p.name,
+      price: p.price, stock: p.stock, suppId: p.suppId,
+      date: new Date().toISOString(), dismissed: false,
+    });
+  });
+
+  // Detect orphaned products (in Shopify but not in this supplier's file)
+  shopifyProds.forEach(p => {
+    p.variants.forEach(v => {
+      const vSku = (v.sku || '').trim().toLowerCase();
+      if (vSku && !knownSkus.has(vSku)) {
+        const alreadyOrphan = state.orphans.some(o => o.variantId === v.id);
+        if (!alreadyOrphan) {
+          state.orphans.push({
+            id: 'orp_' + Date.now() + Math.random(),
+            productId: p.id, variantId: v.id,
+            title: p.title, sku: v.sku, barcode: v.barcode,
+            price: v.price, stock: v.stock,
+            suppId, suppName: supp.name,
+            detectedAt: new Date().toISOString(), dismissed: false,
+          });
+        }
+      }
+    });
+  });
+
+  // Save upload history
+  state.uploadHistory.unshift({
+    id: 'upl_' + Date.now(),
+    supplierId: suppId, supplierName: supp.name,
+    date: new Date().toISOString(),
+    total: parsedRows.length, updated, notFound, errors,
+    newProducts: newProducts.length,
+  });
+
+  // Update supplier last upload
+  state.suppliers = state.suppliers.map(s => s.id === suppId ? { ...s, lastUpload: new Date().toISOString() } : s);
+  state.shopifyProducts = shopifyProds;
+  save();
+
+  setProgress(100);
+  log(`<br>✅ <strong>Concluído!</strong>`);
+  log(`📊 Atualizados: ${updated} | Não encontrados: ${notFound} | Erros: ${errors}`);
+  if (newProducts.length > 0) log(`🆕 ${newProducts.length} produto(s) novo(s) detetado(s) — ver Alertas`);
+
+  toast(`Processamento concluído: ${updated} atualizados`, 'success');
+  updateBadges();
+}
+
+// ── ALERTS ──
+function alerts() {
+  document.getElementById('topbar-actions').innerHTML = `
+    <button class="btn btn-ghost btn-sm" onclick="dismissAllAlerts()">Dispensar todos</button>
+  `;
+  const activeAlerts = state.alerts.filter(a => !a.dismissed);
+  document.getElementById('content').innerHTML = `
+    <div class="tabs">
+      <button class="tab active" onclick="filterAlerts('all',this)">Todos (${activeAlerts.length})</button>
+      <button class="tab" onclick="filterAlerts('new_product',this)">Novos Produtos (${activeAlerts.filter(a=>!a.dismissed&&a.type==='new_product').length})</button>
+    </div>
+    <div class="alert-list" id="alert-list">
+      ${renderAlertList(activeAlerts)}
+    </div>
+  `;
+}
+
+function renderAlertList(list) {
+  if (!list.length) return `<div class="empty-state"><div class="empty-icon">🔔</div><p>Sem alertas ativos</p></div>`;
+  return list.map(a => `
+    <div class="alert-card ${a.type}" id="alert-${a.id}">
+      <div class="alert-icon">${a.type === 'new_product' ? '🆕' : '⚠'}</div>
+      <div class="alert-body">
+        <div class="alert-title">${a.title}</div>
+        <div class="alert-desc">${a.desc}</div>
+        <div class="alert-desc" style="margin-top:4px;color:var(--text3)">${new Date(a.date).toLocaleDateString('pt-PT')}</div>
+        <div class="alert-actions">
+          ${a.type === 'new_product' ? `<button class="btn btn-success btn-sm" onclick="suggestCreate('${a.id}')">+ Criar no Shopify</button>` : ''}
+          <button class="btn btn-ghost btn-sm" onclick="dismissAlert('${a.id}')">Dispensar</button>
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function filterAlerts(type, el) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  const list = state.alerts.filter(a => !a.dismissed && (type === 'all' || a.type === type));
+  document.getElementById('alert-list').innerHTML = renderAlertList(list);
+}
+
+function dismissAlert(id) {
+  state.alerts = state.alerts.map(a => a.id === id ? { ...a, dismissed: true } : a);
+  save(); document.getElementById('alert-' + id)?.remove(); updateBadges();
+}
+
+function dismissAllAlerts() {
+  state.alerts = state.alerts.map(a => ({ ...a, dismissed: true }));
+  save(); render();
+}
+
+function suggestCreate(alertId) {
+  const alert = state.alerts.find(a => a.id === alertId);
+  if (!alert) return;
+  const supp = state.suppliers.find(s => s.id === alert.suppId);
+  document.getElementById('modal-content').innerHTML = `
+    <div class="modal-title">🆕 Criar Produto no Shopify</div>
+    <div class="form-grid">
+      <div class="form-group"><label>Título</label><input type="text" id="np-title" value="${alert.name}"></div>
+      <div class="form-row">
+        <div class="form-group"><label>SKU</label><input type="text" id="np-sku" value="${alert.sku}"></div>
+        <div class="form-group"><label>Barcode</label><input type="text" id="np-barcode" value="${alert.barcode||''}"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Preço (€)</label><input type="number" id="np-price" value="${alert.price}" step="0.01"></div>
+        <div class="form-group"><label>Stock Inicial</label><input type="number" id="np-stock" value="${alert.stock||0}"></div>
+      </div>
+      <div class="form-group"><label>Vendor / Fabricante</label><input type="text" id="np-vendor" value="${supp?.name||''}"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary" onclick="createProductFromAlert('${alertId}')">Criar no Shopify</button>
+    </div>
+  `;
+  openModal();
+}
+
+async function createProductFromAlert(alertId) {
+  const title = document.getElementById('np-title')?.value.trim();
+  const sku = document.getElementById('np-sku')?.value.trim();
+  const barcode = document.getElementById('np-barcode')?.value.trim();
+  const price = document.getElementById('np-price')?.value;
+  const vendor = document.getElementById('np-vendor')?.value.trim();
+
+  if (!title) { toast('Título obrigatório', 'error'); return; }
+
+  toast('A criar produto...', 'info');
+  try {
+    const q = `mutation($input: ProductInput!) {
+      productCreate(input: $input) {
+        product { id title variants(first:1) { edges { node { id inventoryItem { id } } } } }
+        userErrors { message }
+      }
+    }`;
+    const data = await shopifyGQL(q, { input: {
+      title, vendor,
+      status: 'DRAFT',
+      variants: [{ price: String(price), barcode: barcode || undefined }]
+    }});
+    const errors = data.productCreate.userErrors;
+    if (errors.length) { toast(errors[0].message, 'error'); return; }
+    const invItemId = data.productCreate.product?.variants?.edges[0]?.node?.inventoryItem?.id;
+    if (invItemId && sku) await updateVariantSKU(invItemId, sku);
+    dismissAlert(alertId);
+    closeModal();
+    toast('Produto criado em modo rascunho no Shopify ✓', 'success');
+    fetchShopifyProducts();
+  } catch (e) {
+    toast('Erro: ' + e.message, 'error');
+  }
+}
+
+// ── ORPHANS ──
+function orphans() {
+  document.getElementById('topbar-actions').innerHTML = `
+    <button class="btn btn-ghost btn-sm" onclick="dismissAllOrphans()">Dispensar todos</button>
+  `;
+  const active = state.orphans.filter(o => !o.dismissed);
+  document.getElementById('content').innerHTML = `
+    <p style="color:var(--text2);font-size:13px;margin-bottom:16px">
+      Produtos encontrados no Shopify que não aparecem nos ficheiros mais recentes dos fornecedores. Podem ter SKUs desatualizados, ter sido descontinuados ou pertencer a um fornecedor antigo.
+    </p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Produto</th><th>SKU</th><th>Barcode</th><th>Preço</th><th>Stock</th><th>Fornecedor</th><th>Detetado</th><th>Ação</th>
+        </tr></thead>
+        <tbody>
+          ${active.length === 0 ? `<tr><td colspan="8"><div class="empty-state"><div class="empty-icon">✅</div><p>Sem produtos sem atualizações</p></div></td></tr>` :
+            active.map(o => `
+              <tr id="orp-${o.id}">
+                <td style="font-weight:600;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${o.title}</td>
+                <td class="mono">${o.sku||'—'}</td>
+                <td class="mono" style="color:var(--text2)">${o.barcode||'—'}</td>
+                <td class="mono">€${o.price||'—'}</td>
+                <td class="mono">${o.stock??'—'}</td>
+                <td><span class="badge badge-blue">${o.suppName}</span></td>
+                <td class="mono" style="color:var(--text2)">${new Date(o.detectedAt).toLocaleDateString('pt-PT')}</td>
+                <td>
+                  <div style="display:flex;gap:4px;flex-wrap:wrap">
+                    <button class="btn btn-ghost btn-sm" onclick="archiveOrphan('${o.id}')">📦 Arquivar</button>
+                    <button class="btn btn-danger btn-sm" onclick="deleteOrphan('${o.id}')">🗑 Eliminar</button>
+                    <button class="btn btn-ghost btn-sm" onclick="dismissOrphan('${o.id}')">✕</button>
+                  </div>
+                </td>
+              </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+async function archiveOrphan(id) {
+  const o = state.orphans.find(x => x.id === id);
+  if (!o) return;
+  if (!confirm(`Arquivar "${o.title}" no Shopify?`)) return;
+  try {
+    await archiveProduct(o.productId);
+    dismissOrphan(id);
+    toast('Produto arquivado no Shopify', 'success');
+  } catch (e) { toast('Erro: ' + e.message, 'error'); }
+}
+
+async function deleteOrphan(id) {
+  const o = state.orphans.find(x => x.id === id);
+  if (!o) return;
+  if (!confirm(`⚠ Eliminar permanentemente "${o.title}" do Shopify? Esta ação não pode ser desfeita.`)) return;
+  try {
+    await deleteProduct(o.productId);
+    dismissOrphan(id);
+    toast('Produto eliminado do Shopify', 'success');
+  } catch (e) { toast('Erro: ' + e.message, 'error'); }
+}
+
+function dismissOrphan(id) {
+  state.orphans = state.orphans.map(o => o.id === id ? { ...o, dismissed: true } : o);
+  save(); document.getElementById('orp-' + id)?.remove(); updateBadges();
+}
+
+function dismissAllOrphans() {
+  state.orphans = state.orphans.map(o => ({ ...o, dismissed: true }));
+  save(); render();
+}
+
+// ── MATCHING ──
+function matching() {
+  document.getElementById('topbar-actions').innerHTML = `
+    <button class="btn btn-primary" onclick="runMatching()">▶ Executar Matching</button>
+  `;
+  document.getElementById('content').innerHTML = `
+    <p style="color:var(--text2);font-size:13px;margin-bottom:16px">
+      Compara produtos não encontrados por SKU/barcode com produtos do Shopify por semelhança de nome. Útil para detetar códigos desatualizados ou produtos duplicados com fornecedores diferentes.
+    </p>
+    ${state.shopifyProducts.length === 0 ? `
+      <div class="card" style="text-align:center;padding:40px">
+        <div style="font-size:40px;margin-bottom:12px">🔗</div>
+        <p style="color:var(--text2)">Sincroniza os produtos do Shopify primeiro para usar o Matching.</p>
+        <button class="btn btn-primary" style="margin-top:16px" onclick="fetchShopifyProducts().then(()=>navigate('matching'))">Sincronizar Shopify</button>
+      </div>` : `
+    <div class="table-wrap">
+      <div class="table-header">
+        <span style="font-family:'Syne',sans-serif;font-weight:700;font-size:13px">${state.matches.length} sugestão(ões) de match</span>
+      </div>
+      <table>
+        <thead><tr>
+          <th>Produto Shopify</th><th>SKU Atual</th>
+          <th>Sugestão do Fornecedor</th><th>SKU Sugerido</th>
+          <th>Score</th><th>Ação</th>
+        </tr></thead>
+        <tbody>
+          ${state.matches.length === 0 ? `<tr><td colspan="6"><div class="empty-state"><div class="empty-icon">🔗</div><p>Clica em "Executar Matching" para analisar</p></div></td></tr>` :
+            state.matches.filter(m => !m.dismissed).map(m => `
+              <tr id="match-${m.id}">
+                <td style="font-weight:600">${m.shopifyTitle}</td>
+                <td class="mono">${m.shopifySku||'—'}</td>
+                <td style="color:var(--blue)">${m.supplierName}</td>
+                <td class="mono">${m.supplierSku}</td>
+                <td><span class="badge ${m.score > 85 ? 'badge-green' : m.score > 60 ? 'badge-yellow' : 'badge-orange'}">${m.score}%</span></td>
+                <td>
+                  <div style="display:flex;gap:4px">
+                    <button class="btn btn-success btn-sm" onclick="acceptMatch('${m.id}')">✓ Aceitar</button>
+                    <button class="btn btn-ghost btn-sm" onclick="rejectMatch('${m.id}')">✕</button>
+                  </div>
+                </td>
+              </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`}
+  `;
+}
+
+function similarity(a, b) {
+  a = a.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+  b = b.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+  if (a === b) return 100;
+  const wordsA = a.split(/\s+/);
+  const wordsB = b.split(/\s+/);
+  const setA = new Set(wordsA);
+  const setB = new Set(wordsB);
+  let common = 0;
+  setA.forEach(w => { if (w.length > 2 && setB.has(w)) common++; });
+  const total = Math.max(setA.size, setB.size);
+  return Math.round((common / total) * 100);
+}
+
+async function runMatching() {
+  if (!state.shopifyProducts.length) { toast('Sincroniza o Shopify primeiro', 'error'); return; }
+  toast('A executar matching...', 'info');
+  state.matches = [];
+
+  // Get all unmatched alerts (new products)
+  const newProducts = state.alerts.filter(a => a.type === 'new_product' && !a.dismissed);
+
+  newProducts.forEach(np => {
+    if (!np.name) return;
+    let best = null, bestScore = 0;
+    state.shopifyProducts.forEach(sp => {
+      const score = similarity(np.name, sp.title);
+      if (score > bestScore && score >= 50) {
+        bestScore = score; best = sp;
+      }
+    });
+    if (best) {
+      const existingMatch = state.matches.some(m => m.shopifyId === best.id && m.supplierSku === np.sku);
+      if (!existingMatch) {
+        state.matches.push({
+          id: 'match_' + Date.now() + Math.random(),
+          shopifyId: best.id, shopifyTitle: best.title,
+          shopifySku: best.variants[0]?.sku,
+          shopifyVariantId: best.variants[0]?.id,
+          shopifyInventoryItemId: best.variants[0]?.inventoryItemId,
+          supplierName: np.name, supplierSku: np.sku,
+          supplierBarcode: np.barcode, score: bestScore,
+          alertId: np.id, dismissed: false,
+        });
+      }
+    }
+  });
+
+  save();
+  toast(`${state.matches.length} sugestão(ões) encontrada(s)`, 'success');
+  render();
+}
+
+async function acceptMatch(id) {
+  const m = state.matches.find(x => x.id === id);
+  if (!m) return;
+  try {
+    if (m.shopifyInventoryItemId && m.supplierSku) {
+      await updateVariantSKU(m.shopifyInventoryItemId, m.supplierSku);
+    }
+    if (m.alertId) dismissAlert(m.alertId);
+    state.matches = state.matches.map(x => x.id === id ? { ...x, dismissed: true } : x);
+    save();
+    document.getElementById('match-' + id)?.remove();
+    toast('SKU atualizado no Shopify ✓', 'success');
+  } catch (e) { toast('Erro: ' + e.message, 'error'); }
+}
+
+function rejectMatch(id) {
+  state.matches = state.matches.map(m => m.id === id ? { ...m, dismissed: true } : m);
+  save(); document.getElementById('match-' + id)?.remove();
+}
+
+// ── SETTINGS ──
+function settings() {
+  document.getElementById('topbar-actions').innerHTML = '';
+  document.getElementById('content').innerHTML = `
+    <div style="max-width:520px">
+      <div class="settings-section">
+        <div class="settings-label">Ligação Shopify</div>
+        <div class="card">
+          <div class="form-grid">
+            <div class="form-group">
+              <label>Shop Domain</label>
+              <input type="text" id="cfg-shop" value="${state.settings.shop}" placeholder="beestore.myshopify.com">
+            </div>
+            <div class="form-group">
+              <label>Access Token (shpat_...)</label>
+              <input type="password" id="cfg-token" value="${state.settings.token}" placeholder="shpat_xxxxxxxx">
+            </div>
+            <div class="form-group">
+              <label>Versão da API</label>
+              <select id="cfg-version">
+                <option value="2026-01" ${state.settings.apiVersion === '2026-01' ? 'selected' : ''}>2026-01 (mais recente)</option>
+                <option value="2025-10" ${state.settings.apiVersion === '2025-10' ? 'selected' : ''}>2025-10</option>
+              </select>
+            </div>
+            <div style="display:flex;gap:8px">
+              <button class="btn btn-primary" onclick="saveSettings()">Guardar</button>
+              <button class="btn btn-ghost" onclick="testConn()">Testar Ligação</button>
+            </div>
+            <div id="conn-result" style="font-size:13px;color:var(--text2)"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-label">Dados Locais</div>
+        <div class="card">
+          <p style="color:var(--text2);font-size:13px;margin-bottom:16px">Todos os dados são guardados localmente no teu browser.</p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn btn-ghost btn-sm" onclick="exportData()">⬇ Exportar Backup</button>
+            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('import-input').click()">⬆ Importar Backup</button>
+            <button class="btn btn-danger btn-sm" onclick="clearData()">🗑 Limpar Tudo</button>
+          </div>
+          <input type="file" id="import-input" accept=".json" style="display:none" onchange="importData(this.files[0])">
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-label">Deploy no GitHub Pages</div>
+        <div class="card">
+          <p style="color:var(--text2);font-size:13px;line-height:1.7">
+            1. Cria um repositório no GitHub<br>
+            2. Faz upload deste ficheiro <strong style="color:var(--yellow)">index.html</strong><br>
+            3. Vai a Settings → Pages → Branch: main<br>
+            4. A app fica disponível em <strong style="color:var(--yellow)">username.github.io/repo</strong><br>
+            <br>
+            O token Shopify fica guardado no teu browser — nunca é enviado para o GitHub.
+          </p>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function saveSettings() {
+  state.settings = {
+    shop: document.getElementById('cfg-shop')?.value.trim(),
+    token: document.getElementById('cfg-token')?.value.trim(),
+    apiVersion: document.getElementById('cfg-version')?.value,
+  };
+  save(); updateBadges(); toast('Configurações guardadas', 'success');
+}
+
+async function testConn() {
+  saveSettings();
+  document.getElementById('conn-result').textContent = 'A testar...';
+  const r = await testConnection();
+  document.getElementById('conn-result').innerHTML = r.ok
+    ? `<span style="color:var(--green)">✓ Ligado a: ${r.name}</span>`
+    : `<span style="color:var(--red)">✕ Erro: ${r.error}</span>`;
+}
+
+function exportData() {
+  const data = { suppliers: state.suppliers, alerts: state.alerts, uploadHistory: state.uploadHistory, orphans: state.orphans, matches: state.matches };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = `beestore-backup-${new Date().toISOString().slice(0,10)}.json`; a.click();
+}
+
+function importData(file) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const data = JSON.parse(e.target.result);
+      if (data.suppliers) state.suppliers = data.suppliers;
+      if (data.alerts) state.alerts = data.alerts;
+      if (data.uploadHistory) state.uploadHistory = data.uploadHistory;
+      if (data.orphans) state.orphans = data.orphans;
+      if (data.matches) state.matches = data.matches;
+      save(); render(); toast('Backup importado com sucesso', 'success');
+    } catch { toast('Ficheiro inválido', 'error'); }
+  };
+  reader.readAsText(file);
+}
+
+function clearData() {
+  if (!confirm('Apagar todos os dados locais? Esta ação não pode ser desfeita.')) return;
+  ['suppliers','alerts','uploadHistory','orphans','matches','shopifyProducts'].forEach(k => DB.set(k, []));
+  state.suppliers = []; state.alerts = []; state.uploadHistory = [];
+  state.orphans = []; state.matches = []; state.shopifyProducts = [];
+  render(); toast('Dados apagados', 'info');
+}
+
+// ═══════════════════════════════════════════════════════════
+// UTILS
+// ═══════════════════════════════════════════════════════════
+function openModal() { document.getElementById('modal-overlay').classList.add('open'); }
+function closeModal(e) {
+  if (!e || e.target === document.getElementById('modal-overlay'))
+    document.getElementById('modal-overlay').classList.remove('open');
+}
+
+function toast(msg, type = 'info') {
+  const container = document.getElementById('toast');
+  const el = document.createElement('div');
+  el.className = `toast-item ${type}`;
+  const icons = { success: '✓', error: '✕', info: 'ℹ' };
+  el.innerHTML = `<span>${icons[type]||'·'}</span><span>${msg}</span>`;
+  container.appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+function timeAgo(dateStr) {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const mins = Math.floor(diff / 60000);
+  const hours = Math.floor(mins / 60);
+  const days = Math.floor(hours / 24);
+  if (days > 0) return days + 'd';
+  if (hours > 0) return hours + 'h';
+  if (mins > 0) return mins + 'min';
+  return 'agora';
+}
+
+// ═══════════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════════
+navigate('dashboard');
+</script>
+</body>
+</html>
