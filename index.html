@@ -515,7 +515,7 @@ function upload() {
   document.getElementById('topbar-actions').innerHTML='';
   const activeSuppliers=state.suppliers.filter(s=>s.active);
   document.getElementById('content').innerHTML=`
-    <div style="max-width:700px">
+    <div>
       <!-- PASSO 1 -->
       <div class="card" style="margin-bottom:16px">
         <div class="card-title">1 — Fornecedor e Ficheiro</div>
@@ -1269,7 +1269,7 @@ let cState = {
 function create() {
   document.getElementById('topbar-actions').innerHTML='';
   document.getElementById('content').innerHTML=`
-    <div style="max-width:760px">
+    <div>
 
       <!-- PASSO 1: Upload -->
       <div class="card" id="cr-step-upload" style="margin-bottom:16px">
@@ -1570,7 +1570,17 @@ function crToggle(idx, checked) {
 }
 
 function crSelectAll(checked) {
-  cState.products.forEach((p,i)=>{p.selected=checked;crToggle(i,checked);});
+  // Só atualiza linhas visíveis para não travar com ficheiros grandes
+  const visibleRows=document.querySelectorAll('#cr-tbody tr:not([style*="display: none"]):not([style*="display:none"])');
+  visibleRows.forEach(row=>{
+    const idx=parseInt(row.id.replace('cr-row-',''));
+    if(!isNaN(idx)&&cState.products[idx]){
+      cState.products[idx].selected=checked;
+      row.style.opacity=checked?'1':'0.45';
+      const chk=row.querySelector('.cr-chk');
+      if(chk) chk.checked=checked;
+    }
+  });
   const ca=document.getElementById('cr-chk-all'); if(ca) ca.checked=checked;
   crUpdateSummary();
 }
@@ -1631,10 +1641,20 @@ function crSaveVariantGroup(idxList) {
     if(cState.products[idx]){
       cState.products[idx].variantGroup=groupId;
       cState.products[idx].variantValue=values[i]||values[0]||'';
+      // Atualizar célula de variante na tabela sem re-render completo
+      const row=document.getElementById('cr-row-'+idx);
+      if(row){
+        const cell=row.querySelector('td:last-child');
+        if(cell) cell.innerHTML=`<span class="badge badge-blue" style="font-size:10px" title="${attribute}">🔗 ${name}</span>
+          <button onclick="crRemoveFromGroup(${idx})" style="background:none;border:none;cursor:pointer;color:var(--text3);font-size:11px;padding:0 3px">✕</button>`;
+      }
     }
   });
   closeModal();
-  crRenderReview(); // re-render
+  crRenderVariantGroups();
+  const vgEl=document.getElementById('cr-variant-groups');
+  if(vgEl) vgEl.style.display='block';
+  crUpdateSummary();
   toast(`Grupo "${name}" criado com ${idxList.length} variantes`,'success');
 }
 
@@ -1642,17 +1662,18 @@ function crRemoveFromGroup(idx) {
   const p=cState.products[idx]; if(!p) return;
   const gid=p.variantGroup;
   p.variantGroup=null; p.variantValue='';
-  // Remove group if empty
   const group=cState.variantGroups.find(g=>g.id===gid);
   if(group){
     group.productIdxs=group.productIdxs.filter(i=>i!==idx);
     if(group.productIdxs.length<2) cState.variantGroups=cState.variantGroups.filter(g=>g.id!==gid);
   }
+  // Só atualiza a célula afetada, sem re-render completo
   const row=document.getElementById('cr-row-'+idx);
-  if(row) {
+  if(row){
     const cell=row.querySelector('td:last-child');
     if(cell) cell.innerHTML='<span style="color:var(--text3);font-size:11px">—</span>';
   }
+  crRenderVariantGroups();
   crUpdateSummary();
 }
 
