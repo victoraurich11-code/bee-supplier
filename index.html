@@ -336,8 +336,9 @@ async function updateVariantStock(inventoryItemId, locationId, newQty) {
       }
     }`,
     { input: {
+        name: 'available',
         reason: 'correction',
-        setQuantities: [{ inventoryItemId, locationId, quantity: newQty }]
+        quantities: [{ inventoryItemId, locationId, quantity: newQty }]
     }}
   );
 }
