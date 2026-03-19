@@ -1758,53 +1758,73 @@ async function crCreate() {
 }
 
 async function crCreateSimple(p, name, price) {
-  const q=`mutation($input:ProductInput!,$media:[CreateMediaInput!]){
+  // Passo 1: Criar produto (sem variants no input — API 2026-01)
+  const qCreate=`mutation($input:ProductInput!,$media:[CreateMediaInput!]){
     productCreate(input:$input,media:$media){
-      product{id variants(first:1){edges{node{inventoryItem{id}}}}}
+      product{id variants(first:1){edges{node{id inventoryItem{id}}}}}
       userErrors{message}
     }
   }`;
   const media=p.imageUrl?[{originalSource:p.imageUrl,mediaContentType:'IMAGE',alt:name}]:undefined;
-  const data=await shopifyGQL(q,{
-    input:{
-      title:name, vendor:p.brand||undefined,
-      productType:p.category||undefined,
-      status:'DRAFT',
-      variants:[{price:String(price), barcode:p.barcode||undefined}]
-    },
+  const data=await shopifyGQL(qCreate,{
+    input:{ title:name, vendor:p.brand||undefined, productType:p.category||undefined, status:'DRAFT' },
     media
   });
   const errs=data.productCreate.userErrors;
   if(errs.length) throw new Error(errs[0].message);
-  const invId=data.productCreate.product?.variants?.edges[0]?.node?.inventoryItem?.id;
+
+  const product=data.productCreate.product;
+  const variantId=product?.variants?.edges[0]?.node?.id;
+  const invId=product?.variants?.edges[0]?.node?.inventoryItem?.id;
+  const productId=product?.id;
+
+  // Passo 2: Atualizar preço e barcode na variante default
+  if(productId&&variantId){
+    await shopifyGQL(
+      `mutation($productId:ID!,$variants:[ProductVariantsBulkInput!]!){productVariantsBulkUpdate(productId:$productId,variants:$variants){userErrors{message}}}`,
+      {productId, variants:[{id:variantId, price:String(price), barcode:p.barcode||undefined}]}
+    );
+  }
+
+  // Passo 3: Atualizar SKU via inventoryItem
   if(invId&&p.sku) await updateVariantSKU(invId, p.sku);
 }
 
 async function crCreateWithVariants(group, members) {
-  // 1. Create product
-  const q=`mutation($input:ProductInput!){
+  // Passo 1: Criar produto base sem variants nem options no input
+  const qCreate=`mutation($input:ProductInput!){
     productCreate(input:$input){
       product{id}
       userErrors{message}
     }
   }`;
   const firstName=members[0];
-  const data=await shopifyGQL(q,{
-    input:{
-      title:group.name,
-      vendor:firstName.brand||undefined,
-      productType:firstName.category||undefined,
-      status:'DRAFT',
-      options:[group.attribute],
-    }
+  const data=await shopifyGQL(qCreate,{
+    input:{ title:group.name, vendor:firstName.brand||undefined, productType:firstName.category||undefined, status:'DRAFT' }
   });
   const errs=data.productCreate.userErrors;
   if(errs.length) throw new Error(errs[0].message);
   const productId=data.productCreate.product?.id;
   if(!productId) throw new Error('Produto não criado');
 
-  // 2. Create variants
-  const variantsMutation=`mutation($productId:ID!,$variants:[ProductVariantsBulkInput!]!,$media:[CreateMediaInput!]){
+  // Passo 2: Criar opção de variante
+  const qOption=`mutation($productId:ID!,$options:[OptionCreateInput!]!){
+    productOptionsCreate(productId:$productId,options:$options){
+      product{id options{id name}}
+      userErrors{message}
+    }
+  }`;
+  const optData=await shopifyGQL(qOption,{
+    productId,
+    options:[{name:group.attribute, values:group.values.map(v=>({name:v}))}]
+  });
+  const optErrs=optData.productOptionsCreate?.userErrors||[];
+  if(optErrs.length) throw new Error(optErrs[0].message);
+
+  await new Promise(r=>setTimeout(r,500)); // aguardar opção criada
+
+  // Passo 3: Criar variantes
+  const qVariants=`mutation($productId:ID!,$variants:[ProductVariantsBulkInput!]!,$media:[CreateMediaInput!]){
     productVariantsBulkCreate(productId:$productId,variants:$variants,media:$media){
       productVariants{id inventoryItem{id}}
       userErrors{message}
@@ -1813,14 +1833,14 @@ async function crCreateWithVariants(group, members) {
   const variants=members.map((m,i)=>({
     price:String(m.price),
     barcode:m.barcode||undefined,
-    optionValues:[{name:m.variantValue||group.values[i]||'Default',optionName:group.attribute}],
+    optionValues:[{name:m.variantValue||group.values[i]||'Default', optionName:group.attribute}],
     mediaSrc:m.imageUrl?[m.imageUrl]:undefined,
   }));
-  const vData=await shopifyGQL(variantsMutation,{productId, variants});
+  const vData=await shopifyGQL(qVariants,{productId, variants});
   const vErrs=vData.productVariantsBulkCreate?.userErrors||[];
   if(vErrs.length) throw new Error(vErrs[0].message);
 
-  // 3. Update SKUs
+  // Passo 4: Atualizar SKUs
   const created=vData.productVariantsBulkCreate?.productVariants||[];
   for(let i=0;i<created.length;i++){
     const m=members[i];
