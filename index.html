@@ -327,9 +327,19 @@ async function updateVariantPrice(productId, variantId, price) {
     {productId, variants:[{id:variantId, price:String(price)}]});
 }
 
-async function updateVariantStock(inventoryItemId, locationId, delta) {
-  return shopifyGQL(`mutation($input:InventoryAdjustQuantityInput!){inventoryAdjustQuantity(input:$input){inventoryLevel{available}userErrors{message}}}`,
-    {input:{inventoryItemId, locationId, availableDelta:delta}});
+async function updateVariantStock(inventoryItemId, locationId, newQty) {
+  return shopifyGQL(
+    `mutation($input:InventorySetQuantitiesInput!){
+      inventorySetQuantities(input:$input){
+        inventoryAdjustmentGroup{reason}
+        userErrors{message}
+      }
+    }`,
+    { input: {
+        reason: 'correction',
+        setQuantities: [{ inventoryItemId, locationId, quantity: newQty }]
+    }}
+  );
 }
 
 async function updateVariantSKU(inventoryItemId, sku) {
@@ -586,8 +596,13 @@ function handleFile(file) {
   const reader=new FileReader();
   reader.onload=(e)=>{
     const data=new Uint8Array(e.target.result);
-    const wb=XLSX.read(data,{type:'array',raw:false});
+    const wb=XLSX.read(data,{type:'array',raw:false,cellText:true,cellDates:true});
     const ws=wb.Sheets[wb.SheetNames[0]];
+    Object.keys(ws).forEach(addr=>{
+      if(addr[0]==='!') return;
+      const cell=ws[addr];
+      if(cell.t==='n'&&cell.w) cell.v=cell.w.replace(/\./g,'').replace(/,/g,'.')||cell.v;
+    });
     const rows=XLSX.utils.sheet_to_json(ws,{defval:'',raw:false});
     if(!rows.length){toast('Ficheiro sem dados','error');return;}
     state.parsedRows=rows;
@@ -971,8 +986,7 @@ async function applyChanges() {
     try {
       if(applyPrice) await updateVariantPrice(p.shopifyProduct.id, p.shopifyVariant.id, p.finalPrice.toFixed(2));
       if(applyStock&&locationId&&p.shopifyVariant.inventoryItemId){
-        const delta=p.stockVal-(p.shopifyVariant.stock||0);
-        if(delta!==0) await updateVariantStock(p.shopifyVariant.inventoryItemId,locationId,delta);
+        await updateVariantStock(p.shopifyVariant.inventoryItemId, locationId, p.stockVal);
       }
       p.shopifyVariant.price=String(p.finalPrice); p.shopifyVariant.stock=p.stockVal;
       log(`✅ ${p.shopifyTitle.substring(0,50)}${applyPrice?` | €${p.finalPrice.toFixed(2)}`:''}${applyStock?` | stock ${p.stockVal}`:''}`);
@@ -1322,8 +1336,14 @@ function crHandleFile(file) {
   const reader=new FileReader();
   reader.onload=(e)=>{
     const data=new Uint8Array(e.target.result);
-    const wb=XLSX.read(data,{type:'array',raw:false});
+    const wb=XLSX.read(data,{type:'array',raw:false,cellText:true,cellDates:true});
     const ws=wb.Sheets[wb.SheetNames[0]];
+    // Forçar células numéricas a string para evitar notação científica em SKU/EAN
+    Object.keys(ws).forEach(addr=>{
+      if(addr[0]==='!') return;
+      const cell=ws[addr];
+      if(cell.t==='n'&&cell.w) cell.v=cell.w.replace(/\./g,'').replace(/,/g,'.')||cell.v;
+    });
     const rows=XLSX.utils.sheet_to_json(ws,{defval:'',raw:false});
     if(!rows.length){toast('Ficheiro sem dados','error');return;}
     cState.rows=rows;
