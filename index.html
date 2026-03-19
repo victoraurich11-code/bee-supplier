@@ -592,9 +592,15 @@ function save() {
 async function shopifyGQL(query, variables = {}) {
   const { shop, token, apiVersion } = state.settings;
   if (!shop || !token) throw new Error('Configura a loja nas Configurações primeiro.');
-  const resp = await fetch(`https://${shop}/admin/api/${apiVersion}/graphql.json`, {
+  const PROXY = 'https://shopify-proxy.victoraurich11.workers.dev';
+  const resp = await fetch(PROXY, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Shopify-Shop': shop,
+      'X-Shopify-Token': token,
+      'X-Shopify-Version': apiVersion,
+    },
     body: JSON.stringify({ query, variables }),
   });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
