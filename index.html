@@ -215,6 +215,7 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--blue); cur
       <div class="nav-item" onclick="navigate('alerts')" id="nav-alerts"><span class="icon">🔔</span> Alertas <span class="nav-badge" id="alert-badge" style="display:none">0</span></div>
       <div class="nav-item" onclick="navigate('orphans')" id="nav-orphans"><span class="icon">⚠</span> Sem Atualizações <span class="nav-badge" id="orphan-badge" style="display:none">0</span></div>
       <div class="nav-item" onclick="navigate('matching')" id="nav-matching"><span class="icon">🔗</span> Matching</div>
+      <div class="nav-item" onclick="navigate('create')" id="nav-create"><span class="icon">✚</span> Criar Produtos</div>
       <div class="nav-item" onclick="navigate('settings')" id="nav-settings"><span class="icon">⚙</span> Configurações</div>
     </nav>
     <div class="sidebar-footer">
@@ -353,13 +354,13 @@ function navigate(page) {
   state.page=page;
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   document.getElementById('nav-'+page)?.classList.add('active');
-  const titles={dashboard:'Dashboard',suppliers:'Fornecedores',upload:'Processar Ficheiro',alerts:'Alertas',orphans:'Produtos Sem Atualizações',matching:'Matching Inteligente',settings:'Configurações'};
+  const titles={dashboard:'Dashboard',suppliers:'Fornecedores',upload:'Processar Ficheiro',alerts:'Alertas',orphans:'Produtos Sem Atualizações',matching:'Matching Inteligente',create:'Criar Produtos',settings:'Configurações'};
   document.getElementById('page-title').textContent=titles[page]||page;
   render();
 }
 
 function render() {
-  ({dashboard,suppliers,upload,alerts,orphans,matching,settings})[state.page]?.();
+  ({dashboard,suppliers,upload,alerts,orphans,matching,create,settings})[state.page]?.();
   updateBadges();
 }
 
@@ -741,39 +742,51 @@ function renderAnalysis(found,notFound,isNew,supp) {
     ${found.length>0?`
     <div class="review-section rs-found" style="margin-bottom:16px">
       <div class="review-section-title">
-        ✅ ${found.length} Produtos Encontrados — seleciona o que queres atualizar
-        <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="toggleAllFound(true)">Selecionar todos</button>
-        <button class="btn btn-ghost btn-sm" onclick="toggleAllFound(false)">Limpar</button>
+        ✅ ${found.length} Produtos Encontrados
+        <!-- CONTROLO GLOBAL -->
+        <div style="margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <span style="font-size:11px;color:var(--text2);font-family:'DM Mono',monospace">Aplicar a todos:</span>
+          <button class="btn btn-ghost btn-sm" onclick="setAllMode('both')" id="mode-both" style="border-color:var(--blue);color:var(--blue)">Preço + Stock</button>
+          <button class="btn btn-ghost btn-sm" onclick="setAllMode('price')" id="mode-price">Só Preço</button>
+          <button class="btn btn-ghost btn-sm" onclick="setAllMode('stock')" id="mode-stock">Só Stock</button>
+          <button class="btn btn-ghost btn-sm" onclick="toggleAllFound(false)" style="color:var(--text3)">Limpar seleção</button>
+        </div>
       </div>
-      <div class="table-wrap" style="max-height:380px;overflow-y:auto">
+      <div class="table-wrap" style="max-height:420px;overflow-y:auto">
         <table>
           <thead><tr>
             <th style="width:36px"><input type="checkbox" id="chk-all-found" onchange="toggleAllFound(this.checked)" checked></th>
-            <th>Produto Shopify</th><th>SKU / Barcode</th>
-            <th>Preço Atual → Novo</th><th>Stock Atual → Novo</th>
-            <th>Match via</th>
-            <th style="text-align:center">Preço</th>
-            <th style="text-align:center">Stock</th>
+            <th>Produto Shopify</th>
+            <th>SKU / Barcode</th>
+            <th>Preço Atual → Novo</th>
+            <th>Stock Atual → Novo</th>
+            <th>Via</th>
+            <th style="text-align:center;width:52px">💶 Preço</th>
+            <th style="text-align:center;width:52px">📦 Stock</th>
           </tr></thead>
           <tbody id="found-tbody">
             ${found.map((p,i)=>{
-              const priceChanged=parseFloat(p.currentPrice)!==p.finalPrice;
+              const priceChanged=parseFloat(p.currentPrice||0).toFixed(2)!==p.finalPrice.toFixed(2);
               const stockChanged=p.currentStock!==p.stockVal;
               return `<tr id="found-row-${i}">
                 <td><input type="checkbox" class="chk-found" data-idx="${i}" checked onchange="updateFoundRow(${i},this.checked)"></td>
-                <td style="font-weight:600;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.shopifyTitle}">${p.shopifyTitle}</td>
-                <td class="mono" style="font-size:11px">${p.sku||'—'}<br><span style="color:var(--text3)">${p.barcode||''}</span></td>
-                <td class="mono" style="font-size:12px">
-                  <span style="color:var(--text2)">€${parseFloat(p.currentPrice||0).toFixed(2)}</span>
-                  ${priceChanged?`→ <strong style="color:var(--green)">€${p.finalPrice.toFixed(2)}</strong>`:'<span style="color:var(--text3)"> (igual)</span>'}
+                <td style="font-weight:600;max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.shopifyTitle}">${p.shopifyTitle}</td>
+                <td class="mono" style="font-size:11px;color:var(--text2)">${p.sku||'—'}${p.barcode?`<br>${p.barcode}`:''}</td>
+                <td style="font-size:12px;white-space:nowrap">
+                  <span class="mono" style="color:var(--text2)">€${parseFloat(p.currentPrice||0).toFixed(2)}</span>
+                  ${priceChanged?`<span style="color:var(--text3)"> → </span>
+                  <span class="price-display-${i} mono" style="color:var(--green);font-weight:600">€${p.finalPrice.toFixed(2)}</span>
+                  <button onclick="editPrice(${i})" style="background:none;border:none;cursor:pointer;padding:2px 4px;color:var(--text3);font-size:13px;vertical-align:middle" title="Editar preço">✏</button>`
+                  :'<span style="color:var(--text3);font-size:11px"> (igual)</span>'}
                 </td>
-                <td class="mono" style="font-size:12px">
+                <td class="mono" style="font-size:12px;white-space:nowrap">
                   <span style="color:var(--text2)">${p.currentStock??'?'}</span>
-                  ${stockChanged?`→ <strong style="color:var(--blue)">${p.stockVal}</strong>`:'<span style="color:var(--text3)"> (igual)</span>'}
+                  ${stockChanged?`<span style="color:var(--text3)"> → </span><strong style="color:var(--blue)">${p.stockVal}</strong>`
+                  :'<span style="color:var(--text3);font-size:11px"> (igual)</span>'}
                 </td>
-                <td><span class="badge ${p.matchedBy==='SKU'?'badge-blue':'badge-orange'}">${p.matchedBy}</span></td>
-                <td style="text-align:center"><input type="checkbox" class="chk-price" data-idx="${i}" ${p.applyPrice&&priceChanged?'checked':''} ${!priceChanged?'disabled':''} onchange="state.analysisResult.found[${i}].applyPrice=this.checked"></td>
-                <td style="text-align:center"><input type="checkbox" class="chk-stock" data-idx="${i}" ${p.applyStock&&stockChanged?'checked':''} ${!stockChanged?'disabled':''} onchange="state.analysisResult.found[${i}].applyStock=this.checked"></td>
+                <td><span class="badge ${p.matchedBy==='SKU'?'badge-blue':'badge-orange'}" style="font-size:10px">${p.matchedBy}</span></td>
+                <td style="text-align:center"><input type="checkbox" class="chk-price" data-idx="${i}" ${priceChanged?'checked':''} ${!priceChanged?'disabled title="Preço igual"':''} onchange="state.analysisResult.found[${i}].applyPrice=this.checked;updateApplySummary()"></td>
+                <td style="text-align:center"><input type="checkbox" class="chk-stock" data-idx="${i}" ${stockChanged?'checked':''} ${!stockChanged?'disabled title="Stock igual"':''} onchange="state.analysisResult.found[${i}].applyStock=this.checked;updateApplySummary()"></td>
               </tr>`;
             }).join('')}
           </tbody>
@@ -785,7 +798,7 @@ function renderAnalysis(found,notFound,isNew,supp) {
     <!-- NOVOS PRODUTOS -->
     ${isNew.length>0?`
     <div class="review-section rs-new" style="margin-bottom:16px">
-      <div class="review-section-title">🆕 ${isNew.length} Produtos Novos — serão adicionados aos Alertas</div>
+      <div class="review-section-title">🆕 ${isNew.length} Produto(s) Novo(s) — serão adicionados aos Alertas</div>
       <div class="table-wrap" style="max-height:200px;overflow-y:auto">
         <table><thead><tr><th>Nome</th><th>SKU</th><th>Barcode</th><th>Preço</th><th>Stock</th></tr></thead>
         <tbody>${isNew.map(p=>`<tr>
@@ -800,7 +813,7 @@ function renderAnalysis(found,notFound,isNew,supp) {
     <!-- NAO ENCONTRADOS -->
     ${notFound.length>0?`
     <div class="review-section rs-missing" style="margin-bottom:16px">
-      <div class="review-section-title">❓ ${notFound.length} Não Encontrados — usar Matching para identificar</div>
+      <div class="review-section-title">❓ ${notFound.length} Não Encontrados — usa Matching para identificar</div>
       <div class="table-wrap" style="max-height:200px;overflow-y:auto">
         <table><thead><tr><th>Nome</th><th>SKU</th><th>Barcode</th></tr></thead>
         <tbody>${notFound.map(p=>`<tr>
@@ -811,34 +824,105 @@ function renderAnalysis(found,notFound,isNew,supp) {
     </div>`:''
     }
 
-    <!-- BOTÃO APLICAR -->
-    <div class="card" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+    <!-- PAINEL APLICAR -->
+    <div class="card" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;position:sticky;bottom:0;z-index:10">
       <div style="flex:1">
-        <div style="font-weight:600;font-size:14px" id="apply-summary">A calcular...</div>
-        <div style="font-size:12px;color:var(--text2);margin-top:3px">Revê as seleções acima antes de aplicar</div>
+        <div style="font-weight:600;font-size:14px;color:var(--text)" id="apply-summary">A calcular...</div>
+        <div style="font-size:12px;color:var(--text2);margin-top:2px">Revê as seleções antes de aplicar</div>
       </div>
-      <button class="btn btn-ghost" onclick="resetUpload()">Recomeçar</button>
-      <button class="btn btn-primary" onclick="applyChanges()" id="btn-apply">Aplicar no Shopify</button>
+      <button class="btn btn-ghost" onclick="resetUpload()">↩ Recomeçar</button>
+      <button class="btn btn-primary" onclick="applyChanges()">✓ Aplicar no Shopify</button>
     </div>`;
 
   updateApplySummary();
 }
 
+// Controlo global: só preço / só stock / ambos
+function setAllMode(mode) {
+  // Highlight botão ativo
+  ['both','price','stock'].forEach(m=>{
+    const b=document.getElementById('mode-'+m);
+    if(b){b.style.borderColor='';b.style.color='';}
+  });
+  const active=document.getElementById('mode-'+mode);
+  if(active){active.style.borderColor='var(--blue)';active.style.color='var(--blue)';active.style.background='var(--blue-bg)';}
+
+  document.querySelectorAll('.chk-found').forEach(c=>{c.checked=true;});
+  document.querySelectorAll('.chk-price').forEach(c=>{
+    if(!c.disabled) c.checked=(mode==='both'||mode==='price');
+  });
+  document.querySelectorAll('.chk-stock').forEach(c=>{
+    if(!c.disabled) c.checked=(mode==='both'||mode==='stock');
+  });
+  const chkAll=document.getElementById('chk-all-found');
+  if(chkAll) chkAll.checked=true;
+  updateApplySummary();
+}
+
+// Editar preço manualmente com lápis
+function editPrice(idx) {
+  const p=state.analysisResult?.found[idx];
+  if(!p) return;
+  const currentVal=p.finalPrice.toFixed(2);
+  const displayEl=document.querySelector(`.price-display-${idx}`);
+  if(!displayEl) return;
+
+  // Substituir display por input inline
+  const parent=displayEl.parentElement;
+  const editBtn=parent.querySelector('button');
+  displayEl.style.display='none';
+  if(editBtn) editBtn.style.display='none';
+
+  const input=document.createElement('input');
+  input.type='number'; input.step='0.01'; input.min='0';
+  input.value=currentVal;
+  input.style.cssText='width:80px;padding:3px 6px;font-family:"DM Mono",monospace;font-size:12px;border:1px solid var(--blue);border-radius:5px;color:var(--text);background:var(--surface);outline:none;';
+
+  const confirmBtn=document.createElement('button');
+  confirmBtn.textContent='✓';
+  confirmBtn.style.cssText='background:var(--green);color:white;border:none;border-radius:5px;padding:3px 7px;cursor:pointer;font-size:12px;margin-left:4px;';
+
+  const cancelBtn=document.createElement('button');
+  cancelBtn.textContent='✕';
+  cancelBtn.style.cssText='background:var(--panel);color:var(--text2);border:1px solid var(--border);border-radius:5px;padding:3px 7px;cursor:pointer;font-size:12px;margin-left:3px;';
+
+  const save=()=>{
+    const newVal=parseFloat(input.value);
+    if(isNaN(newVal)||newVal<=0){toast('Preço inválido','error');return;}
+    p.finalPrice=newVal;
+    displayEl.textContent='€'+newVal.toFixed(2); displayEl.style.display='';
+    if(editBtn) editBtn.style.display='';
+    input.remove(); confirmBtn.remove(); cancelBtn.remove();
+    // Activar checkbox de preço
+    const priceChk=document.querySelector(`.chk-price[data-idx="${idx}"]`);
+    if(priceChk){priceChk.disabled=false;priceChk.checked=true;}
+    updateApplySummary();
+    toast('Preço atualizado','success');
+  };
+
+  const cancel=()=>{
+    displayEl.style.display=''; if(editBtn) editBtn.style.display='';
+    input.remove(); confirmBtn.remove(); cancelBtn.remove();
+  };
+
+  confirmBtn.onclick=save;
+  cancelBtn.onclick=cancel;
+  input.onkeydown=(e)=>{if(e.key==='Enter')save();if(e.key==='Escape')cancel();};
+
+  parent.appendChild(input); parent.appendChild(confirmBtn); parent.appendChild(cancelBtn);
+  input.focus(); input.select();
+}
+
 function toggleAllFound(checked) {
   document.querySelectorAll('.chk-found').forEach(c=>{c.checked=checked;});
-  document.querySelectorAll('.chk-price').forEach((c,i)=>{if(!c.disabled)c.checked=checked;});
-  document.querySelectorAll('.chk-stock').forEach((c,i)=>{if(!c.disabled)c.checked=checked;});
+  document.querySelectorAll('.chk-price').forEach(c=>{if(!c.disabled)c.checked=checked;});
+  document.querySelectorAll('.chk-stock').forEach(c=>{if(!c.disabled)c.checked=checked;});
   const chkAll=document.getElementById('chk-all-found');
   if(chkAll) chkAll.checked=checked;
-  if(state.analysisResult) {
-    state.analysisResult.found.forEach(p=>{p._selected=checked;p.applyPrice=checked;p.applyStock=checked;});
-  }
   updateApplySummary();
 }
 
 function updateFoundRow(idx, checked) {
-  const p=state.analysisResult?.found[idx];
-  if(p){p._selected=checked;p.applyPrice=checked;p.applyStock=checked;}
   const priceChk=document.querySelector(`.chk-price[data-idx="${idx}"]`);
   const stockChk=document.querySelector(`.chk-stock[data-idx="${idx}"]`);
   if(priceChk&&!priceChk.disabled) priceChk.checked=checked;
@@ -852,7 +936,7 @@ function updateApplySummary() {
   const selected=document.querySelectorAll('.chk-found:checked').length;
   const priceUpdates=document.querySelectorAll('.chk-price:checked:not(:disabled)').length;
   const stockUpdates=document.querySelectorAll('.chk-stock:checked:not(:disabled)').length;
-  el.textContent=`${selected} produto(s) selecionado(s) — ${priceUpdates} preços + ${stockUpdates} stocks a atualizar`;
+  el.textContent=`${selected} produto(s) selecionado(s) — ${priceUpdates} preço(s) + ${stockUpdates} stock(s) a atualizar`;
 }
 
 async function applyChanges() {
@@ -1168,6 +1252,567 @@ async function acceptMatch(id) {
 function rejectMatch(id) {
   state.matches=state.matches.map(m=>m.id===id?{...m,dismissed:true}:m);
   save(); document.getElementById('match-'+id)?.remove();
+}
+
+// ═══════════════════════════════════════════
+// CRIAR PRODUTOS
+// ═══════════════════════════════════════════
+// Estado do módulo de criação
+let cState = {
+  rows: [],           // linhas do CSV
+  colMap: {},         // mapeamento de colunas
+  products: [],       // produtos processados com tradução
+  variantGroups: [],  // grupos de variantes definidos manualmente
+  step: 'upload',     // upload | mapping | review | progress
+};
+
+function create() {
+  document.getElementById('topbar-actions').innerHTML='';
+  document.getElementById('content').innerHTML=`
+    <div style="max-width:760px">
+
+      <!-- PASSO 1: Upload -->
+      <div class="card" id="cr-step-upload" style="margin-bottom:16px">
+        <div class="card-title">1 — Carregar Ficheiro</div>
+        <div class="upload-zone" onclick="document.getElementById('cr-file').click()"
+          ondragover="event.preventDefault();this.classList.add('drag')"
+          ondragleave="this.classList.remove('drag')"
+          ondrop="crHandleDrop(event)">
+          <div class="up-icon">📦</div>
+          <p><strong>Clica para selecionar</strong> ou arrasta aqui</p>
+          <p style="font-size:12px;color:var(--text3);margin-top:4px">.xls, .xlsx, .csv — CSV do fornecedor espanhol</p>
+        </div>
+        <input type="file" id="cr-file" accept=".xls,.xlsx,.csv" style="display:none" onchange="crHandleFile(this.files[0])">
+        <div id="cr-file-info" style="display:none;margin-top:10px"></div>
+      </div>
+
+      <!-- PASSO 2: Mapeamento -->
+      <div class="card" id="cr-step-mapping" style="display:none;margin-bottom:16px">
+        <div class="card-title">2 — Mapear Colunas</div>
+        <p style="font-size:12px;color:var(--text2);margin-bottom:14px">Indica qual coluna do ficheiro corresponde a cada campo.</p>
+        <div id="cr-col-mapper"></div>
+        <div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end">
+          <button class="btn btn-ghost" onclick="crReset()">↩ Cancelar</button>
+          <button class="btn btn-primary" onclick="crRunReview()">Ver Produtos →</button>
+        </div>
+      </div>
+
+      <!-- PASSO 3: Revisão e seleção -->
+      <div id="cr-step-review" style="display:none"></div>
+
+      <!-- PASSO 4: Progresso -->
+      <div id="cr-step-progress" style="display:none">
+        <div class="card">
+          <div class="card-title">A criar produtos no Shopify...</div>
+          <div id="cr-log" style="font-family:'DM Mono',monospace;font-size:12px;color:var(--text2);line-height:1.9;max-height:260px;overflow-y:auto"></div>
+          <div class="progress-bar" style="margin-top:12px"><div class="progress-fill" id="cr-progress" style="width:0%"></div></div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function crHandleDrop(e) {
+  e.preventDefault();
+  document.querySelector('.upload-zone')?.classList.remove('drag');
+  crHandleFile(e.dataTransfer.files[0]);
+}
+
+function crHandleFile(file) {
+  if(!file) return;
+  const reader=new FileReader();
+  reader.onload=(e)=>{
+    const data=new Uint8Array(e.target.result);
+    const wb=XLSX.read(data,{type:'array',raw:false});
+    const ws=wb.Sheets[wb.SheetNames[0]];
+    const rows=XLSX.utils.sheet_to_json(ws,{defval:'',raw:false});
+    if(!rows.length){toast('Ficheiro sem dados','error');return;}
+    cState.rows=rows;
+    crShowColMapper(rows);
+  };
+  reader.readAsArrayBuffer(file);
+  document.getElementById('cr-file-info').style.display='block';
+  document.getElementById('cr-file-info').innerHTML=`
+    <div style="display:flex;align-items:center;gap:10px;background:var(--panel);padding:9px 12px;border-radius:8px;border:1px solid var(--border)">
+      <span>📄</span><span style="font-weight:600">${file.name}</span>
+      <span style="color:var(--text2);font-size:12px">${(file.size/1024).toFixed(0)} KB</span>
+    </div>`;
+}
+
+function crShowColMapper(rows) {
+  const headers=Object.keys(rows[0]);
+  const detect=(hints)=>headers.find(h=>hints.some(hint=>h.toLowerCase().includes(hint.toLowerCase())))||'';
+  cState.colMap={
+    name:   detect(['Articulo','Nombre','Name','Title','Descripcion','Modelo']),
+    sku:    detect(['Part Number','SKU','Referencia','Codigo 3','Modelo']),
+    barcode:detect(['Codigo 5','EAN','Barcode','Codigo 4']),
+    price:  detect(['PVP','Precio','Price','Custo','Cost','Importe']),
+    stock:  detect(['Stock','Unidades','Existencias','Cantidad']),
+    image:  detect(['Imagen','Image','Foto','Photo','URL','Img']),
+    brand:  detect(['Fabricante','Marca','Brand','Vendor','Proveedor']),
+    category:detect(['Familia','Category','Categoria','Tipo','Grupo']),
+  };
+
+  const sel=(key,label)=>`
+    <div class="form-group">
+      <label>${label}</label>
+      <select id="crcol-${key}" onchange="cState.colMap['${key}']=this.value">
+        <option value="">— Não usar —</option>
+        ${headers.map(h=>`<option value="${h}" ${cState.colMap[key]===h?'selected':''}>${h}</option>`).join('')}
+      </select>
+    </div>`;
+
+  document.getElementById('cr-col-mapper').innerHTML=`
+    <div class="col-mapper">
+      ${sel('name','Nome / Artigo *')}
+      ${sel('sku','SKU / Part Number')}
+      ${sel('barcode','Barcode / EAN')}
+      ${sel('price','Preço')}
+      ${sel('stock','Stock')}
+      ${sel('image','URL Imagem')}
+      ${sel('brand','Fabricante / Marca')}
+      ${sel('category','Categoria / Família')}
+    </div>
+    <div style="margin-top:14px;background:var(--panel);border-radius:8px;padding:10px 14px;border:1px solid var(--border)">
+      <div style="font-size:11px;color:var(--text2);margin-bottom:8px">Pré-visualização (3 linhas)</div>
+      <div style="overflow-x:auto">
+        <table style="width:100%;font-size:11px">
+          <thead><tr><th>Nome</th><th>SKU</th><th>Preço</th><th>Stock</th><th>Imagem</th></tr></thead>
+          <tbody>${rows.slice(0,3).map(r=>`<tr>
+            <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r[cState.colMap.name]||'—'}</td>
+            <td class="mono">${r[cState.colMap.sku]||'—'}</td>
+            <td class="mono">${r[cState.colMap.price]||'—'}</td>
+            <td class="mono">${r[cState.colMap.stock]||'—'}</td>
+            <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--blue);font-size:10px">${r[cState.colMap.image]||'—'}</td>
+          </tr>`).join('')}</tbody>
+        </table>
+      </div>
+    </div>`;
+
+  document.getElementById('cr-step-mapping').style.display='block';
+}
+
+async function crRunReview() {
+  // Sync colMap from selects
+  ['name','sku','barcode','price','stock','image','brand','category'].forEach(k=>{
+    const el=document.getElementById('crcol-'+k); if(el) cState.colMap[k]=el.value;
+  });
+  if(!cState.colMap.name){toast('Coluna de nome obrigatória','error');return;}
+
+  const btn=document.querySelector('#cr-step-mapping .btn-primary');
+  btn.textContent='A traduzir...'; btn.disabled=true;
+
+  // Build products from rows
+  const products=cState.rows.map((row,i)=>{
+    const nameES=(row[cState.colMap.name]||'').trim();
+    const price=parseFloat((row[cState.colMap.price]||'0').replace(',','.'))||0;
+    return {
+      _idx:i,
+      nameES,
+      namePT:'',           // filled by translation
+      sku:(row[cState.colMap.sku]||'').trim(),
+      barcode:(row[cState.colMap.barcode]||'').trim(),
+      price:price.toFixed(2),
+      stock:parseInt((row[cState.colMap.stock]||'0').replace(/[^0-9]/g,''))||0,
+      imageUrl:(row[cState.colMap.image]||'').trim(),
+      brand:(row[cState.colMap.brand]||'').trim(),
+      category:(row[cState.colMap.category]||'').trim(),
+      selected:true,
+      variantGroup:null,   // id do grupo se for variante
+    };
+  }).filter(p=>p.nameES);
+
+  // Translate in batches of 20 via MyMemory API
+  const BATCH=20;
+  for(let i=0;i<products.length;i+=BATCH){
+    const batch=products.slice(i,i+BATCH);
+    await Promise.all(batch.map(async p=>{
+      try{
+        const r=await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(p.nameES)}&langpair=es|pt-pt`);
+        const j=await r.json();
+        p.namePT=j?.responseData?.translatedText||p.nameES;
+        // Clean up: if translation looks weird, keep original
+        if(p.namePT.toUpperCase()===p.namePT||p.namePT.length<2) p.namePT=p.nameES;
+      }catch{p.namePT=p.nameES;}
+    }));
+    btn.textContent=`A traduzir... ${Math.min(i+BATCH,products.length)}/${products.length}`;
+    await new Promise(r=>setTimeout(r,300)); // rate limit MyMemory
+  }
+
+  cState.products=products;
+  cState.variantGroups=[];
+  crRenderReview();
+  btn.textContent='Ver Produtos →'; btn.disabled=false;
+}
+
+function crRenderReview() {
+  const el=document.getElementById('cr-step-review');
+  el.style.display='block';
+  document.getElementById('cr-step-mapping').style.display='none';
+
+  const products=cState.products;
+  const brands=[...new Set(products.map(p=>p.brand).filter(Boolean))].sort();
+  const cats=[...new Set(products.map(p=>p.category).filter(Boolean))].sort();
+  const selected=products.filter(p=>p.selected).length;
+  const grouped=products.filter(p=>p.variantGroup).length;
+
+  el.innerHTML=`
+    <!-- FILTROS -->
+    <div class="card" style="margin-bottom:14px;padding:14px 18px">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <input type="text" id="cr-search" placeholder="Pesquisar nome / SKU..." style="width:200px;padding:7px 10px;font-size:13px" oninput="crFilterTable()">
+        <select id="cr-filter-brand" onchange="crFilterTable()" style="font-size:13px;padding:7px 10px">
+          <option value="">Todas as marcas</option>
+          ${brands.map(b=>`<option value="${b}">${b}</option>`).join('')}
+        </select>
+        <select id="cr-filter-cat" onchange="crFilterTable()" style="font-size:13px;padding:7px 10px">
+          <option value="">Todas as categorias</option>
+          ${cats.map(c=>`<option value="${c}">${c}</option>`).join('')}
+        </select>
+        <div style="margin-left:auto;display:flex;gap:6px">
+          <button class="btn btn-ghost btn-sm" onclick="crSelectAll(true)">Selecionar todos</button>
+          <button class="btn btn-ghost btn-sm" onclick="crSelectAll(false)">Limpar</button>
+          <button class="btn btn-blue btn-sm" onclick="crGroupVariants()" id="btn-group-variants">🔗 Agrupar como Variantes</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- TABELA -->
+    <div class="table-wrap" style="margin-bottom:14px">
+      <div style="max-height:460px;overflow-y:auto">
+        <table id="cr-table">
+          <thead>
+            <tr>
+              <th style="width:36px"><input type="checkbox" id="cr-chk-all" onchange="crSelectAll(this.checked)" checked></th>
+              <th style="width:60px">Img</th>
+              <th>Nome ES (original)</th>
+              <th>Nome PT <span style="color:var(--blue);font-weight:400;font-size:10px">editável</span></th>
+              <th>SKU</th>
+              <th>Preço</th>
+              <th>Stock</th>
+              <th>Marca</th>
+              <th>Variante</th>
+            </tr>
+          </thead>
+          <tbody id="cr-tbody">
+            ${products.map((p,i)=>crProductRow(p,i)).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- GRUPOS DE VARIANTES -->
+    <div id="cr-variant-groups" style="${cState.variantGroups.length>0?'':'display:none'};margin-bottom:14px"></div>
+
+    <!-- PAINEL CRIAR -->
+    <div class="card" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;position:sticky;bottom:0;z-index:10">
+      <div style="flex:1">
+        <div style="font-weight:600;font-size:14px" id="cr-summary">${selected} produto(s) selecionado(s)</div>
+        <div style="font-size:12px;color:var(--text2);margin-top:2px">Todos criados como Rascunho no Shopify</div>
+      </div>
+      <button class="btn btn-ghost" onclick="crReset()">↩ Recomeçar</button>
+      <button class="btn btn-primary" onclick="crCreate()">✚ Criar no Shopify</button>
+    </div>`;
+
+  crRenderVariantGroups();
+}
+
+function crProductRow(p,i) {
+  const group=cState.variantGroups.find(g=>g.id===p.variantGroup);
+  return `<tr id="cr-row-${i}" style="${!p.selected?'opacity:0.45':''}">
+    <td><input type="checkbox" class="cr-chk" data-idx="${i}" ${p.selected?'checked':''} onchange="crToggle(${i},this.checked)"></td>
+    <td>
+      ${p.imageUrl?`<img src="${p.imageUrl}" style="width:44px;height:44px;object-fit:contain;border-radius:6px;border:1px solid var(--border);background:white" onerror="this.style.display='none'">`:'<div style="width:44px;height:44px;background:var(--panel);border-radius:6px;display:flex;align-items:center;justify-content:center;color:var(--text3);font-size:18px">?</div>'}
+    </td>
+    <td style="font-size:12px;color:var(--text2);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.nameES}">${p.nameES}</td>
+    <td style="min-width:180px">
+      <div style="display:flex;align-items:center;gap:6px">
+        <input type="text" value="${p.namePT}" id="cr-name-${i}"
+          style="flex:1;padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:var(--surface)"
+          onchange="cState.products[${i}].namePT=this.value">
+      </div>
+    </td>
+    <td class="mono" style="font-size:11px;color:var(--text2)">${p.sku||'—'}</td>
+    <td class="mono" style="font-size:12px">
+      <input type="number" value="${p.price}" step="0.01" min="0"
+        style="width:72px;padding:4px 6px;font-size:12px;border:1px solid var(--border);border-radius:6px;font-family:'DM Mono',monospace;background:var(--surface)"
+        onchange="cState.products[${i}].price=parseFloat(this.value).toFixed(2)">
+    </td>
+    <td class="mono" style="font-size:12px">${p.stock}</td>
+    <td style="font-size:12px;color:var(--text2)">${p.brand||'—'}</td>
+    <td>
+      ${group?`<span class="badge badge-blue" style="font-size:10px" title="${group.attribute}">🔗 ${group.name}</span>
+               <button onclick="crRemoveFromGroup(${i})" style="background:none;border:none;cursor:pointer;color:var(--text3);font-size:11px;padding:0 3px">✕</button>`
+             :'<span style="color:var(--text3);font-size:11px">—</span>'}
+    </td>
+  </tr>`;
+}
+
+function crFilterTable() {
+  const search=(document.getElementById('cr-search')?.value||'').toLowerCase();
+  const brand=document.getElementById('cr-filter-brand')?.value||'';
+  const cat=document.getElementById('cr-filter-cat')?.value||'';
+  cState.products.forEach((p,i)=>{
+    const row=document.getElementById('cr-row-'+i);
+    if(!row) return;
+    const visible=
+      (!search||(p.namePT+p.nameES+p.sku).toLowerCase().includes(search))&&
+      (!brand||p.brand===brand)&&
+      (!cat||p.category===cat);
+    row.style.display=visible?'':'none';
+  });
+}
+
+function crToggle(idx, checked) {
+  cState.products[idx].selected=checked;
+  const row=document.getElementById('cr-row-'+idx);
+  if(row) row.style.opacity=checked?'1':'0.45';
+  crUpdateSummary();
+}
+
+function crSelectAll(checked) {
+  cState.products.forEach((p,i)=>{p.selected=checked;crToggle(i,checked);});
+  const ca=document.getElementById('cr-chk-all'); if(ca) ca.checked=checked;
+  crUpdateSummary();
+}
+
+function crUpdateSummary() {
+  const el=document.getElementById('cr-summary');
+  if(!el) return;
+  const sel=cState.products.filter(p=>p.selected).length;
+  const grp=cState.variantGroups.length;
+  el.textContent=`${sel} produto(s) selecionado(s)${grp>0?' · '+grp+' grupo(s) de variantes':''}`;
+}
+
+// Agrupar linhas selecionadas como variantes de um produto
+function crGroupVariants() {
+  const selected=cState.products.filter((p,i)=>document.querySelector(`.cr-chk[data-idx="${i}"]`)?.checked&&p.selected);
+  if(selected.length<2){toast('Seleciona pelo menos 2 produtos para agrupar','error');return;}
+
+  // Modal para definir nome do grupo e atributo
+  document.getElementById('modal-content').innerHTML=`
+    <div class="modal-title">🔗 Agrupar como Variantes</div>
+    <p style="font-size:13px;color:var(--text2);margin-bottom:16px">${selected.length} produto(s) selecionado(s) serão combinados num único produto com variantes.</p>
+    <div class="form-grid">
+      <div class="form-group">
+        <label>Nome do Produto (PT)</label>
+        <input type="text" id="vg-name" placeholder="ex: iPhone 15" value="${selected[0]?.namePT?.split('/')[0]?.trim()||''}">
+      </div>
+      <div class="form-group">
+        <label>Atributo de Variante</label>
+        <select id="vg-attr">
+          <option value="Cor">Cor</option>
+          <option value="Capacidade">Capacidade</option>
+          <option value="Tamanho">Tamanho</option>
+          <option value="Versão">Versão</option>
+          <option value="Outro">Outro</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Valores das variantes (um por linha)</label>
+        <textarea id="vg-values" rows="4" placeholder="Preto&#10;Branco&#10;Azul" style="resize:vertical">${selected.map(p=>p.namePT.split('/').pop()?.trim()||p.namePT).join('\n')}</textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary" onclick="crSaveVariantGroup(${JSON.stringify(selected.map(p=>p._idx))})">Criar Grupo</button>
+    </div>`;
+  openModal();
+}
+
+function crSaveVariantGroup(idxList) {
+  const name=document.getElementById('vg-name')?.value.trim();
+  const attribute=document.getElementById('vg-attr')?.value;
+  const valuesRaw=document.getElementById('vg-values')?.value||'';
+  if(!name){toast('Nome obrigatório','error');return;}
+  const values=valuesRaw.split('\n').map(v=>v.trim()).filter(Boolean);
+  const groupId='vg_'+Date.now();
+  cState.variantGroups.push({id:groupId, name, attribute, values, productIdxs:idxList});
+  idxList.forEach((idx,i)=>{
+    if(cState.products[idx]){
+      cState.products[idx].variantGroup=groupId;
+      cState.products[idx].variantValue=values[i]||values[0]||'';
+    }
+  });
+  closeModal();
+  crRenderReview(); // re-render
+  toast(`Grupo "${name}" criado com ${idxList.length} variantes`,'success');
+}
+
+function crRemoveFromGroup(idx) {
+  const p=cState.products[idx]; if(!p) return;
+  const gid=p.variantGroup;
+  p.variantGroup=null; p.variantValue='';
+  // Remove group if empty
+  const group=cState.variantGroups.find(g=>g.id===gid);
+  if(group){
+    group.productIdxs=group.productIdxs.filter(i=>i!==idx);
+    if(group.productIdxs.length<2) cState.variantGroups=cState.variantGroups.filter(g=>g.id!==gid);
+  }
+  const row=document.getElementById('cr-row-'+idx);
+  if(row) {
+    const cell=row.querySelector('td:last-child');
+    if(cell) cell.innerHTML='<span style="color:var(--text3);font-size:11px">—</span>';
+  }
+  crUpdateSummary();
+}
+
+function crRenderVariantGroups() {
+  const el=document.getElementById('cr-variant-groups');
+  if(!el) return;
+  if(cState.variantGroups.length===0){el.style.display='none';return;}
+  el.style.display='block';
+  el.innerHTML=`
+    <div class="card" style="background:var(--blue-bg);border-color:#BFDBFE">
+      <div class="card-title" style="color:var(--blue)">Grupos de Variantes</div>
+      ${cState.variantGroups.map(g=>`
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #BFDBFE">
+          <span style="font-weight:600;font-size:13px">${g.name}</span>
+          <span class="badge badge-blue">${g.attribute}</span>
+          <span style="font-size:12px;color:var(--text2)">${g.values.join(' · ')}</span>
+          <button onclick="cState.variantGroups=cState.variantGroups.filter(x=>x.id!=='${g.id}');cState.products.forEach(p=>{if(p.variantGroup==='${g.id}'){p.variantGroup=null;p.variantValue='';}});crRenderReview()" style="margin-left:auto;background:none;border:none;cursor:pointer;color:var(--red);font-size:13px">✕ Remover</button>
+        </div>`).join('')}
+    </div>`;
+}
+
+async function crCreate() {
+  const toCreate=cState.products.filter(p=>p.selected);
+  if(!toCreate.length){toast('Nenhum produto selecionado','error');return;}
+  if(!state.settings.shop||!state.settings.token){toast('Configura a ligação Shopify primeiro','error');return;}
+
+  document.getElementById('cr-step-review').style.display='none';
+  document.getElementById('cr-step-progress').style.display='block';
+
+  const log=(msg)=>{const el=document.getElementById('cr-log');if(el){el.innerHTML+=msg+'<br>';el.scrollTop=el.scrollHeight;}};
+  const setProg=(p)=>{const el=document.getElementById('cr-progress');if(el)el.style.width=p+'%';};
+  const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+
+  // Separate: grouped variants vs simple products
+  const processedGroups=new Set();
+  const jobs=[];
+
+  toCreate.forEach(p=>{
+    if(p.variantGroup){
+      if(!processedGroups.has(p.variantGroup)){
+        processedGroups.add(p.variantGroup);
+        const group=cState.variantGroups.find(g=>g.id===p.variantGroup);
+        const members=toCreate.filter(x=>x.variantGroup===p.variantGroup);
+        jobs.push({type:'variants', group, members});
+      }
+    } else {
+      jobs.push({type:'simple', product:p});
+    }
+  });
+
+  let created=0, errors=0;
+  log(`🚀 A criar ${jobs.length} produto(s)... (${toCreate.length} linhas total)`);
+
+  for(let i=0;i<jobs.length;i++){
+    const job=jobs[i];
+    try{
+      if(job.type==='simple'){
+        const p=job.product;
+        const name=document.getElementById('cr-name-'+p._idx)?.value||p.namePT||p.nameES;
+        const price=document.getElementById(`cr-row-${p._idx}`)?.querySelector('input[type=number]')?.value||p.price;
+        await crCreateSimple(p, name, price);
+        log(`✅ ${name.substring(0,55)}`);
+        created++;
+      } else {
+        const g=job.group;
+        await crCreateWithVariants(g, job.members);
+        log(`✅ ${g.name} (${job.members.length} variantes: ${g.values.join(', ')})`);
+        created++;
+      }
+    }catch(e){
+      log(`❌ Erro: ${e.message}`);
+      errors++;
+    }
+    setProg(Math.round((i+1)/jobs.length*100));
+    await sleep(400);
+  }
+
+  setProg(100);
+  log(`<br>🎉 <strong>Concluído! ${created} produto(s) criado(s) como Rascunho${errors>0?' · '+errors+' erro(s)':''}</strong>`);
+  toast(`${created} produto(s) criado(s) no Shopify`,'success');
+  fetchShopifyProducts(); // refresh cache
+}
+
+async function crCreateSimple(p, name, price) {
+  const q=`mutation($input:ProductInput!,$media:[CreateMediaInput!]){
+    productCreate(input:$input,media:$media){
+      product{id variants(first:1){edges{node{inventoryItem{id}}}}}
+      userErrors{message}
+    }
+  }`;
+  const media=p.imageUrl?[{originalSource:p.imageUrl,mediaContentType:'IMAGE',alt:name}]:undefined;
+  const data=await shopifyGQL(q,{
+    input:{
+      title:name, vendor:p.brand||undefined,
+      productType:p.category||undefined,
+      status:'DRAFT',
+      variants:[{price:String(price), barcode:p.barcode||undefined}]
+    },
+    media
+  });
+  const errs=data.productCreate.userErrors;
+  if(errs.length) throw new Error(errs[0].message);
+  const invId=data.productCreate.product?.variants?.edges[0]?.node?.inventoryItem?.id;
+  if(invId&&p.sku) await updateVariantSKU(invId, p.sku);
+}
+
+async function crCreateWithVariants(group, members) {
+  // 1. Create product
+  const q=`mutation($input:ProductInput!){
+    productCreate(input:$input){
+      product{id}
+      userErrors{message}
+    }
+  }`;
+  const firstName=members[0];
+  const data=await shopifyGQL(q,{
+    input:{
+      title:group.name,
+      vendor:firstName.brand||undefined,
+      productType:firstName.category||undefined,
+      status:'DRAFT',
+      options:[group.attribute],
+    }
+  });
+  const errs=data.productCreate.userErrors;
+  if(errs.length) throw new Error(errs[0].message);
+  const productId=data.productCreate.product?.id;
+  if(!productId) throw new Error('Produto não criado');
+
+  // 2. Create variants
+  const variantsMutation=`mutation($productId:ID!,$variants:[ProductVariantsBulkInput!]!,$media:[CreateMediaInput!]){
+    productVariantsBulkCreate(productId:$productId,variants:$variants,media:$media){
+      productVariants{id inventoryItem{id}}
+      userErrors{message}
+    }
+  }`;
+  const variants=members.map((m,i)=>({
+    price:String(m.price),
+    barcode:m.barcode||undefined,
+    optionValues:[{name:m.variantValue||group.values[i]||'Default',optionName:group.attribute}],
+    mediaSrc:m.imageUrl?[m.imageUrl]:undefined,
+  }));
+  const vData=await shopifyGQL(variantsMutation,{productId, variants});
+  const vErrs=vData.productVariantsBulkCreate?.userErrors||[];
+  if(vErrs.length) throw new Error(vErrs[0].message);
+
+  // 3. Update SKUs
+  const created=vData.productVariantsBulkCreate?.productVariants||[];
+  for(let i=0;i<created.length;i++){
+    const m=members[i];
+    if(m?.sku&&created[i]?.inventoryItem?.id){
+      try{await updateVariantSKU(created[i].inventoryItem.id, m.sku);}catch{}
+      await new Promise(r=>setTimeout(r,200));
+    }
+  }
+}
+
+function crReset() {
+  cState={rows:[],colMap:{},products:[],variantGroups:[],step:'upload'};
+  create();
 }
 
 // ═══════════════════════════════════════════
