@@ -803,7 +803,6 @@ function renderAnalysis(found,notFound,isNew,supp) {
                 <td><span class="badge ${p.matchedBy==='SKU'?'badge-blue':'badge-orange'}" style="font-size:10px">${p.matchedBy}</span></td>
                 <td style="text-align:center"><input type="checkbox" class="chk-price" data-idx="${i}" ${priceChanged?'checked':''} ${!priceChanged?'disabled title="Preço igual"':''} onchange="state.analysisResult.found[${i}].applyPrice=this.checked;updateApplySummary()"></td>
                 <td style="text-align:center"><input type="checkbox" class="chk-stock" data-idx="${i}" ${stockChanged?'checked':''} ${!stockChanged?'disabled title="Stock igual"':''} onchange="state.analysisResult.found[${i}].applyStock=this.checked;updateApplySummary()"></td>
-              </tr>`;
             }).join('')}
           </tbody>
         </table>
@@ -872,6 +871,7 @@ function setAllMode(mode) {
   });
   const chkAll=document.getElementById('chk-all-found');
   if(chkAll) chkAll.checked=true;
+  if(state.analysisResult){state.analysisResult.found.forEach(p=>{p._selected=true;p.applyPrice=(mode==='both'||mode==='price');p.applyStock=(mode==='both'||mode==='stock');});}
   updateApplySummary();
 }
 
@@ -935,6 +935,7 @@ function toggleAllFound(checked) {
   document.querySelectorAll('.chk-stock').forEach(c=>{if(!c.disabled)c.checked=checked;});
   const chkAll=document.getElementById('chk-all-found');
   if(chkAll) chkAll.checked=checked;
+  if(state.analysisResult){state.analysisResult.found.forEach(p=>{p._selected=checked;p.applyPrice=checked;p.applyStock=checked;});}
   updateApplySummary();
 }
 
@@ -943,15 +944,16 @@ function updateFoundRow(idx, checked) {
   const stockChk=document.querySelector(`.chk-stock[data-idx="${idx}"]`);
   if(priceChk&&!priceChk.disabled) priceChk.checked=checked;
   if(stockChk&&!stockChk.disabled) stockChk.checked=checked;
+  if(state.analysisResult?.found[idx]){state.analysisResult.found[idx]._selected=checked;state.analysisResult.found[idx].applyPrice=checked;state.analysisResult.found[idx].applyStock=checked;}
   updateApplySummary();
 }
 
 function updateApplySummary() {
   const el=document.getElementById('apply-summary');
   if(!el||!state.analysisResult) return;
-  const selected=document.querySelectorAll('.chk-found:checked').length;
-  const priceUpdates=document.querySelectorAll('.chk-price:checked:not(:disabled)').length;
-  const stockUpdates=document.querySelectorAll('.chk-stock:checked:not(:disabled)').length;
+  const selected=state.analysisResult.found.filter(p=>p._selected!==false).length;
+  const priceUpdates=state.analysisResult.found.filter(p=>p._selected!==false&&p.applyPrice).length;
+  const stockUpdates=state.analysisResult.found.filter(p=>p._selected!==false&&p.applyStock).length;
   el.textContent=`${selected} produto(s) selecionado(s) — ${priceUpdates} preço(s) + ${stockUpdates} stock(s) a atualizar`;
 }
 
@@ -961,7 +963,7 @@ async function applyChanges() {
   const supp=state.suppliers.find(s=>s.id===state.uploadSuppId);
 
   // Get selected rows
-  const toUpdate=found.filter((_,i)=>document.querySelector(`.chk-found[data-idx="${i}"]`)?.checked);
+  const toUpdate=found.filter(p=>p._selected!==false&&(p.applyPrice||p.applyStock));
   if(toUpdate.length===0&&isNew.length===0){toast('Nada selecionado para aplicar','error');return;}
 
   // Hide analysis, show progress
@@ -989,11 +991,9 @@ async function applyChanges() {
   for(let i=0;i<toUpdate.length;i++){
     const p=toUpdate[i];
     const foundIdx=found.indexOf(p);
-    // Ler estado dos checkboxes da DOM — com fallback para true se não encontrar
-    const priceChkEl=document.querySelector(`.chk-price[data-idx="${foundIdx}"]`);
-    const stockChkEl=document.querySelector(`.chk-stock[data-idx="${foundIdx}"]`);
-    const applyPrice=priceChkEl ? priceChkEl.checked : false;
-    const applyStock=stockChkEl ? stockChkEl.checked : false;
+    // Ler estado diretamente do objeto (mais fiável que DOM que pode estar escondido)
+    const applyPrice=p.applyPrice===true;
+    const applyStock=p.applyStock===true;
     log(`🔍 ${p.shopifyTitle.substring(0,30)} — applyPrice:${applyPrice} applyStock:${applyStock} invItemId:${p.shopifyVariant.inventoryItemId?'ok':'NULL'}`);
     try {
       if(applyPrice){
