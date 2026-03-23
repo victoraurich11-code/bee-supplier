@@ -1,0 +1,2045 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BeeStore — Supplier Manager</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+:root {
+  --bg: #F4F6FA;
+  --surface: #FFFFFF;
+  --panel: #F0F2F7;
+  --border: #E2E6EF;
+  --border2: #CDD3E0;
+  --yellow: #D4A800;
+  --yellow-bg: #FFF8E1;
+  --yellow-border: #FFD54F;
+  --blue: #1B6FE8;
+  --blue-bg: #EBF3FF;
+  --green: #16A34A;
+  --green-bg: #F0FDF4;
+  --red: #DC2626;
+  --red-bg: #FEF2F2;
+  --orange: #D97706;
+  --orange-bg: #FFFBEB;
+  --text: #1A1F2E;
+  --text2: #5A6480;
+  --text3: #9BA3B8;
+  --sidebar-bg: #1A1F2E;
+  --sidebar-text: #C8CDD8;
+  --sidebar-active: #F5C400;
+  --radius: 10px;
+  --shadow: 0 1px 8px rgba(0,0,0,0.08);
+  --shadow-lg: 0 4px 24px rgba(0,0,0,0.12);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: 'Outfit', sans-serif; font-size: 14px; min-height: 100vh; }
+
+/* ── LAYOUT ── */
+.app { display: flex; min-height: 100vh; }
+.sidebar { width: 220px; min-width: 220px; background: var(--sidebar-bg); display: flex; flex-direction: column; position: fixed; top: 0; left: 0; bottom: 0; z-index: 50; }
+.main { margin-left: 220px; flex: 1; min-height: 100vh; display: flex; flex-direction: column; }
+
+/* ── SIDEBAR ── */
+.logo { padding: 22px 20px 18px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+.logo-text { font-family: 'Syne', sans-serif; font-size: 20px; font-weight: 800; letter-spacing: -0.5px; }
+.logo-text span:first-child { color: #F5C400; }
+.logo-text span:last-child { color: #8892A4; font-weight: 600; }
+.logo-sub { font-size: 10px; color: #4A5268; letter-spacing: 2px; text-transform: uppercase; margin-top: 4px; font-family: 'DM Mono', monospace; }
+.nav { padding: 14px 10px; flex: 1; }
+.nav-item { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500; color: var(--sidebar-text); transition: all 0.15s; margin-bottom: 2px; }
+.nav-item:hover { background: rgba(255,255,255,0.07); color: white; }
+.nav-item.active { background: rgba(245,196,0,0.15); color: var(--sidebar-active); }
+.nav-item .icon { font-size: 15px; width: 20px; text-align: center; }
+.nav-badge { margin-left: auto; background: var(--red); color: white; font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 10px; }
+.sidebar-footer { padding: 14px; border-top: 1px solid rgba(255,255,255,0.08); }
+.connection-status { display: flex; align-items: center; gap: 8px; font-size: 11px; color: #4A5268; font-family: 'DM Mono', monospace; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: #4A5268; flex-shrink: 0; }
+.dot.ok { background: #22C55E; box-shadow: 0 0 6px #22C55E; }
+.dot.err { background: var(--red); }
+
+/* ── TOPBAR ── */
+.topbar { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 28px; height: 54px; display: flex; align-items: center; justify-content: space-between; gap: 16px; position: sticky; top: 0; z-index: 40; box-shadow: var(--shadow); }
+.page-title { font-family: 'Syne', sans-serif; font-size: 16px; font-weight: 700; color: var(--text); }
+.topbar-actions { display: flex; gap: 8px; align-items: center; }
+
+/* ── BUTTONS ── */
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border-radius: 8px; border: none; font-family: 'Outfit', sans-serif; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.15s; white-space: nowrap; }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-primary { background: #F5C400; color: #1A1F2E; }
+.btn-primary:hover:not(:disabled) { background: #e6b800; transform: translateY(-1px); box-shadow: 0 3px 10px rgba(245,196,0,0.3); }
+.btn-ghost { background: var(--panel); color: var(--text2); border: 1px solid var(--border); }
+.btn-ghost:hover:not(:disabled) { border-color: var(--blue); color: var(--blue); background: var(--blue-bg); }
+.btn-danger { background: var(--red-bg); color: var(--red); border: 1px solid #FECACA; }
+.btn-danger:hover:not(:disabled) { background: var(--red); color: white; }
+.btn-success { background: var(--green-bg); color: var(--green); border: 1px solid #BBF7D0; }
+.btn-success:hover:not(:disabled) { background: var(--green); color: white; }
+.btn-blue { background: var(--blue-bg); color: var(--blue); border: 1px solid #BFDBFE; }
+.btn-blue:hover:not(:disabled) { background: var(--blue); color: white; }
+.btn-sm { padding: 5px 10px; font-size: 12px; border-radius: 6px; }
+
+/* ── CONTENT ── */
+.content { padding: 24px 28px; flex: 1; }
+
+/* ── CARDS ── */
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; box-shadow: var(--shadow); }
+.card-title { font-family: 'Syne', sans-serif; font-size: 11px; font-weight: 700; color: var(--text3); text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 14px; }
+
+/* ── STATS ── */
+.stats-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 20px; }
+.stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; box-shadow: var(--shadow); }
+.stat-card.c-yellow { border-left: 3px solid #F5C400; background: var(--yellow-bg); }
+.stat-card.c-red { border-left: 3px solid var(--red); background: var(--red-bg); }
+.stat-card.c-orange { border-left: 3px solid var(--orange); background: var(--orange-bg); }
+.stat-num { font-family: 'Syne', sans-serif; font-size: 26px; font-weight: 800; line-height: 1; color: var(--text); }
+.stat-card.c-yellow .stat-num { color: var(--yellow); }
+.stat-card.c-red .stat-num { color: var(--red); }
+.stat-card.c-orange .stat-num { color: var(--orange); }
+.stat-lbl { font-size: 11px; color: var(--text2); margin-top: 4px; }
+
+/* ── TABLE ── */
+.table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); }
+.table-header { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 12px; background: var(--surface); }
+table { width: 100%; border-collapse: collapse; }
+th { background: var(--panel); padding: 9px 14px; text-align: left; font-size: 11px; font-weight: 700; color: var(--text2); letter-spacing: 0.8px; text-transform: uppercase; border-bottom: 1px solid var(--border); white-space: nowrap; }
+td { padding: 11px 14px; border-bottom: 1px solid var(--border); font-size: 13px; vertical-align: middle; color: var(--text); }
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: #FAFBFD; }
+.mono { font-family: 'DM Mono', monospace; font-size: 12px; }
+
+/* ── BADGES ── */
+.badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.badge-green { background: var(--green-bg); color: var(--green); border: 1px solid #BBF7D0; }
+.badge-red { background: var(--red-bg); color: var(--red); border: 1px solid #FECACA; }
+.badge-yellow { background: var(--yellow-bg); color: var(--yellow); border: 1px solid var(--yellow-border); }
+.badge-blue { background: var(--blue-bg); color: var(--blue); border: 1px solid #BFDBFE; }
+.badge-orange { background: var(--orange-bg); color: var(--orange); border: 1px solid #FDE68A; }
+.badge-gray { background: var(--panel); color: var(--text2); border: 1px solid var(--border); }
+
+/* ── FORMS ── */
+.form-grid { display: flex; flex-direction: column; gap: 14px; }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.form-group { display: flex; flex-direction: column; gap: 5px; }
+.form-group label { font-size: 12px; font-weight: 600; color: var(--text2); }
+input[type=text], input[type=number], input[type=password], select, textarea { background: var(--surface); border: 1px solid var(--border2); color: var(--text); padding: 9px 12px; border-radius: 8px; font-family: 'Outfit', sans-serif; font-size: 13px; outline: none; transition: border-color 0.2s; width: 100%; }
+input:focus, select:focus, textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(27,111,232,0.1); }
+
+/* ── MODAL ── */
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); backdrop-filter: blur(4px); z-index: 200; display: flex; align-items: center; justify-content: center; padding: 20px; opacity: 0; pointer-events: none; transition: opacity 0.2s; }
+.modal-overlay.open { opacity: 1; pointer-events: all; }
+.modal { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 28px; width: 100%; max-width: 540px; max-height: 90vh; overflow-y: auto; transform: translateY(12px); transition: transform 0.2s; box-shadow: var(--shadow-lg); }
+.modal-overlay.open .modal { transform: translateY(0); }
+.modal-title { font-family: 'Syne', sans-serif; font-size: 18px; font-weight: 700; margin-bottom: 20px; color: var(--text); }
+.modal-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--border); }
+
+/* ── UPLOAD ── */
+.upload-zone { border: 2px dashed var(--border2); border-radius: 10px; padding: 32px 20px; text-align: center; cursor: pointer; transition: all 0.2s; background: var(--panel); }
+.upload-zone:hover, .upload-zone.drag { border-color: var(--blue); background: var(--blue-bg); }
+.upload-zone .up-icon { font-size: 36px; margin-bottom: 10px; }
+.upload-zone p { color: var(--text2); font-size: 13px; }
+.upload-zone strong { color: var(--blue); }
+
+/* ── PROGRESS ── */
+.progress-bar { height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.progress-fill { height: 100%; background: linear-gradient(90deg, var(--blue), #22C55E); border-radius: 3px; transition: width 0.3s; }
+
+/* ── TABS ── */
+.tabs { display: flex; gap: 2px; background: var(--panel); padding: 4px; border-radius: 10px; width: fit-content; margin-bottom: 18px; border: 1px solid var(--border); }
+.tab { padding: 7px 16px; border-radius: 7px; font-size: 13px; font-weight: 500; cursor: pointer; color: var(--text2); transition: all 0.15s; border: none; background: none; }
+.tab.active { background: var(--surface); color: var(--text); box-shadow: var(--shadow); font-weight: 600; }
+
+/* ── ALERT CARDS ── */
+.alert-list { display: flex; flex-direction: column; gap: 10px; }
+.alert-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; display: flex; align-items: flex-start; gap: 12px; box-shadow: var(--shadow); }
+.alert-card.new_product { border-left: 3px solid var(--green); }
+.alert-card.no_update { border-left: 3px solid var(--orange); }
+.alert-icon { font-size: 20px; flex-shrink: 0; }
+.alert-body { flex: 1; }
+.alert-title { font-weight: 600; font-size: 13px; color: var(--text); }
+.alert-desc { font-size: 12px; color: var(--text2); margin-top: 3px; }
+.alert-actions { display: flex; gap: 6px; margin-top: 10px; }
+
+/* ── EMPTY STATE ── */
+.empty-state { text-align: center; padding: 50px 20px; color: var(--text3); }
+.empty-state .empty-icon { font-size: 44px; margin-bottom: 12px; }
+.empty-state p { font-size: 13px; line-height: 1.6; }
+
+/* ── REVIEW TABLE ── */
+.review-section { margin-bottom: 20px; }
+.review-section-title { font-family: 'Syne', sans-serif; font-size: 13px; font-weight: 700; padding: 10px 14px; border-radius: 8px 8px 0 0; display: flex; align-items: center; gap: 8px; }
+.rs-found .review-section-title { background: var(--green-bg); color: var(--green); border: 1px solid #BBF7D0; border-bottom: none; }
+.rs-new .review-section-title { background: var(--blue-bg); color: var(--blue); border: 1px solid #BFDBFE; border-bottom: none; }
+.rs-missing .review-section-title { background: var(--orange-bg); color: var(--orange); border: 1px solid #FDE68A; border-bottom: none; }
+.rs-found .table-wrap { border-top: none; border-radius: 0 0 10px 10px; border-color: #BBF7D0; }
+.rs-new .table-wrap { border-top: none; border-radius: 0 0 10px 10px; border-color: #BFDBFE; }
+.rs-missing .table-wrap { border-top: none; border-radius: 0 0 10px 10px; border-color: #FDE68A; }
+
+/* ── CHECKBOX ── */
+input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--blue); cursor: pointer; }
+
+/* ── COL MAPPER ── */
+.col-mapper { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+@media(max-width:700px) { .col-mapper { grid-template-columns: 1fr 1fr; } }
+
+/* ── TOAST ── */
+#toast { position: fixed; bottom: 24px; right: 24px; z-index: 999; display: flex; flex-direction: column; gap: 8px; }
+.toast-item { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; font-size: 13px; display: flex; align-items: center; gap: 10px; box-shadow: var(--shadow-lg); animation: slideIn 0.2s ease; min-width: 280px; max-width: 380px; }
+.toast-item.success { border-left: 3px solid var(--green); }
+.toast-item.error { border-left: 3px solid var(--red); }
+.toast-item.info { border-left: 3px solid var(--blue); }
+@keyframes slideIn { from { transform: translateX(20px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+/* ── SETTINGS ── */
+.settings-label { font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: 2px; text-transform: uppercase; color: var(--text3); margin-bottom: 10px; }
+
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+    <div class="logo">
+      <div class="logo-text"><span>Bee</span><span>Store</span></div>
+      <div class="logo-sub">Supplier Manager</div>
+    </div>
+    <nav class="nav">
+      <div class="nav-item active" onclick="navigate('dashboard')" id="nav-dashboard"><span class="icon">⬡</span> Dashboard</div>
+      <div class="nav-item" onclick="navigate('suppliers')" id="nav-suppliers"><span class="icon">🏭</span> Fornecedores</div>
+      <div class="nav-item" onclick="navigate('upload')" id="nav-upload"><span class="icon">⬆</span> Processar Ficheiro</div>
+      <div class="nav-item" onclick="navigate('alerts')" id="nav-alerts"><span class="icon">🔔</span> Alertas <span class="nav-badge" id="alert-badge" style="display:none">0</span></div>
+      <div class="nav-item" onclick="navigate('orphans')" id="nav-orphans"><span class="icon">⚠</span> Sem Atualizações <span class="nav-badge" id="orphan-badge" style="display:none">0</span></div>
+      <div class="nav-item" onclick="navigate('matching')" id="nav-matching"><span class="icon">🔗</span> Matching</div>
+      <div class="nav-item" onclick="navigate('create')" id="nav-create"><span class="icon">✚</span> Criar Produtos</div>
+      <div class="nav-item" onclick="navigate('settings')" id="nav-settings"><span class="icon">⚙</span> Configurações</div>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="connection-status">
+        <div class="dot" id="conn-dot"></div>
+        <span id="conn-text">Não ligado</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <div class="main">
+    <div class="topbar">
+      <div class="page-title" id="page-title">Dashboard</div>
+      <div class="topbar-actions" id="topbar-actions"></div>
+    </div>
+    <div class="content" id="content"></div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modal-overlay" onclick="closeModal(event)">
+  <div class="modal" id="modal-content"></div>
+</div>
+<div id="toast"></div>
+
+<script>
+// ═══════════════════════════════════════════
+// STATE & STORAGE
+// ═══════════════════════════════════════════
+const DB = {
+  get: (k, d=null) => { try { const v=localStorage.getItem('bsm2_'+k); return v?JSON.parse(v):d; } catch { return d; } },
+  set: (k,v) => localStorage.setItem('bsm2_'+k, JSON.stringify(v)),
+};
+
+let state = {
+  page: 'dashboard',
+  suppliers: DB.get('suppliers', []),
+  alerts: DB.get('alerts', []),
+  uploadHistory: DB.get('uploadHistory', []),
+  orphans: DB.get('orphans', []),
+  matches: DB.get('matches', []),
+  shopifyProducts: DB.get('shopifyProducts', []),
+  settings: DB.get('settings', { shop:'', token:'', apiVersion:'2026-01' }),
+  // Upload state
+  parsedRows: [],
+  uploadSuppId: null,
+  colMap: {},
+  analysisResult: null,
+};
+
+function save() {
+  ['suppliers','alerts','uploadHistory','orphans','matches','shopifyProducts','settings'].forEach(k => DB.set(k, state[k]));
+}
+
+// ═══════════════════════════════════════════
+// SHOPIFY API (via Cloudflare Worker)
+// ═══════════════════════════════════════════
+const PROXY = 'https://shopify-proxy.victoraurich11.workers.dev';
+
+async function shopifyGQL(query, variables={}) {
+  const { shop, token, apiVersion } = state.settings;
+  if (!shop || !token) throw new Error('Configura a loja nas Configurações primeiro.');
+  const resp = await fetch(PROXY, {
+    method: 'POST',
+    headers: { 'Content-Type':'application/json', 'X-Shopify-Shop':shop, 'X-Shopify-Token':token, 'X-Shopify-Version':apiVersion },
+    body: JSON.stringify({ query, variables }),
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const json = await resp.json();
+  if (json.errors) throw new Error(json.errors[0].message);
+  return json.data;
+}
+
+async function testConnection() {
+  try { const d = await shopifyGQL(`{ shop { name } }`); return { ok:true, name:d.shop.name }; }
+  catch(e) { return { ok:false, error:e.message }; }
+}
+
+async function fetchShopifyProducts() {
+  toast('A carregar produtos do Shopify...','info');
+  let products=[], cursor=null, hasNext=true;
+  while(hasNext) {
+    const q=`query($cursor:String){products(first:250,after:$cursor){pageInfo{hasNextPage endCursor}edges{node{id title vendor variants(first:5){edges{node{id sku barcode price inventoryQuantity inventoryItem{id}}}}}}}}`;
+    const data = await shopifyGQL(q,{cursor});
+    const page = data.products;
+    products.push(...page.edges.map(e=>({
+      id:e.node.id, title:e.node.title, vendor:e.node.vendor,
+      variants:e.node.variants.edges.map(v=>({
+        id:v.node.id, sku:v.node.sku, barcode:v.node.barcode,
+        price:v.node.price, stock:v.node.inventoryQuantity,
+        inventoryItemId:v.node.inventoryItem?.id,
+      }))
+    })));
+    hasNext=page.pageInfo.hasNextPage; cursor=page.pageInfo.endCursor;
+    if(products.length>8000) break;
+  }
+  state.shopifyProducts=products; save();
+  toast(`${products.length} produtos carregados`,'success');
+  return products;
+}
+
+async function getLocationId() {
+  const d = await shopifyGQL(`{locations(first:1){edges{node{id}}}}`);
+  return d.locations.edges[0]?.node.id;
+}
+
+async function updateVariantPrice(productId, variantId, price) {
+  return shopifyGQL(`mutation($productId:ID!,$variants:[ProductVariantsBulkInput!]!){productVariantsBulkUpdate(productId:$productId,variants:$variants){productVariants{id price}userErrors{message}}}`,
+    {productId, variants:[{id:variantId, price:String(price)}]});
+}
+
+async function updateVariantStock(inventoryItemId, locationId, newQty) {
+  return shopifyGQL(
+    `mutation($input:InventorySetQuantitiesInput!){
+      inventorySetQuantities(input:$input){
+        inventoryAdjustmentGroup{reason}
+        userErrors{message}
+      }
+    }`,
+    { input: {
+        name: 'available',
+        reason: 'correction',
+        quantities: [{ inventoryItemId, locationId, quantity: newQty }]
+    }}
+  );
+}
+
+async function updateVariantSKU(inventoryItemId, sku) {
+  return shopifyGQL(`mutation($id:ID!,$input:InventoryItemInput!){inventoryItemUpdate(id:$id,input:$input){inventoryItem{id sku}userErrors{message}}}`,
+    {id:inventoryItemId, input:{sku}});
+}
+
+async function archiveProduct(productId) {
+  return shopifyGQL(`mutation($input:ProductInput!){productUpdate(product:$input){product{id status}userErrors{message}}}`,
+    {input:{id:productId, status:'ARCHIVED'}});
+}
+
+async function deleteProduct(productId) {
+  return shopifyGQL(`mutation($input:ProductDeleteInput!){productDelete(input:$input){deletedProductId userErrors{message}}}`,
+    {input:{id:productId}});
+}
+
+// ═══════════════════════════════════════════
+// NAVIGATION
+// ═══════════════════════════════════════════
+function navigate(page) {
+  state.page=page;
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  document.getElementById('nav-'+page)?.classList.add('active');
+  const titles={dashboard:'Dashboard',suppliers:'Fornecedores',upload:'Processar Ficheiro',alerts:'Alertas',orphans:'Produtos Sem Atualizações',matching:'Matching Inteligente',create:'Criar Produtos',settings:'Configurações'};
+  document.getElementById('page-title').textContent=titles[page]||page;
+  render();
+}
+
+function render() {
+  ({dashboard,suppliers,upload,alerts,orphans,matching,create,settings})[state.page]?.();
+  updateBadges();
+}
+
+function updateBadges() {
+  const ac=state.alerts.filter(a=>!a.dismissed).length;
+  const oc=state.orphans.filter(o=>!o.dismissed).length;
+  const ab=document.getElementById('alert-badge');
+  const ob=document.getElementById('orphan-badge');
+  if(ab){ab.textContent=ac;ab.style.display=ac>0?'flex':'none';}
+  if(ob){ob.textContent=oc;ob.style.display=oc>0?'flex':'none';}
+  const d=document.getElementById('conn-dot'), t=document.getElementById('conn-text');
+  if(state.settings.shop&&state.settings.token){d.className='dot ok';t.textContent=state.settings.shop.replace('.myshopify.com','');}
+  else{d.className='dot err';t.textContent='Não ligado';}
+}
+
+// ═══════════════════════════════════════════
+// DASHBOARD
+// ═══════════════════════════════════════════
+function dashboard() {
+  document.getElementById('topbar-actions').innerHTML=`<button class="btn btn-ghost btn-sm" onclick="fetchShopifyProducts().then(render)">↻ Sincronizar Shopify</button>`;
+  const ac=state.alerts.filter(a=>!a.dismissed).length;
+  const oc=state.orphans.filter(o=>!o.dismissed).length;
+  const lh=state.uploadHistory[0];
+  document.getElementById('content').innerHTML=`
+    <div class="stats-grid">
+      <div class="stat-card c-yellow"><div class="stat-num">${state.suppliers.filter(s=>s.active).length}</div><div class="stat-lbl">Fornecedores Ativos</div></div>
+      <div class="stat-card"><div class="stat-num">${state.shopifyProducts.length}</div><div class="stat-lbl">Produtos Shopify</div></div>
+      <div class="stat-card ${ac>0?'c-orange':''}"><div class="stat-num">${ac}</div><div class="stat-lbl">Alertas Ativos</div></div>
+      <div class="stat-card ${oc>0?'c-red':''}"><div class="stat-num">${oc}</div><div class="stat-lbl">Sem Atualizações</div></div>
+      <div class="stat-card"><div class="stat-num">${lh?timeAgo(lh.date):'—'}</div><div class="stat-lbl">Último Upload</div></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div class="table-wrap">
+        <div class="table-header"><span style="font-family:'Syne',sans-serif;font-weight:700">Fornecedores</span><button class="btn btn-ghost btn-sm" onclick="navigate('suppliers')">Ver todos →</button></div>
+        <table><thead><tr><th>Nome</th><th>Margem</th><th>Último Upload</th><th>Estado</th></tr></thead><tbody>
+        ${state.suppliers.length===0?`<tr><td colspan="4"><div class="empty-state" style="padding:28px"><div class="empty-icon">🏭</div><p>Sem fornecedores</p></div></td></tr>`:
+          state.suppliers.map(s=>`<tr><td style="font-weight:600">${s.name}</td><td class="mono">${s.priceType==='pvp'?'PVP':'+'+s.margin+'%'}</td><td class="mono" style="color:var(--text2)">${s.lastUpload?new Date(s.lastUpload).toLocaleDateString('pt-PT'):'—'}</td><td><span class="badge ${s.active?'badge-green':'badge-gray'}">${s.active?'Ativo':'Inativo'}</span></td></tr>`).join('')}
+        </tbody></table>
+      </div>
+      <div class="table-wrap">
+        <div class="table-header"><span style="font-family:'Syne',sans-serif;font-weight:700">Histórico de Uploads</span></div>
+        <table><thead><tr><th>Fornecedor</th><th>Data</th><th>Encontrados</th><th>Novos</th></tr></thead><tbody>
+        ${state.uploadHistory.length===0?`<tr><td colspan="4"><div class="empty-state" style="padding:28px"><div class="empty-icon">📂</div><p>Sem uploads ainda</p></div></td></tr>`:
+          state.uploadHistory.slice(0,6).map(h=>`<tr><td style="font-weight:600">${h.supplierName}</td><td class="mono" style="color:var(--text2)">${new Date(h.date).toLocaleDateString('pt-PT')}</td><td><span class="badge badge-green">✓ ${h.updated}</span></td><td><span class="badge ${h.newProducts>0?'badge-blue':'badge-gray'}">${h.newProducts}</span></td></tr>`).join('')}
+        </tbody></table>
+      </div>
+    </div>`;
+}
+
+// ═══════════════════════════════════════════
+// SUPPLIERS
+// ═══════════════════════════════════════════
+function suppliers() {
+  document.getElementById('topbar-actions').innerHTML=`<button class="btn btn-primary" onclick="openSupplierModal()">+ Novo Fornecedor</button>`;
+  document.getElementById('content').innerHTML=`
+    <div class="table-wrap">
+      <div class="table-header"><span style="font-family:'Syne',sans-serif;font-weight:700">${state.suppliers.length} fornecedor(es)</span></div>
+      <table><thead><tr><th>Nome</th><th>Tipo de Preço</th><th>Margem</th><th>Colunas configuradas</th><th>Último Upload</th><th>Estado</th><th></th></tr></thead><tbody>
+      ${state.suppliers.length===0?`<tr><td colspan="7"><div class="empty-state"><div class="empty-icon">🏭</div><p>Nenhum fornecedor criado ainda.<br>Clica em "+ Novo Fornecedor" para começar.</p></div></td></tr>`:
+        state.suppliers.map(s=>`<tr>
+          <td><div style="font-weight:600">${s.name}</div></td>
+          <td><span class="badge ${s.priceType==='pvp'?'badge-blue':'badge-yellow'}">${s.priceType==='pvp'?'PVP Sugerido':'Custo + Margem'}</span></td>
+          <td class="mono">${s.priceType==='pvp'?'—':'+'+s.margin+'%'}</td>
+          <td style="font-size:11px;color:var(--text2)">${[s.colName,s.colSku,s.colBarcode,s.colStock,s.colPrice].filter(Boolean).length}/5 colunas</td>
+          <td class="mono" style="color:var(--text2)">${s.lastUpload?new Date(s.lastUpload).toLocaleDateString('pt-PT'):'—'}</td>
+          <td><span class="badge ${s.active?'badge-green':'badge-gray'}">${s.active?'Ativo':'Inativo'}</span></td>
+          <td><div style="display:flex;gap:6px"><button class="btn btn-ghost btn-sm" onclick="openSupplierModal('${s.id}')">✏ Editar</button><button class="btn btn-danger btn-sm" onclick="deleteSupplier('${s.id}')">✕</button></div></td>
+        </tr>`).join('')}
+      </tbody></table>
+    </div>`;
+}
+
+function openSupplierModal(id=null) {
+  const s=id?state.suppliers.find(x=>x.id===id):null;
+  document.getElementById('modal-content').innerHTML=`
+    <div class="modal-title">${s?'Editar Fornecedor':'Novo Fornecedor'}</div>
+    <div class="form-grid">
+      <div class="form-row">
+        <div class="form-group"><label>Nome *</label><input type="text" id="s-name" value="${s?.name||''}" placeholder="ex: Depau, Ingram..."></div>
+        <div class="form-group"><label>Estado</label><select id="s-active"><option value="true" ${(!s||s.active)?'selected':''}>Ativo</option><option value="false" ${s&&!s.active?'selected':''}>Inativo</option></select></div>
+      </div>
+      <div class="form-group"><label>Tipo de Preço</label>
+        <select id="s-pricetype" onchange="toggleMarginField()">
+          <option value="cost" ${s?.priceType!=='pvp'?'selected':''}>Preço de Custo + Margem %</option>
+          <option value="pvp" ${s?.priceType==='pvp'?'selected':''}>PVP Sugerido (usar diretamente)</option>
+        </select>
+      </div>
+      <div class="form-group" id="margin-field" style="${s?.priceType==='pvp'?'display:none':''}">
+        <label>Margem (%)</label><input type="number" id="s-margin" value="${s?.margin||7}" min="0" max="200" step="0.5">
+      </div>
+      <div style="border-top:1px solid var(--border);padding-top:14px">
+        <div class="card-title">Mapeamento de Colunas do Ficheiro</div>
+        <p style="font-size:12px;color:var(--text2);margin-bottom:12px">Escreve o nome exato do cabeçalho da coluna no ficheiro do fornecedor.</p>
+        <div class="col-mapper">
+          <div class="form-group"><label>Coluna Nome / Artigo</label><input type="text" id="s-colname" value="${s?.colName||''}" placeholder="ex: Articulo"></div>
+          <div class="form-group"><label>Coluna SKU / Part Number</label><input type="text" id="s-colsku" value="${s?.colSku||''}" placeholder="ex: Part Number"></div>
+          <div class="form-group"><label>Coluna Barcode / EAN</label><input type="text" id="s-colbarcode" value="${s?.colBarcode||''}" placeholder="ex: Codigo 5"></div>
+          <div class="form-group"><label>Coluna Stock</label><input type="text" id="s-colstock" value="${s?.colStock||''}" placeholder="ex: Stock almacen principal"></div>
+          <div class="form-group"><label>Coluna Preço</label><input type="text" id="s-colprice" value="${s?.colPrice||''}" placeholder="ex: PVP PuntoD (IVA Incluido)"></div>
+          <div class="form-group"><label>Coluna Estado</label><input type="text" id="s-colstatus" value="${s?.colStatus||''}" placeholder="ex: Estado"></div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary" onclick="saveSupplier('${id||''}')">Guardar</button>
+    </div>`;
+  openModal();
+}
+
+function toggleMarginField() {
+  const mf=document.getElementById('margin-field');
+  if(mf) mf.style.display=document.getElementById('s-pricetype')?.value==='pvp'?'none':'';
+}
+
+function saveSupplier(id) {
+  const name=document.getElementById('s-name').value.trim();
+  if(!name){toast('Nome obrigatório','error');return;}
+  const data={
+    id:id||'sup_'+Date.now(), name,
+    active:document.getElementById('s-active').value==='true',
+    priceType:document.getElementById('s-pricetype').value,
+    margin:parseFloat(document.getElementById('s-margin')?.value||7),
+    colName:document.getElementById('s-colname').value.trim(),
+    colSku:document.getElementById('s-colsku').value.trim(),
+    colBarcode:document.getElementById('s-colbarcode').value.trim(),
+    colStock:document.getElementById('s-colstock').value.trim(),
+    colPrice:document.getElementById('s-colprice').value.trim(),
+    colStatus:document.getElementById('s-colstatus').value.trim(),
+    lastUpload:id?state.suppliers.find(s=>s.id===id)?.lastUpload:null,
+  };
+  if(id) state.suppliers=state.suppliers.map(s=>s.id===id?data:s);
+  else state.suppliers.push(data);
+  save(); closeModal(); render(); toast(id?'Fornecedor atualizado':'Fornecedor criado','success');
+}
+
+function deleteSupplier(id) {
+  if(!confirm('Eliminar este fornecedor?')) return;
+  state.suppliers=state.suppliers.filter(s=>s.id!==id);
+  save(); render(); toast('Eliminado','info');
+}
+
+// ═══════════════════════════════════════════
+// UPLOAD — FLUXO COM CONTROLO TOTAL
+// Passo 1: Selecionar fornecedor + ficheiro
+// Passo 2: Mapear colunas manualmente
+// Passo 3: Análise — encontrados / novos / não encontrados
+// Passo 4: Selecionar o que aplicar por produto
+// Passo 5: Aplicar no Shopify
+// ═══════════════════════════════════════════
+function upload() {
+  document.getElementById('topbar-actions').innerHTML='';
+  const activeSuppliers=state.suppliers.filter(s=>s.active);
+  document.getElementById('content').innerHTML=`
+    <div>
+      <!-- PASSO 1 -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-title">1 — Fornecedor e Ficheiro</div>
+        <div class="form-group" style="margin-bottom:12px">
+          <label>Fornecedor</label>
+          <select id="upload-supplier" onchange="onSupplierChange()">
+            <option value="">— Escolher fornecedor —</option>
+            ${activeSuppliers.map(s=>`<option value="${s.id}">${s.name}</option>`).join('')}
+          </select>
+          ${activeSuppliers.length===0?'<p style="color:var(--orange);font-size:12px;margin-top:6px">⚠ Sem fornecedores ativos. Cria um em Fornecedores.</p>':''}
+        </div>
+        <div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()"
+          ondragover="event.preventDefault();this.classList.add('drag')"
+          ondragleave="this.classList.remove('drag')"
+          ondrop="handleDrop(event)">
+          <div class="up-icon">📂</div>
+          <p><strong>Clica para selecionar</strong> ou arrasta aqui</p>
+          <p style="font-size:12px;color:var(--text3);margin-top:4px">.xls, .xlsx, .csv</p>
+        </div>
+        <input type="file" id="file-input" accept=".xls,.xlsx,.csv" style="display:none" onchange="handleFile(this.files[0])">
+        <div id="file-info" style="display:none;margin-top:10px"></div>
+      </div>
+
+      <!-- PASSO 2: MAPEAMENTO -->
+      <div class="card" id="step-mapping" style="display:none;margin-bottom:16px">
+        <div class="card-title">2 — Confirmar Mapeamento de Colunas</div>
+        <p style="font-size:12px;color:var(--text2);margin-bottom:14px">Verifica e corrige as colunas detetadas automaticamente.</p>
+        <div id="col-mapper-content"></div>
+        <div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end">
+          <button class="btn btn-ghost" onclick="resetUpload()">Cancelar</button>
+          <button class="btn btn-primary" onclick="runAnalysis()">Analisar Ficheiro →</button>
+        </div>
+      </div>
+
+      <!-- PASSO 3+4: ANÁLISE E SELEÇÃO -->
+      <div id="step-analysis" style="display:none"></div>
+
+      <!-- PASSO 5: PROGRESSO -->
+      <div id="step-progress" style="display:none">
+        <div class="card">
+          <div class="card-title">A aplicar alterações no Shopify...</div>
+          <div id="progress-log" style="font-family:'DM Mono',monospace;font-size:12px;color:var(--text2);line-height:1.9;max-height:420px;overflow-y:auto"></div>
+          <div class="progress-bar" style="margin-top:12px"><div class="progress-fill" id="progress-fill" style="width:0%"></div></div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function onSupplierChange() {
+  // Reset file if supplier changes
+  state.parsedRows=[]; state.colMap={}; state.analysisResult=null;
+  document.getElementById('file-info').style.display='none';
+  document.getElementById('step-mapping').style.display='none';
+  document.getElementById('step-analysis').style.display='none';
+  document.getElementById('file-input').value='';
+}
+
+function handleDrop(e) {
+  e.preventDefault();
+  document.getElementById('upload-zone').classList.remove('drag');
+  handleFile(e.dataTransfer.files[0]);
+}
+
+function handleFile(file) {
+  if(!file) return;
+  const suppId=document.getElementById('upload-supplier')?.value;
+  if(!suppId){toast('Seleciona um fornecedor primeiro','error');return;}
+  const reader=new FileReader();
+  reader.onload=(e)=>{
+    const data=new Uint8Array(e.target.result);
+    const wb=XLSX.read(data,{type:'array',raw:false,cellText:true,cellDates:true});
+    const ws=wb.Sheets[wb.SheetNames[0]];
+    Object.keys(ws).forEach(addr=>{
+      if(addr[0]==='!') return;
+      const cell=ws[addr];
+      if(cell.t==='n'&&cell.w) cell.v=cell.w.replace(/\./g,'').replace(/,/g,'.')||cell.v;
+    });
+    const rows=XLSX.utils.sheet_to_json(ws,{defval:'',raw:false});
+    if(!rows.length){toast('Ficheiro sem dados','error');return;}
+    state.parsedRows=rows;
+    state.uploadSuppId=suppId;
+    showColMapper(rows, suppId);
+  };
+  reader.readAsArrayBuffer(file);
+  document.getElementById('file-info').style.display='block';
+  document.getElementById('file-info').innerHTML=`
+    <div style="display:flex;align-items:center;gap:10px;background:var(--panel);padding:9px 12px;border-radius:8px;border:1px solid var(--border)">
+      <span>📄</span><span style="font-weight:600">${file.name}</span>
+      <span style="color:var(--text2);font-size:12px">${(file.size/1024).toFixed(0)} KB</span>
+    </div>`;
+}
+
+function showColMapper(rows, suppId) {
+  const supp=state.suppliers.find(s=>s.id===suppId);
+  const headers=Object.keys(rows[0]);
+  const detect=(hints)=>headers.find(h=>hints.some(hint=>h.toLowerCase().includes(hint.toLowerCase())))||'';
+
+  // Pre-fill from supplier config or auto-detect
+  state.colMap={
+    name: supp?.colName || detect(['Articulo','Nombre','Name','Title','Descripcion']),
+    sku:  supp?.colSku  || detect(['Part Number','SKU','Referencia','Codigo 3']),
+    barcode: supp?.colBarcode || detect(['Codigo 5','EAN','Barcode','Codigo 4']),
+    stock: supp?.colStock || detect(['Stock','Unidades','Existencias','Cantidad']),
+    price: supp?.colPrice || detect(['PVP','Precio','Price','Custo','Cost']),
+  };
+
+  const opts=headers.map(h=>`<option value="${h}">${h}</option>`).join('');
+  const sel=(key)=>`<select id="col-${key}" onchange="state.colMap['${key}']=this.value">
+    <option value="">— Não usar —</option>
+    ${headers.map(h=>`<option value="${h}" ${state.colMap[key]===h?'selected':''}>${h}</option>`).join('')}
+  </select>`;
+
+  document.getElementById('col-mapper-content').innerHTML=`
+    <div class="col-mapper">
+      <div class="form-group"><label>Nome do Produto</label>${sel('name')}</div>
+      <div class="form-group"><label>SKU / Part Number</label>${sel('sku')}</div>
+      <div class="form-group"><label>Barcode / EAN</label>${sel('barcode')}</div>
+      <div class="form-group"><label>Stock</label>${sel('stock')}</div>
+      <div class="form-group"><label>Preço</label>${sel('price')}</div>
+    </div>
+    <div style="margin-top:14px;background:var(--panel);border-radius:8px;padding:10px 14px;border:1px solid var(--border)">
+      <div style="font-size:11px;color:var(--text2);margin-bottom:8px">Pré-visualização (3 linhas)</div>
+      <div style="overflow-x:auto">
+        <table style="width:100%;font-size:11px">
+          <thead><tr><th>Nome</th><th>SKU</th><th>Barcode</th><th>Stock</th><th>Preço</th></tr></thead>
+          <tbody>
+            ${rows.slice(0,3).map(r=>`<tr>
+              <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r[state.colMap.name]||'—'}</td>
+              <td class="mono">${r[state.colMap.sku]||'—'}</td>
+              <td class="mono">${r[state.colMap.barcode]||'—'}</td>
+              <td class="mono">${r[state.colMap.stock]||'—'}</td>
+              <td class="mono">${r[state.colMap.price]||'—'}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+
+  document.getElementById('step-mapping').style.display='block';
+  document.getElementById('step-analysis').style.display='none';
+}
+
+async function runAnalysis() {
+  // Sync col map from selects
+  ['name','sku','barcode','stock','price'].forEach(k=>{
+    const el=document.getElementById('col-'+k); if(el) state.colMap[k]=el.value;
+  });
+
+  if(!state.settings.shop||!state.settings.token){toast('Configura a ligação Shopify primeiro','error');return;}
+
+  const btn=document.querySelector('#step-mapping .btn-primary');
+  btn.textContent='A analisar...'; btn.disabled=true;
+
+  let shopifyProds=state.shopifyProducts;
+  if(!shopifyProds.length){
+    try{shopifyProds=await fetchShopifyProducts();}
+    catch(e){toast('Erro ao carregar Shopify: '+e.message,'error');btn.textContent='Analisar Ficheiro →';btn.disabled=false;return;}
+  }
+
+  const supp=state.suppliers.find(s=>s.id===state.uploadSuppId);
+  const {name:nc,sku:sc,barcode:bc,stock:stc,price:pc}=state.colMap;
+
+  // Build lookup
+  const bySku={}, byBarcode={};
+  shopifyProds.forEach(p=>p.variants.forEach(v=>{
+    if(v.sku) bySku[v.sku.trim().toLowerCase()]={product:p,variant:v};
+    if(v.barcode) byBarcode[v.barcode.trim()]={product:p,variant:v};
+  }));
+
+  const found=[], notFound=[], isNew=[];
+  const knownSkus=new Set();
+
+  state.parsedRows.forEach((row,i)=>{
+    const sku=(row[sc]||'').trim();
+    const barcode=(row[bc]||'').trim();
+    const name=(row[nc]||sku||'Produto '+i).trim();
+    const stockVal=parseInt((row[stc]||'0').replace(/[^0-9]/g,''))||0;
+    const costPrice=parseFloat((row[pc]||'0').replace(',','.'))||0;
+    const finalPrice=supp.priceType==='pvp'?costPrice:parseFloat((costPrice*(1+supp.margin/100)).toFixed(2));
+
+    if(sku) knownSkus.add(sku.toLowerCase());
+
+    // Match: SKU first, then barcode
+    const match=bySku[sku.toLowerCase()]||(barcode?byBarcode[barcode]:null);
+
+    if(match){
+      found.push({
+        _rowIdx:i, name, sku, barcode, stockVal, costPrice, finalPrice,
+        shopifyTitle:match.product.title,
+        shopifyProduct:match.product, shopifyVariant:match.variant,
+        currentPrice:match.variant.price, currentStock:match.variant.stock,
+        matchedBy: bySku[sku.toLowerCase()]?'SKU':'Barcode',
+        applyPrice:true, applyStock:true, // defaults — user can toggle
+      });
+    } else {
+      const alreadyAlerted=state.alerts.some(a=>a.sku===sku&&!a.dismissed);
+      if(name && !alreadyAlerted) isNew.push({_rowIdx:i,name,sku,barcode,stockVal,finalPrice,suppId:state.uploadSuppId,suppName:supp.name});
+      else if(name) notFound.push({_rowIdx:i,name,sku,barcode,stockVal,finalPrice});
+    }
+  });
+
+  state.analysisResult={found,notFound,isNew,knownSkus};
+  renderAnalysis(found,notFound,isNew,supp);
+  btn.textContent='Analisar Ficheiro →'; btn.disabled=false;
+}
+
+function renderAnalysis(found,notFound,isNew,supp) {
+  const el=document.getElementById('step-analysis');
+  el.style.display='block';
+
+  el.innerHTML=`
+    <!-- SUMMARY BAR -->
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px">
+      <div class="stat-card" style="border-left:3px solid var(--green)">
+        <div class="stat-num" style="color:var(--green)">${found.length}</div>
+        <div class="stat-lbl">Encontrados no Shopify</div>
+      </div>
+      <div class="stat-card" style="border-left:3px solid var(--blue)">
+        <div class="stat-num" style="color:var(--blue)">${isNew.length}</div>
+        <div class="stat-lbl">Produtos Novos (alertas)</div>
+      </div>
+      <div class="stat-card" style="border-left:3px solid var(--orange)">
+        <div class="stat-num" style="color:var(--orange)">${notFound.length}</div>
+        <div class="stat-lbl">Não Encontrados</div>
+      </div>
+    </div>
+
+    <!-- ENCONTRADOS -->
+    ${found.length>0?`
+    <div class="review-section rs-found" style="margin-bottom:16px">
+      <div class="review-section-title">
+        ✅ ${found.length} Produtos Encontrados
+        <!-- CONTROLO GLOBAL -->
+        <div style="margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <span style="font-size:11px;color:var(--text2);font-family:'DM Mono',monospace">Aplicar a todos:</span>
+          <button class="btn btn-ghost btn-sm" onclick="setAllMode('both')" id="mode-both" style="border-color:var(--blue);color:var(--blue)">Preço + Stock</button>
+          <button class="btn btn-ghost btn-sm" onclick="setAllMode('price')" id="mode-price">Só Preço</button>
+          <button class="btn btn-ghost btn-sm" onclick="setAllMode('stock')" id="mode-stock">Só Stock</button>
+          <button class="btn btn-ghost btn-sm" onclick="toggleAllFound(false)" style="color:var(--text3)">Limpar seleção</button>
+        </div>
+      </div>
+      <div class="table-wrap" style="max-height:420px;overflow-y:auto">
+        <table>
+          <thead><tr>
+            <th style="width:36px"><input type="checkbox" id="chk-all-found" onchange="toggleAllFound(this.checked)" checked></th>
+            <th>Produto Shopify</th>
+            <th>SKU / Barcode</th>
+            <th>Preço Atual → Novo</th>
+            <th>Stock Atual → Novo</th>
+            <th>Via</th>
+            <th style="text-align:center;width:52px">💶 Preço</th>
+            <th style="text-align:center;width:52px">📦 Stock</th>
+          </tr></thead>
+          <tbody id="found-tbody">
+            ${found.map((p,i)=>{
+              const priceChanged=parseFloat(p.currentPrice||0).toFixed(2)!==p.finalPrice.toFixed(2);
+              const stockChanged=p.currentStock!==p.stockVal;
+              return `<tr id="found-row-${i}">
+                <td><input type="checkbox" class="chk-found" data-idx="${i}" checked onchange="updateFoundRow(${i},this.checked)"></td>
+                <td style="font-weight:600;max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.shopifyTitle}">${p.shopifyTitle}</td>
+                <td class="mono" style="font-size:11px;color:var(--text2)">${p.sku||'—'}${p.barcode?`<br>${p.barcode}`:''}</td>
+                <td style="font-size:12px;white-space:nowrap">
+                  <span class="mono" style="color:var(--text2)">€${parseFloat(p.currentPrice||0).toFixed(2)}</span>
+                  ${priceChanged?`<span style="color:var(--text3)"> → </span>
+                  <span class="price-display-${i} mono" style="color:var(--green);font-weight:600">€${p.finalPrice.toFixed(2)}</span>
+                  <button onclick="editPrice(${i})" style="background:none;border:none;cursor:pointer;padding:2px 4px;color:var(--text3);font-size:13px;vertical-align:middle" title="Editar preço">✏</button>`
+                  :'<span style="color:var(--text3);font-size:11px"> (igual)</span>'}
+                </td>
+                <td class="mono" style="font-size:12px;white-space:nowrap">
+                  <span style="color:var(--text2)">${p.currentStock??'?'}</span>
+                  ${stockChanged?`<span style="color:var(--text3)"> → </span><strong style="color:var(--blue)">${p.stockVal}</strong>`
+                  :'<span style="color:var(--text3);font-size:11px"> (igual)</span>'}
+                </td>
+                <td><span class="badge ${p.matchedBy==='SKU'?'badge-blue':'badge-orange'}" style="font-size:10px">${p.matchedBy}</span></td>
+                <td style="text-align:center"><input type="checkbox" class="chk-price" data-idx="${i}" ${priceChanged?'checked':''} ${!priceChanged?'disabled title="Preço igual"':''} onchange="state.analysisResult.found[${i}].applyPrice=this.checked;updateApplySummary()"></td>
+                <td style="text-align:center"><input type="checkbox" class="chk-stock" data-idx="${i}" ${stockChanged?'checked':''} ${!stockChanged?'disabled title="Stock igual"':''} onchange="state.analysisResult.found[${i}].applyStock=this.checked;updateApplySummary()"></td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`:''
+    }
+
+    <!-- NOVOS PRODUTOS -->
+    ${isNew.length>0?`
+    <div class="review-section rs-new" style="margin-bottom:16px">
+      <div class="review-section-title">🆕 ${isNew.length} Produto(s) Novo(s) — serão adicionados aos Alertas</div>
+      <div class="table-wrap" style="max-height:200px;overflow-y:auto">
+        <table><thead><tr><th>Nome</th><th>SKU</th><th>Barcode</th><th>Preço</th><th>Stock</th></tr></thead>
+        <tbody>${isNew.map(p=>`<tr>
+          <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.name}</td>
+          <td class="mono">${p.sku||'—'}</td><td class="mono">${p.barcode||'—'}</td>
+          <td class="mono">€${p.finalPrice.toFixed(2)}</td><td class="mono">${p.stockVal}</td>
+        </tr>`).join('')}</tbody></table>
+      </div>
+    </div>`:''
+    }
+
+    <!-- NAO ENCONTRADOS -->
+    ${notFound.length>0?`
+    <div class="review-section rs-missing" style="margin-bottom:16px">
+      <div class="review-section-title">❓ ${notFound.length} Não Encontrados — usa Matching para identificar</div>
+      <div class="table-wrap" style="max-height:200px;overflow-y:auto">
+        <table><thead><tr><th>Nome</th><th>SKU</th><th>Barcode</th></tr></thead>
+        <tbody>${notFound.map(p=>`<tr>
+          <td style="max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.name}</td>
+          <td class="mono">${p.sku||'—'}</td><td class="mono">${p.barcode||'—'}</td>
+        </tr>`).join('')}</tbody></table>
+      </div>
+    </div>`:''
+    }
+
+    <!-- PAINEL APLICAR -->
+    <div class="card" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;position:sticky;bottom:0;z-index:10">
+      <div style="flex:1">
+        <div style="font-weight:600;font-size:14px;color:var(--text)" id="apply-summary">A calcular...</div>
+        <div style="font-size:12px;color:var(--text2);margin-top:2px">Revê as seleções antes de aplicar</div>
+      </div>
+      <button class="btn btn-ghost" onclick="resetUpload()">↩ Recomeçar</button>
+      <button class="btn btn-primary" onclick="applyChanges()">✓ Aplicar no Shopify</button>
+    </div>`;
+
+  updateApplySummary();
+}
+
+// Controlo global: só preço / só stock / ambos
+function setAllMode(mode) {
+  // Highlight botão ativo
+  ['both','price','stock'].forEach(m=>{
+    const b=document.getElementById('mode-'+m);
+    if(b){b.style.borderColor='';b.style.color='';}
+  });
+  const active=document.getElementById('mode-'+mode);
+  if(active){active.style.borderColor='var(--blue)';active.style.color='var(--blue)';active.style.background='var(--blue-bg)';}
+
+  document.querySelectorAll('.chk-found').forEach(c=>{c.checked=true;});
+  document.querySelectorAll('.chk-price').forEach(c=>{
+    if(!c.disabled) c.checked=(mode==='both'||mode==='price');
+  });
+  document.querySelectorAll('.chk-stock').forEach(c=>{
+    if(!c.disabled) c.checked=(mode==='both'||mode==='stock');
+  });
+  const chkAll=document.getElementById('chk-all-found');
+  if(chkAll) chkAll.checked=true;
+  updateApplySummary();
+}
+
+// Editar preço manualmente com lápis
+function editPrice(idx) {
+  const p=state.analysisResult?.found[idx];
+  if(!p) return;
+  const currentVal=p.finalPrice.toFixed(2);
+  const displayEl=document.querySelector(`.price-display-${idx}`);
+  if(!displayEl) return;
+
+  // Substituir display por input inline
+  const parent=displayEl.parentElement;
+  const editBtn=parent.querySelector('button');
+  displayEl.style.display='none';
+  if(editBtn) editBtn.style.display='none';
+
+  const input=document.createElement('input');
+  input.type='number'; input.step='0.01'; input.min='0';
+  input.value=currentVal;
+  input.style.cssText='width:80px;padding:3px 6px;font-family:"DM Mono",monospace;font-size:12px;border:1px solid var(--blue);border-radius:5px;color:var(--text);background:var(--surface);outline:none;';
+
+  const confirmBtn=document.createElement('button');
+  confirmBtn.textContent='✓';
+  confirmBtn.style.cssText='background:var(--green);color:white;border:none;border-radius:5px;padding:3px 7px;cursor:pointer;font-size:12px;margin-left:4px;';
+
+  const cancelBtn=document.createElement('button');
+  cancelBtn.textContent='✕';
+  cancelBtn.style.cssText='background:var(--panel);color:var(--text2);border:1px solid var(--border);border-radius:5px;padding:3px 7px;cursor:pointer;font-size:12px;margin-left:3px;';
+
+  const save=()=>{
+    const newVal=parseFloat(input.value);
+    if(isNaN(newVal)||newVal<=0){toast('Preço inválido','error');return;}
+    p.finalPrice=newVal;
+    displayEl.textContent='€'+newVal.toFixed(2); displayEl.style.display='';
+    if(editBtn) editBtn.style.display='';
+    input.remove(); confirmBtn.remove(); cancelBtn.remove();
+    // Activar checkbox de preço
+    const priceChk=document.querySelector(`.chk-price[data-idx="${idx}"]`);
+    if(priceChk){priceChk.disabled=false;priceChk.checked=true;}
+    updateApplySummary();
+    toast('Preço atualizado','success');
+  };
+
+  const cancel=()=>{
+    displayEl.style.display=''; if(editBtn) editBtn.style.display='';
+    input.remove(); confirmBtn.remove(); cancelBtn.remove();
+  };
+
+  confirmBtn.onclick=save;
+  cancelBtn.onclick=cancel;
+  input.onkeydown=(e)=>{if(e.key==='Enter')save();if(e.key==='Escape')cancel();};
+
+  parent.appendChild(input); parent.appendChild(confirmBtn); parent.appendChild(cancelBtn);
+  input.focus(); input.select();
+}
+
+function toggleAllFound(checked) {
+  document.querySelectorAll('.chk-found').forEach(c=>{c.checked=checked;});
+  document.querySelectorAll('.chk-price').forEach(c=>{if(!c.disabled)c.checked=checked;});
+  document.querySelectorAll('.chk-stock').forEach(c=>{if(!c.disabled)c.checked=checked;});
+  const chkAll=document.getElementById('chk-all-found');
+  if(chkAll) chkAll.checked=checked;
+  updateApplySummary();
+}
+
+function updateFoundRow(idx, checked) {
+  const priceChk=document.querySelector(`.chk-price[data-idx="${idx}"]`);
+  const stockChk=document.querySelector(`.chk-stock[data-idx="${idx}"]`);
+  if(priceChk&&!priceChk.disabled) priceChk.checked=checked;
+  if(stockChk&&!stockChk.disabled) stockChk.checked=checked;
+  updateApplySummary();
+}
+
+function updateApplySummary() {
+  const el=document.getElementById('apply-summary');
+  if(!el||!state.analysisResult) return;
+  const selected=document.querySelectorAll('.chk-found:checked').length;
+  const priceUpdates=document.querySelectorAll('.chk-price:checked:not(:disabled)').length;
+  const stockUpdates=document.querySelectorAll('.chk-stock:checked:not(:disabled)').length;
+  el.textContent=`${selected} produto(s) selecionado(s) — ${priceUpdates} preço(s) + ${stockUpdates} stock(s) a atualizar`;
+}
+
+async function applyChanges() {
+  if(!state.analysisResult) return;
+  const {found,isNew,knownSkus}=state.analysisResult;
+  const supp=state.suppliers.find(s=>s.id===state.uploadSuppId);
+
+  // Get selected rows
+  const toUpdate=found.filter((_,i)=>document.querySelector(`.chk-found[data-idx="${i}"]`)?.checked);
+  if(toUpdate.length===0&&isNew.length===0){toast('Nada selecionado para aplicar','error');return;}
+
+  // Hide analysis, show progress
+  document.getElementById('step-analysis').style.display='none';
+  document.getElementById('step-mapping').style.display='none';
+  document.getElementById('step-progress').style.display='block';
+
+  const log=(msg)=>{const el=document.getElementById('progress-log');if(el){el.innerHTML+=msg+'<br>';el.scrollTop=el.scrollHeight;}};
+  const setProgress=(p)=>{const el=document.getElementById('progress-fill');if(el)el.style.width=p+'%';};
+  const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+
+  let locationId;
+  try{locationId=await getLocationId();}
+  catch(e){log('⚠ Não foi possível obter localização: '+e.message);}
+
+  if(!locationId){
+    log('❌ Sem locationId — stock não será atualizado. Verifica as permissões do token.');
+  } else {
+    log(`📍 Location: ${locationId}`);
+  }
+
+  let updated=0, errors=0, stockUpdated=0, priceUpdated=0;
+  log(`🚀 A processar ${toUpdate.length} produto(s)...`);
+
+  for(let i=0;i<toUpdate.length;i++){
+    const p=toUpdate[i];
+    const foundIdx=found.indexOf(p);
+    const applyPrice=document.querySelector(`.chk-price[data-idx="${foundIdx}"]`)?.checked;
+    const applyStock=document.querySelector(`.chk-stock[data-idx="${foundIdx}"]`)?.checked;
+    try {
+      if(applyPrice){
+        await updateVariantPrice(p.shopifyProduct.id, p.shopifyVariant.id, p.finalPrice.toFixed(2));
+        priceUpdated++;
+      }
+      if(applyStock){
+        if(!locationId) {
+          log(`⚠ ${p.shopifyTitle.substring(0,40)}: sem locationId, stock ignorado`);
+        } else if(!p.shopifyVariant.inventoryItemId){
+          log(`⚠ ${p.shopifyTitle.substring(0,40)}: sem inventoryItemId, stock ignorado`);
+        } else {
+          // Ativar rastreio de inventário
+          try {
+            const trackRes = await shopifyGQL(
+              `mutation($id:ID!,$input:InventoryItemInput!){
+                inventoryItemUpdate(id:$id,input:$input){
+                  inventoryItem{id tracked}
+                  userErrors{message}
+                }
+              }`,
+              { id: p.shopifyVariant.inventoryItemId, input: { tracked: true } }
+            );
+            const trackErrs = trackRes?.inventoryItemUpdate?.userErrors||[];
+            if(trackErrs.length) log(`⚠ tracking: ${trackErrs[0].message}`);
+            else log(`✓ tracking ativo: ${trackRes?.inventoryItemUpdate?.inventoryItem?.tracked}`);
+          } catch(e) { log(`⚠ tracking erro: ${e.message}`); }
+
+          // Ativar o item no location
+          try {
+            const activateRes = await shopifyGQL(
+              `mutation($inventoryItemId:ID!,$locationId:ID!){
+                inventoryActivate(inventoryItemId:$inventoryItemId,locationId:$locationId){
+                  inventoryLevel{available}
+                  userErrors{message}
+                }
+              }`,
+              { inventoryItemId: p.shopifyVariant.inventoryItemId, locationId }
+            );
+            const actErrs = activateRes?.inventoryActivate?.userErrors||[];
+            if(actErrs.length) log(`⚠ activate: ${actErrs[0].message}`);
+            else log(`✓ activate: available=${activateRes?.inventoryActivate?.inventoryLevel?.available}`);
+          } catch(e) { log(`⚠ activate erro: ${e.message}`); }
+
+          // Definir stock
+          const stockRes = await updateVariantStock(p.shopifyVariant.inventoryItemId, locationId, p.stockVal);
+          const stockErrs = stockRes?.inventorySetQuantities?.userErrors||[];
+          if(stockErrs.length) {
+            log(`❌ stock erro: ${stockErrs[0].message}`);
+          } else {
+            log(`✓ stock definido: ${p.stockVal}`);
+            stockUpdated++;
+          }
+        }
+      }
+      p.shopifyVariant.price=String(p.finalPrice); p.shopifyVariant.stock=p.stockVal;
+      log(`✅ ${p.shopifyTitle.substring(0,50)}${applyPrice?` | €${p.finalPrice.toFixed(2)}`:''}${applyStock&&p.shopifyVariant.inventoryItemId?` | stock ${p.stockVal}`:''}`);
+      updated++;
+    } catch(e){
+      log(`❌ ${p.shopifyTitle.substring(0,40)}: ${e.message}`);
+      errors++;
+    }
+    setProgress(Math.round((i+1)/toUpdate.length*100));
+    await sleep(350);
+  }
+
+  // Add new product alerts
+  isNew.forEach(p=>{
+    state.alerts.push({
+      id:'alert_'+Date.now()+Math.random(), type:'new_product',
+      title:'Novo produto detetado',
+      desc:`${p.name}${p.sku?' (SKU: '+p.sku+')':''} — ${p.suppName} — €${p.finalPrice.toFixed(2)}`,
+      sku:p.sku, barcode:p.barcode, name:p.name, price:p.finalPrice, stock:p.stockVal,
+      suppId:p.suppId, date:new Date().toISOString(), dismissed:false,
+    });
+  });
+
+  // Orphans: products in Shopify not in this file
+  state.shopifyProducts.forEach(p=>p.variants.forEach(v=>{
+    const vSku=(v.sku||'').trim().toLowerCase();
+    if(vSku&&!knownSkus.has(vSku)&&!state.orphans.some(o=>o.variantId===v.id)){
+      state.orphans.push({
+        id:'orp_'+Date.now()+Math.random(), productId:p.id, variantId:v.id,
+        title:p.title, sku:v.sku, barcode:v.barcode, price:v.price, stock:v.stock,
+        suppId:state.uploadSuppId, suppName:supp.name,
+        detectedAt:new Date().toISOString(), dismissed:false,
+      });
+    }
+  }));
+
+  // Save history
+  state.uploadHistory.unshift({
+    id:'upl_'+Date.now(), supplierId:state.uploadSuppId, supplierName:supp.name,
+    date:new Date().toISOString(), total:state.parsedRows.length,
+    updated, errors, newProducts:isNew.length,
+  });
+  state.suppliers=state.suppliers.map(s=>s.id===state.uploadSuppId?{...s,lastUpload:new Date().toISOString()}:s);
+  save();
+
+  setProgress(100);
+  const resumo=`🎉 <strong>Concluído!</strong> ${updated} produto(s) processado(s) — ${priceUpdated} preço(s) + ${stockUpdated} stock(s) atualizados${errors>0?' | ❌ '+errors+' erros':''}${isNew.length>0?' | 🆕 '+isNew.length+' novos em Alertas':''}`;
+  log('<br>'+resumo);
+  // Garantir que a mensagem final é visível
+  const logEl=document.getElementById('progress-log');
+  if(logEl) setTimeout(()=>{logEl.scrollTop=logEl.scrollHeight;},100);
+  toast(`${updated} produto(s) processado(s): ${priceUpdated} preços + ${stockUpdated} stocks`,'success');
+  updateBadges();
+}
+
+function resetUpload() {
+  state.parsedRows=[]; state.colMap={}; state.analysisResult=null; state.uploadSuppId=null;
+  upload();
+}
+
+// ═══════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════
+function alerts() {
+  document.getElementById('topbar-actions').innerHTML=`<button class="btn btn-ghost btn-sm" onclick="dismissAllAlerts()">Dispensar todos</button>`;
+  const active=state.alerts.filter(a=>!a.dismissed);
+  document.getElementById('content').innerHTML=`
+    <div class="tabs">
+      <button class="tab active" onclick="filterAlerts('all',this)">Todos (${active.length})</button>
+      <button class="tab" onclick="filterAlerts('new_product',this)">Novos Produtos (${active.filter(a=>a.type==='new_product').length})</button>
+    </div>
+    <div class="alert-list" id="alert-list">${renderAlertList(active)}</div>`;
+}
+
+function renderAlertList(list) {
+  if(!list.length) return `<div class="empty-state"><div class="empty-icon">🔔</div><p>Sem alertas ativos</p></div>`;
+  return list.map(a=>`
+    <div class="alert-card ${a.type}" id="alert-${a.id}">
+      <div class="alert-icon">${a.type==='new_product'?'🆕':'⚠'}</div>
+      <div class="alert-body">
+        <div class="alert-title">${a.title}</div>
+        <div class="alert-desc">${a.desc}</div>
+        <div class="alert-desc" style="margin-top:3px;color:var(--text3)">${new Date(a.date).toLocaleDateString('pt-PT')}</div>
+        <div class="alert-actions">
+          ${a.type==='new_product'?`<button class="btn btn-success btn-sm" onclick="suggestCreate('${a.id}')">+ Criar no Shopify</button>`:''}
+          <button class="btn btn-ghost btn-sm" onclick="dismissAlert('${a.id}')">Dispensar</button>
+        </div>
+      </div>
+    </div>`).join('');
+}
+
+function filterAlerts(type,el) {
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active')); el.classList.add('active');
+  document.getElementById('alert-list').innerHTML=renderAlertList(state.alerts.filter(a=>!a.dismissed&&(type==='all'||a.type===type)));
+}
+
+function dismissAlert(id) {
+  state.alerts=state.alerts.map(a=>a.id===id?{...a,dismissed:true}:a);
+  save(); document.getElementById('alert-'+id)?.remove(); updateBadges();
+}
+
+function dismissAllAlerts() {
+  state.alerts=state.alerts.map(a=>({...a,dismissed:true})); save(); render();
+}
+
+function suggestCreate(alertId) {
+  const a=state.alerts.find(x=>x.id===alertId);
+  if(!a) return;
+  const supp=state.suppliers.find(s=>s.id===a.suppId);
+  document.getElementById('modal-content').innerHTML=`
+    <div class="modal-title">🆕 Criar Produto no Shopify</div>
+    <div class="form-grid">
+      <div class="form-group"><label>Título</label><input type="text" id="np-title" value="${a.name}"></div>
+      <div class="form-row">
+        <div class="form-group"><label>SKU</label><input type="text" id="np-sku" value="${a.sku||''}"></div>
+        <div class="form-group"><label>Barcode</label><input type="text" id="np-barcode" value="${a.barcode||''}"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Preço (€)</label><input type="number" id="np-price" value="${a.price||''}" step="0.01"></div>
+        <div class="form-group"><label>Stock Inicial</label><input type="number" id="np-stock" value="${a.stock||0}"></div>
+      </div>
+      <div class="form-group"><label>Vendor</label><input type="text" id="np-vendor" value="${supp?.name||''}"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary" onclick="createFromAlert('${alertId}')">Criar no Shopify</button>
+    </div>`;
+  openModal();
+}
+
+async function createFromAlert(alertId) {
+  const title=document.getElementById('np-title')?.value.trim();
+  const sku=document.getElementById('np-sku')?.value.trim();
+  const barcode=document.getElementById('np-barcode')?.value.trim();
+  const price=document.getElementById('np-price')?.value;
+  const vendor=document.getElementById('np-vendor')?.value.trim();
+  if(!title){toast('Título obrigatório','error');return;}
+  toast('A criar produto...','info');
+  try{
+    const data=await shopifyGQL(`mutation($input:ProductInput!){productCreate(input:$input){product{id variants(first:1){edges{node{inventoryItem{id}}}}}userErrors{message}}}`,
+      {input:{title,vendor,status:'DRAFT',variants:[{price:String(price),barcode:barcode||undefined}]}});
+    const errs=data.productCreate.userErrors;
+    if(errs.length){toast(errs[0].message,'error');return;}
+    const invId=data.productCreate.product?.variants?.edges[0]?.node?.inventoryItem?.id;
+    if(invId&&sku) await updateVariantSKU(invId,sku);
+    dismissAlert(alertId); closeModal();
+    toast('Produto criado como rascunho ✓','success');
+    fetchShopifyProducts();
+  }catch(e){toast('Erro: '+e.message,'error');}
+}
+
+// ═══════════════════════════════════════════
+// ORPHANS
+// ═══════════════════════════════════════════
+function orphans() {
+  document.getElementById('topbar-actions').innerHTML=`<button class="btn btn-ghost btn-sm" onclick="dismissAllOrphans()">Dispensar todos</button>`;
+  const active=state.orphans.filter(o=>!o.dismissed);
+  document.getElementById('content').innerHTML=`
+    <div class="card" style="margin-bottom:16px;background:var(--orange-bg);border-color:#FDE68A">
+      <p style="font-size:13px;color:var(--orange)">⚠ Estes produtos existem no Shopify mas não apareceram nos ficheiros mais recentes dos fornecedores. Podem estar descontinuados, ter SKUs desatualizados ou pertencer a um fornecedor inativo.</p>
+    </div>
+    <div class="table-wrap">
+      <table><thead><tr><th>Produto</th><th>SKU</th><th>Barcode</th><th>Preço</th><th>Stock</th><th>Fornecedor</th><th>Detetado</th><th>Ação</th></tr></thead>
+      <tbody>
+        ${active.length===0?`<tr><td colspan="8"><div class="empty-state"><div class="empty-icon">✅</div><p>Todos os produtos têm atualizações recentes</p></div></td></tr>`:
+          active.map(o=>`<tr id="orp-${o.id}">
+            <td style="font-weight:600;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${o.title}</td>
+            <td class="mono">${o.sku||'—'}</td><td class="mono" style="color:var(--text2)">${o.barcode||'—'}</td>
+            <td class="mono">€${o.price||'—'}</td><td class="mono">${o.stock??'—'}</td>
+            <td><span class="badge badge-blue">${o.suppName}</span></td>
+            <td class="mono" style="color:var(--text2)">${new Date(o.detectedAt).toLocaleDateString('pt-PT')}</td>
+            <td><div style="display:flex;gap:4px;flex-wrap:wrap">
+              <button class="btn btn-ghost btn-sm" onclick="archiveOrphan('${o.id}')">📦 Arquivar</button>
+              <button class="btn btn-danger btn-sm" onclick="deleteOrphan('${o.id}')">🗑 Eliminar</button>
+              <button class="btn btn-ghost btn-sm" onclick="dismissOrphan('${o.id}')">✕</button>
+            </div></td>
+          </tr>`).join('')}
+      </tbody></table>
+    </div>`;
+}
+
+async function archiveOrphan(id) {
+  const o=state.orphans.find(x=>x.id===id);
+  if(!o||!confirm(`Arquivar "${o.title}" no Shopify?`)) return;
+  try{await archiveProduct(o.productId); dismissOrphan(id); toast('Produto arquivado','success');}
+  catch(e){toast('Erro: '+e.message,'error');}
+}
+
+async function deleteOrphan(id) {
+  const o=state.orphans.find(x=>x.id===id);
+  if(!o||!confirm(`⚠ Eliminar permanentemente "${o.title}"? Não pode ser desfeito.`)) return;
+  try{await deleteProduct(o.productId); dismissOrphan(id); toast('Produto eliminado','success');}
+  catch(e){toast('Erro: '+e.message,'error');}
+}
+
+function dismissOrphan(id) {
+  state.orphans=state.orphans.map(o=>o.id===id?{...o,dismissed:true}:o);
+  save(); document.getElementById('orp-'+id)?.remove(); updateBadges();
+}
+
+function dismissAllOrphans() {
+  state.orphans=state.orphans.map(o=>({...o,dismissed:true})); save(); render();
+}
+
+// ═══════════════════════════════════════════
+// MATCHING
+// ═══════════════════════════════════════════
+function matching() {
+  document.getElementById('topbar-actions').innerHTML=`<button class="btn btn-primary" onclick="runMatching()">▶ Executar Matching</button>`;
+  document.getElementById('content').innerHTML=`
+    <div class="card" style="margin-bottom:16px;background:var(--blue-bg);border-color:#BFDBFE">
+      <p style="font-size:13px;color:var(--blue)">🔗 Compara produtos não encontrados por SKU/barcode com produtos do Shopify por semelhança de nome — útil para detetar códigos desatualizados ou duplicados.</p>
+    </div>
+    ${state.shopifyProducts.length===0?`<div class="card" style="text-align:center;padding:40px"><div style="font-size:40px;margin-bottom:12px">🔗</div><p style="color:var(--text2)">Sincroniza os produtos do Shopify primeiro.</p><button class="btn btn-primary" style="margin-top:16px" onclick="fetchShopifyProducts().then(render)">Sincronizar Shopify</button></div>`:`
+    <div class="table-wrap">
+      <div class="table-header"><span style="font-family:'Syne',sans-serif;font-weight:700">${state.matches.filter(m=>!m.dismissed).length} sugestão(ões)</span></div>
+      <table><thead><tr><th>Produto Shopify</th><th>SKU Atual</th><th>Nome no Fornecedor</th><th>SKU Sugerido</th><th>Score</th><th>Ação</th></tr></thead>
+      <tbody>
+        ${state.matches.filter(m=>!m.dismissed).length===0?`<tr><td colspan="6"><div class="empty-state"><div class="empty-icon">🔗</div><p>Clica em "Executar Matching" para analisar</p></div></td></tr>`:
+          state.matches.filter(m=>!m.dismissed).map(m=>`<tr id="match-${m.id}">
+            <td style="font-weight:600">${m.shopifyTitle}</td>
+            <td class="mono">${m.shopifySku||'—'}</td>
+            <td style="color:var(--blue)">${m.supplierName}</td>
+            <td class="mono">${m.supplierSku}</td>
+            <td><span class="badge ${m.score>85?'badge-green':m.score>60?'badge-yellow':'badge-orange'}">${m.score}%</span></td>
+            <td><div style="display:flex;gap:4px">
+              <button class="btn btn-success btn-sm" onclick="acceptMatch('${m.id}')">✓ Aceitar</button>
+              <button class="btn btn-ghost btn-sm" onclick="rejectMatch('${m.id}')">✕</button>
+            </div></td>
+          </tr>`).join('')}
+      </tbody></table>
+    </div>`}`;
+}
+
+function similarity(a,b) {
+  a=a.toLowerCase().replace(/[^a-z0-9\s]/g,'').trim();
+  b=b.toLowerCase().replace(/[^a-z0-9\s]/g,'').trim();
+  if(a===b) return 100;
+  const wa=new Set(a.split(/\s+/).filter(w=>w.length>2));
+  const wb=new Set(b.split(/\s+/).filter(w=>w.length>2));
+  let common=0; wa.forEach(w=>{if(wb.has(w))common++;});
+  return Math.round((common/Math.max(wa.size,wb.size,1))*100);
+}
+
+async function runMatching() {
+  if(!state.shopifyProducts.length){toast('Sincroniza o Shopify primeiro','error');return;}
+  state.matches=[];
+  const newProds=state.alerts.filter(a=>a.type==='new_product'&&!a.dismissed);
+  newProds.forEach(np=>{
+    if(!np.name) return;
+    let best=null, bestScore=0;
+    state.shopifyProducts.forEach(sp=>{
+      const score=similarity(np.name,sp.title);
+      if(score>bestScore&&score>=50){bestScore=score;best=sp;}
+    });
+    if(best&&!state.matches.some(m=>m.shopifyId===best.id&&m.supplierSku===np.sku)){
+      state.matches.push({
+        id:'match_'+Date.now()+Math.random(),
+        shopifyId:best.id, shopifyTitle:best.title,
+        shopifySku:best.variants[0]?.sku, shopifyVariantId:best.variants[0]?.id,
+        shopifyInventoryItemId:best.variants[0]?.inventoryItemId,
+        supplierName:np.name, supplierSku:np.sku, supplierBarcode:np.barcode,
+        score:bestScore, alertId:np.id, dismissed:false,
+      });
+    }
+  });
+  save(); toast(`${state.matches.length} sugestão(ões) encontrada(s)`,'success'); render();
+}
+
+async function acceptMatch(id) {
+  const m=state.matches.find(x=>x.id===id);
+  if(!m) return;
+  try{
+    if(m.shopifyInventoryItemId&&m.supplierSku) await updateVariantSKU(m.shopifyInventoryItemId,m.supplierSku);
+    if(m.alertId) dismissAlert(m.alertId);
+    state.matches=state.matches.map(x=>x.id===id?{...x,dismissed:true}:x);
+    save(); document.getElementById('match-'+id)?.remove(); toast('SKU atualizado ✓','success');
+  }catch(e){toast('Erro: '+e.message,'error');}
+}
+
+function rejectMatch(id) {
+  state.matches=state.matches.map(m=>m.id===id?{...m,dismissed:true}:m);
+  save(); document.getElementById('match-'+id)?.remove();
+}
+
+// ═══════════════════════════════════════════
+// CRIAR PRODUTOS
+// ═══════════════════════════════════════════
+// Estado do módulo de criação
+let cState = {
+  rows: [],           // linhas do CSV
+  colMap: {},         // mapeamento de colunas
+  products: [],       // produtos processados com tradução
+  variantGroups: [],  // grupos de variantes definidos manualmente
+  step: 'upload',     // upload | mapping | review | progress
+};
+
+function create() {
+  document.getElementById('topbar-actions').innerHTML='';
+  document.getElementById('content').innerHTML=`
+    <div>
+
+      <!-- PASSO 1: Upload -->
+      <div class="card" id="cr-step-upload" style="margin-bottom:16px">
+        <div class="card-title">1 — Carregar Ficheiro</div>
+        <div class="upload-zone" onclick="document.getElementById('cr-file').click()"
+          ondragover="event.preventDefault();this.classList.add('drag')"
+          ondragleave="this.classList.remove('drag')"
+          ondrop="crHandleDrop(event)">
+          <div class="up-icon">📦</div>
+          <p><strong>Clica para selecionar</strong> ou arrasta aqui</p>
+          <p style="font-size:12px;color:var(--text3);margin-top:4px">.xls, .xlsx, .csv — CSV do fornecedor espanhol</p>
+        </div>
+        <input type="file" id="cr-file" accept=".xls,.xlsx,.csv" style="display:none" onchange="crHandleFile(this.files[0])">
+        <div id="cr-file-info" style="display:none;margin-top:10px"></div>
+      </div>
+
+      <!-- PASSO 2: Mapeamento -->
+      <div class="card" id="cr-step-mapping" style="display:none;margin-bottom:16px">
+        <div class="card-title">2 — Mapear Colunas</div>
+        <p style="font-size:12px;color:var(--text2);margin-bottom:14px">Indica qual coluna do ficheiro corresponde a cada campo.</p>
+        <div id="cr-col-mapper"></div>
+        <div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end">
+          <button class="btn btn-ghost" onclick="crReset()">↩ Cancelar</button>
+          <button class="btn btn-primary" onclick="crRunReview()">Ver Produtos →</button>
+        </div>
+      </div>
+
+      <!-- PASSO 3: Revisão e seleção -->
+      <div id="cr-step-review" style="display:none"></div>
+
+      <!-- PASSO 4: Progresso -->
+      <div id="cr-step-progress" style="display:none">
+        <div class="card">
+          <div class="card-title">A criar produtos no Shopify...</div>
+          <div id="cr-log" style="font-family:'DM Mono',monospace;font-size:12px;color:var(--text2);line-height:1.9;max-height:260px;overflow-y:auto"></div>
+          <div class="progress-bar" style="margin-top:12px"><div class="progress-fill" id="cr-progress" style="width:0%"></div></div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function crHandleDrop(e) {
+  e.preventDefault();
+  document.querySelector('.upload-zone')?.classList.remove('drag');
+  crHandleFile(e.dataTransfer.files[0]);
+}
+
+function crHandleFile(file) {
+  if(!file) return;
+  const reader=new FileReader();
+  reader.onload=(e)=>{
+    const data=new Uint8Array(e.target.result);
+    const wb=XLSX.read(data,{type:'array',raw:false,cellText:true,cellDates:true});
+    const ws=wb.Sheets[wb.SheetNames[0]];
+    // Forçar células numéricas a string para evitar notação científica em SKU/EAN
+    Object.keys(ws).forEach(addr=>{
+      if(addr[0]==='!') return;
+      const cell=ws[addr];
+      if(cell.t==='n'&&cell.w) cell.v=cell.w.replace(/\./g,'').replace(/,/g,'.')||cell.v;
+    });
+    const rows=XLSX.utils.sheet_to_json(ws,{defval:'',raw:false});
+    if(!rows.length){toast('Ficheiro sem dados','error');return;}
+    cState.rows=rows;
+    crShowColMapper(rows);
+  };
+  reader.readAsArrayBuffer(file);
+  document.getElementById('cr-file-info').style.display='block';
+  document.getElementById('cr-file-info').innerHTML=`
+    <div style="display:flex;align-items:center;gap:10px;background:var(--panel);padding:9px 12px;border-radius:8px;border:1px solid var(--border)">
+      <span>📄</span><span style="font-weight:600">${file.name}</span>
+      <span style="color:var(--text2);font-size:12px">${(file.size/1024).toFixed(0)} KB</span>
+    </div>`;
+}
+
+function crShowColMapper(rows) {
+  const headers=Object.keys(rows[0]);
+  const detect=(hints)=>headers.find(h=>hints.some(hint=>h.toLowerCase().includes(hint.toLowerCase())))||'';
+  cState.colMap={
+    name:   detect(['Articulo','Nombre','Name','Title','Descripcion','Modelo']),
+    sku:    detect(['Part Number','SKU','Referencia','Codigo 3','Modelo']),
+    barcode:detect(['Codigo 5','EAN','Barcode','Codigo 4']),
+    price:  detect(['PVP','Precio','Price','Custo','Cost','Importe']),
+    stock:  detect(['Stock','Unidades','Existencias','Cantidad']),
+    image:  detect(['Imagen','Image','Foto','Photo','URL','Img']),
+    brand:  detect(['Fabricante','Marca','Brand','Vendor','Proveedor']),
+    category:detect(['Familia','Category','Categoria','Tipo','Grupo']),
+  };
+
+  const sel=(key,label)=>`
+    <div class="form-group">
+      <label>${label}</label>
+      <select id="crcol-${key}" onchange="cState.colMap['${key}']=this.value">
+        <option value="">— Não usar —</option>
+        ${headers.map(h=>`<option value="${h}" ${cState.colMap[key]===h?'selected':''}>${h}</option>`).join('')}
+      </select>
+    </div>`;
+
+  document.getElementById('cr-col-mapper').innerHTML=`
+    <div class="col-mapper">
+      ${sel('name','Nome / Artigo *')}
+      ${sel('sku','SKU / Part Number')}
+      ${sel('barcode','Barcode / EAN')}
+      ${sel('price','Preço')}
+      ${sel('stock','Stock')}
+      ${sel('image','URL Imagem')}
+      ${sel('brand','Fabricante / Marca')}
+      ${sel('category','Categoria / Família')}
+    </div>
+    <div style="margin-top:14px;background:var(--panel);border-radius:8px;padding:10px 14px;border:1px solid var(--border)">
+      <div style="font-size:11px;color:var(--text2);margin-bottom:8px">Pré-visualização (3 linhas)</div>
+      <div style="overflow-x:auto">
+        <table style="width:100%;font-size:11px">
+          <thead><tr><th>Nome</th><th>SKU</th><th>Preço</th><th>Stock</th><th>Imagem</th></tr></thead>
+          <tbody>${rows.slice(0,3).map(r=>`<tr>
+            <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r[cState.colMap.name]||'—'}</td>
+            <td class="mono">${r[cState.colMap.sku]||'—'}</td>
+            <td class="mono">${r[cState.colMap.price]||'—'}</td>
+            <td class="mono">${r[cState.colMap.stock]||'—'}</td>
+            <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--blue);font-size:10px">${r[cState.colMap.image]||'—'}</td>
+          </tr>`).join('')}</tbody>
+        </table>
+      </div>
+    </div>`;
+
+  document.getElementById('cr-step-mapping').style.display='block';
+}
+
+async function crRunReview() {
+  // Sync colMap from selects
+  ['name','sku','barcode','price','stock','image','brand','category'].forEach(k=>{
+    const el=document.getElementById('crcol-'+k); if(el) cState.colMap[k]=el.value;
+  });
+  if(!cState.colMap.name){toast('Coluna de nome obrigatória','error');return;}
+
+  const btn=document.querySelector('#cr-step-mapping .btn-primary');
+  btn.textContent='A traduzir...'; btn.disabled=true;
+
+  // Build products from rows
+  const products=cState.rows.map((row,i)=>{
+    const nameES=(row[cState.colMap.name]||'').trim();
+    const price=parseFloat((row[cState.colMap.price]||'0').replace(',','.'))||0;
+    return {
+      _idx:i,
+      nameES,
+      namePT:'',           // filled by translation
+      sku:(row[cState.colMap.sku]||'').trim(),
+      barcode:(row[cState.colMap.barcode]||'').trim(),
+      price:price.toFixed(2),
+      stock:parseInt((row[cState.colMap.stock]||'0').replace(/[^0-9]/g,''))||0,
+      imageUrl:(row[cState.colMap.image]||'').trim(),
+      brand:(row[cState.colMap.brand]||'').trim(),
+      category:(row[cState.colMap.category]||'').trim(),
+      selected:true,
+      variantGroup:null,   // id do grupo se for variante
+    };
+  }).filter(p=>p.nameES);
+
+  // Translate in batches of 20 via MyMemory API
+  const BATCH=20;
+  for(let i=0;i<products.length;i+=BATCH){
+    const batch=products.slice(i,i+BATCH);
+    await Promise.all(batch.map(async p=>{
+      try{
+        const r=await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(p.nameES)}&langpair=es|pt-pt`);
+        const j=await r.json();
+        p.namePT=j?.responseData?.translatedText||p.nameES;
+        // Clean up: if translation looks weird, keep original
+        if(p.namePT.toUpperCase()===p.namePT||p.namePT.length<2) p.namePT=p.nameES;
+      }catch{p.namePT=p.nameES;}
+    }));
+    btn.textContent=`A traduzir... ${Math.min(i+BATCH,products.length)}/${products.length}`;
+    await new Promise(r=>setTimeout(r,300)); // rate limit MyMemory
+  }
+
+  cState.products=products;
+  cState.variantGroups=[];
+  crRenderReview();
+  btn.textContent='Ver Produtos →'; btn.disabled=false;
+}
+
+function crRenderReview() {
+  const el=document.getElementById('cr-step-review');
+  el.style.display='block';
+  document.getElementById('cr-step-mapping').style.display='none';
+
+  const products=cState.products;
+  const brands=[...new Set(products.map(p=>p.brand).filter(Boolean))].sort();
+  const cats=[...new Set(products.map(p=>p.category).filter(Boolean))].sort();
+  const selected=products.filter(p=>p.selected).length;
+  const grouped=products.filter(p=>p.variantGroup).length;
+
+  el.innerHTML=`
+    <!-- FILTROS -->
+    <div class="card" style="margin-bottom:14px;padding:14px 18px">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <input type="text" id="cr-search" placeholder="Pesquisar nome / SKU..." style="width:200px;padding:7px 10px;font-size:13px" oninput="crFilterTable()">
+        <select id="cr-filter-brand" onchange="crFilterTable()" style="font-size:13px;padding:7px 10px">
+          <option value="">Todas as marcas</option>
+          ${brands.map(b=>`<option value="${b}">${b}</option>`).join('')}
+        </select>
+        <select id="cr-filter-cat" onchange="crFilterTable()" style="font-size:13px;padding:7px 10px">
+          <option value="">Todas as categorias</option>
+          ${cats.map(c=>`<option value="${c}">${c}</option>`).join('')}
+        </select>
+        <div style="margin-left:auto;display:flex;gap:6px">
+          <button class="btn btn-ghost btn-sm" onclick="crSelectAll(true)">Selecionar todos</button>
+          <button class="btn btn-ghost btn-sm" onclick="crSelectAll(false)">Limpar</button>
+          <button class="btn btn-blue btn-sm" onclick="crGroupVariants()" id="btn-group-variants">🔗 Agrupar como Variantes</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- TABELA -->
+    <div class="table-wrap" style="margin-bottom:14px">
+      <div style="max-height:460px;overflow-y:auto">
+        <table id="cr-table">
+          <thead>
+            <tr>
+              <th style="width:36px"><input type="checkbox" id="cr-chk-all" onchange="crSelectAll(this.checked)" checked></th>
+              <th style="width:60px">Img</th>
+              <th>Nome ES (original)</th>
+              <th>Nome PT <span style="color:var(--blue);font-weight:400;font-size:10px">editável</span></th>
+              <th>SKU</th>
+              <th>Preço</th>
+              <th>Stock</th>
+              <th>Marca</th>
+              <th>Variante</th>
+            </tr>
+          </thead>
+          <tbody id="cr-tbody">
+            ${products.map((p,i)=>crProductRow(p,i)).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- GRUPOS DE VARIANTES -->
+    <div id="cr-variant-groups" style="${cState.variantGroups.length>0?'':'display:none'};margin-bottom:14px"></div>
+
+    <!-- PAINEL CRIAR -->
+    <div class="card" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;position:sticky;bottom:0;z-index:10">
+      <div style="flex:1">
+        <div style="font-weight:600;font-size:14px" id="cr-summary">${selected} produto(s) selecionado(s)</div>
+        <div style="font-size:12px;color:var(--text2);margin-top:2px">Todos criados como Rascunho no Shopify</div>
+      </div>
+      <button class="btn btn-ghost" onclick="crReset()">↩ Recomeçar</button>
+      <button class="btn btn-primary" onclick="crCreate()">✚ Criar no Shopify</button>
+    </div>`;
+
+  crRenderVariantGroups();
+}
+
+function crProductRow(p,i) {
+  const group=cState.variantGroups.find(g=>g.id===p.variantGroup);
+  return `<tr id="cr-row-${i}" style="${!p.selected?'opacity:0.45':''}">
+    <td><input type="checkbox" class="cr-chk" data-idx="${i}" ${p.selected?'checked':''} onchange="crToggle(${i},this.checked)"></td>
+    <td>
+      ${p.imageUrl?`<img src="${p.imageUrl}" style="width:44px;height:44px;object-fit:contain;border-radius:6px;border:1px solid var(--border);background:white" onerror="this.style.display='none'">`:'<div style="width:44px;height:44px;background:var(--panel);border-radius:6px;display:flex;align-items:center;justify-content:center;color:var(--text3);font-size:18px">?</div>'}
+    </td>
+    <td style="font-size:12px;color:var(--text2);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.nameES}">${p.nameES}</td>
+    <td style="min-width:180px">
+      <div style="display:flex;align-items:center;gap:6px">
+        <input type="text" value="${p.namePT}" id="cr-name-${i}"
+          style="flex:1;padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:var(--surface)"
+          onchange="cState.products[${i}].namePT=this.value">
+      </div>
+    </td>
+    <td class="mono" style="font-size:11px;color:var(--text2)">${p.sku||'—'}</td>
+    <td class="mono" style="font-size:12px">
+      <input type="number" value="${p.price}" step="0.01" min="0"
+        style="width:72px;padding:4px 6px;font-size:12px;border:1px solid var(--border);border-radius:6px;font-family:'DM Mono',monospace;background:var(--surface)"
+        onchange="cState.products[${i}].price=parseFloat(this.value).toFixed(2)">
+    </td>
+    <td class="mono" style="font-size:12px">${p.stock}</td>
+    <td style="font-size:12px;color:var(--text2)">${p.brand||'—'}</td>
+    <td>
+      ${group?`<span class="badge badge-blue" style="font-size:10px" title="${group.attribute}">🔗 ${group.name}</span>
+               <button onclick="crRemoveFromGroup(${i})" style="background:none;border:none;cursor:pointer;color:var(--text3);font-size:11px;padding:0 3px">✕</button>`
+             :'<span style="color:var(--text3);font-size:11px">—</span>'}
+    </td>
+  </tr>`;
+}
+
+function crFilterTable() {
+  const search=(document.getElementById('cr-search')?.value||'').toLowerCase();
+  const brand=document.getElementById('cr-filter-brand')?.value||'';
+  const cat=document.getElementById('cr-filter-cat')?.value||'';
+  cState.products.forEach((p,i)=>{
+    const row=document.getElementById('cr-row-'+i);
+    if(!row) return;
+    const visible=
+      (!search||(p.namePT+p.nameES+p.sku).toLowerCase().includes(search))&&
+      (!brand||p.brand===brand)&&
+      (!cat||p.category===cat);
+    row.style.display=visible?'':'none';
+  });
+}
+
+function crToggle(idx, checked) {
+  cState.products[idx].selected=checked;
+  const row=document.getElementById('cr-row-'+idx);
+  if(row) row.style.opacity=checked?'1':'0.45';
+  crUpdateSummary();
+}
+
+function crSelectAll(checked) {
+  // Só atualiza linhas visíveis para não travar com ficheiros grandes
+  const visibleRows=document.querySelectorAll('#cr-tbody tr:not([style*="display: none"]):not([style*="display:none"])');
+  visibleRows.forEach(row=>{
+    const idx=parseInt(row.id.replace('cr-row-',''));
+    if(!isNaN(idx)&&cState.products[idx]){
+      cState.products[idx].selected=checked;
+      row.style.opacity=checked?'1':'0.45';
+      const chk=row.querySelector('.cr-chk');
+      if(chk) chk.checked=checked;
+    }
+  });
+  const ca=document.getElementById('cr-chk-all'); if(ca) ca.checked=checked;
+  crUpdateSummary();
+}
+
+function crUpdateSummary() {
+  const el=document.getElementById('cr-summary');
+  if(!el) return;
+  const sel=cState.products.filter(p=>p.selected).length;
+  const grp=cState.variantGroups.length;
+  el.textContent=`${sel} produto(s) selecionado(s)${grp>0?' · '+grp+' grupo(s) de variantes':''}`;
+}
+
+// Agrupar linhas selecionadas como variantes de um produto
+function crGroupVariants() {
+  const selected=cState.products.filter((p,i)=>document.querySelector(`.cr-chk[data-idx="${i}"]`)?.checked&&p.selected);
+  if(selected.length<2){toast('Seleciona pelo menos 2 produtos para agrupar','error');return;}
+
+  // Modal para definir nome do grupo e atributo
+  document.getElementById('modal-content').innerHTML=`
+    <div class="modal-title">🔗 Agrupar como Variantes</div>
+    <p style="font-size:13px;color:var(--text2);margin-bottom:16px">${selected.length} produto(s) selecionado(s) serão combinados num único produto com variantes.</p>
+    <div class="form-grid">
+      <div class="form-group">
+        <label>Nome do Produto (PT)</label>
+        <input type="text" id="vg-name" placeholder="ex: iPhone 15" value="${selected[0]?.namePT?.split('/')[0]?.trim()||''}">
+      </div>
+      <div class="form-group">
+        <label>Atributo de Variante</label>
+        <select id="vg-attr">
+          <option value="Cor">Cor</option>
+          <option value="Capacidade">Capacidade</option>
+          <option value="Tamanho">Tamanho</option>
+          <option value="Versão">Versão</option>
+          <option value="Outro">Outro</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Valores das variantes (um por linha)</label>
+        <textarea id="vg-values" rows="4" placeholder="Preto&#10;Branco&#10;Azul" style="resize:vertical">${selected.map(p=>p.namePT.split('/').pop()?.trim()||p.namePT).join('\n')}</textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary" onclick="crSaveVariantGroup(${JSON.stringify(selected.map(p=>p._idx))})">Criar Grupo</button>
+    </div>`;
+  openModal();
+}
+
+function crSaveVariantGroup(idxList) {
+  const name=document.getElementById('vg-name')?.value.trim();
+  const attribute=document.getElementById('vg-attr')?.value;
+  const valuesRaw=document.getElementById('vg-values')?.value||'';
+  if(!name){toast('Nome obrigatório','error');return;}
+  const values=valuesRaw.split('\n').map(v=>v.trim()).filter(Boolean);
+  const groupId='vg_'+Date.now();
+  cState.variantGroups.push({id:groupId, name, attribute, values, productIdxs:idxList});
+  idxList.forEach((idx,i)=>{
+    if(cState.products[idx]){
+      cState.products[idx].variantGroup=groupId;
+      cState.products[idx].variantValue=values[i]||values[0]||'';
+      // Atualizar célula de variante na tabela sem re-render completo
+      const row=document.getElementById('cr-row-'+idx);
+      if(row){
+        const cell=row.querySelector('td:last-child');
+        if(cell) cell.innerHTML=`<span class="badge badge-blue" style="font-size:10px" title="${attribute}">🔗 ${name}</span>
+          <button onclick="crRemoveFromGroup(${idx})" style="background:none;border:none;cursor:pointer;color:var(--text3);font-size:11px;padding:0 3px">✕</button>`;
+      }
+    }
+  });
+  closeModal();
+  crRenderVariantGroups();
+  const vgEl=document.getElementById('cr-variant-groups');
+  if(vgEl) vgEl.style.display='block';
+  crUpdateSummary();
+  toast(`Grupo "${name}" criado com ${idxList.length} variantes`,'success');
+}
+
+function crRemoveFromGroup(idx) {
+  const p=cState.products[idx]; if(!p) return;
+  const gid=p.variantGroup;
+  p.variantGroup=null; p.variantValue='';
+  const group=cState.variantGroups.find(g=>g.id===gid);
+  if(group){
+    group.productIdxs=group.productIdxs.filter(i=>i!==idx);
+    if(group.productIdxs.length<2) cState.variantGroups=cState.variantGroups.filter(g=>g.id!==gid);
+  }
+  // Só atualiza a célula afetada, sem re-render completo
+  const row=document.getElementById('cr-row-'+idx);
+  if(row){
+    const cell=row.querySelector('td:last-child');
+    if(cell) cell.innerHTML='<span style="color:var(--text3);font-size:11px">—</span>';
+  }
+  crRenderVariantGroups();
+  crUpdateSummary();
+}
+
+function crRenderVariantGroups() {
+  const el=document.getElementById('cr-variant-groups');
+  if(!el) return;
+  if(cState.variantGroups.length===0){el.style.display='none';return;}
+  el.style.display='block';
+  el.innerHTML=`
+    <div class="card" style="background:var(--blue-bg);border-color:#BFDBFE">
+      <div class="card-title" style="color:var(--blue)">Grupos de Variantes</div>
+      ${cState.variantGroups.map(g=>`
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #BFDBFE">
+          <span style="font-weight:600;font-size:13px">${g.name}</span>
+          <span class="badge badge-blue">${g.attribute}</span>
+          <span style="font-size:12px;color:var(--text2)">${g.values.join(' · ')}</span>
+          <button onclick="cState.variantGroups=cState.variantGroups.filter(x=>x.id!=='${g.id}');cState.products.forEach(p=>{if(p.variantGroup==='${g.id}'){p.variantGroup=null;p.variantValue='';}});crRenderReview()" style="margin-left:auto;background:none;border:none;cursor:pointer;color:var(--red);font-size:13px">✕ Remover</button>
+        </div>`).join('')}
+    </div>`;
+}
+
+async function crCreate() {
+  const toCreate=cState.products.filter(p=>p.selected);
+  if(!toCreate.length){toast('Nenhum produto selecionado','error');return;}
+  if(!state.settings.shop||!state.settings.token){toast('Configura a ligação Shopify primeiro','error');return;}
+
+  document.getElementById('cr-step-review').style.display='none';
+  document.getElementById('cr-step-progress').style.display='block';
+
+  const log=(msg)=>{const el=document.getElementById('cr-log');if(el){el.innerHTML+=msg+'<br>';el.scrollTop=el.scrollHeight;}};
+  const setProg=(p)=>{const el=document.getElementById('cr-progress');if(el)el.style.width=p+'%';};
+  const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+
+  // Separate: grouped variants vs simple products
+  const processedGroups=new Set();
+  const jobs=[];
+
+  toCreate.forEach(p=>{
+    if(p.variantGroup){
+      if(!processedGroups.has(p.variantGroup)){
+        processedGroups.add(p.variantGroup);
+        const group=cState.variantGroups.find(g=>g.id===p.variantGroup);
+        const members=toCreate.filter(x=>x.variantGroup===p.variantGroup);
+        jobs.push({type:'variants', group, members});
+      }
+    } else {
+      jobs.push({type:'simple', product:p});
+    }
+  });
+
+  let created=0, errors=0;
+  log(`🚀 A criar ${jobs.length} produto(s)... (${toCreate.length} linhas total)`);
+
+  for(let i=0;i<jobs.length;i++){
+    const job=jobs[i];
+    try{
+      if(job.type==='simple'){
+        const p=job.product;
+        const name=document.getElementById('cr-name-'+p._idx)?.value||p.namePT||p.nameES;
+        const price=document.getElementById(`cr-row-${p._idx}`)?.querySelector('input[type=number]')?.value||p.price;
+        await crCreateSimple(p, name, price);
+        log(`✅ ${name.substring(0,55)}`);
+        created++;
+      } else {
+        const g=job.group;
+        await crCreateWithVariants(g, job.members);
+        log(`✅ ${g.name} (${job.members.length} variantes: ${g.values.join(', ')})`);
+        created++;
+      }
+    }catch(e){
+      log(`❌ Erro: ${e.message}`);
+      errors++;
+    }
+    setProg(Math.round((i+1)/jobs.length*100));
+    await sleep(400);
+  }
+
+  setProg(100);
+  log(`<br>🎉 <strong>Concluído! ${created} produto(s) criado(s) como Rascunho${errors>0?' · '+errors+' erro(s)':''}</strong>`);
+  toast(`${created} produto(s) criado(s) no Shopify`,'success');
+  fetchShopifyProducts(); // refresh cache
+}
+
+async function crCreateSimple(p, name, price) {
+  // Passo 1: Criar produto (sem variants no input — API 2026-01)
+  const qCreate=`mutation($input:ProductInput!,$media:[CreateMediaInput!]){
+    productCreate(input:$input,media:$media){
+      product{id variants(first:1){edges{node{id inventoryItem{id}}}}}
+      userErrors{message}
+    }
+  }`;
+  const media=p.imageUrl?[{originalSource:p.imageUrl,mediaContentType:'IMAGE',alt:name}]:undefined;
+  const data=await shopifyGQL(qCreate,{
+    input:{ title:name, vendor:p.brand||undefined, productType:p.category||undefined, status:'DRAFT' },
+    media
+  });
+  const errs=data.productCreate.userErrors;
+  if(errs.length) throw new Error(errs[0].message);
+
+  const product=data.productCreate.product;
+  const variantId=product?.variants?.edges[0]?.node?.id;
+  const invId=product?.variants?.edges[0]?.node?.inventoryItem?.id;
+  const productId=product?.id;
+
+  // Passo 2: Atualizar preço e barcode na variante default
+  if(productId&&variantId){
+    await shopifyGQL(
+      `mutation($productId:ID!,$variants:[ProductVariantsBulkInput!]!){productVariantsBulkUpdate(productId:$productId,variants:$variants){userErrors{message}}}`,
+      {productId, variants:[{id:variantId, price:String(price), barcode:p.barcode||undefined}]}
+    );
+  }
+
+  // Passo 3: Atualizar SKU via inventoryItem
+  if(invId&&p.sku) await updateVariantSKU(invId, p.sku);
+}
+
+async function crCreateWithVariants(group, members) {
+  // Passo 1: Criar produto base sem variants nem options no input
+  const qCreate=`mutation($input:ProductInput!){
+    productCreate(input:$input){
+      product{id}
+      userErrors{message}
+    }
+  }`;
+  const firstName=members[0];
+  const data=await shopifyGQL(qCreate,{
+    input:{ title:group.name, vendor:firstName.brand||undefined, productType:firstName.category||undefined, status:'DRAFT' }
+  });
+  const errs=data.productCreate.userErrors;
+  if(errs.length) throw new Error(errs[0].message);
+  const productId=data.productCreate.product?.id;
+  if(!productId) throw new Error('Produto não criado');
+
+  // Passo 2: Criar opção de variante
+  const qOption=`mutation($productId:ID!,$options:[OptionCreateInput!]!){
+    productOptionsCreate(productId:$productId,options:$options){
+      product{id options{id name}}
+      userErrors{message}
+    }
+  }`;
+  const optData=await shopifyGQL(qOption,{
+    productId,
+    options:[{name:group.attribute, values:group.values.map(v=>({name:v}))}]
+  });
+  const optErrs=optData.productOptionsCreate?.userErrors||[];
+  if(optErrs.length) throw new Error(optErrs[0].message);
+
+  await new Promise(r=>setTimeout(r,500)); // aguardar opção criada
+
+  // Passo 3: Criar variantes
+  const qVariants=`mutation($productId:ID!,$variants:[ProductVariantsBulkInput!]!,$media:[CreateMediaInput!]){
+    productVariantsBulkCreate(productId:$productId,variants:$variants,media:$media){
+      productVariants{id inventoryItem{id}}
+      userErrors{message}
+    }
+  }`;
+  const variants=members.map((m,i)=>({
+    price:String(m.price),
+    barcode:m.barcode||undefined,
+    optionValues:[{name:m.variantValue||group.values[i]||'Default', optionName:group.attribute}],
+    mediaSrc:m.imageUrl?[m.imageUrl]:undefined,
+  }));
+  const vData=await shopifyGQL(qVariants,{productId, variants});
+  const vErrs=vData.productVariantsBulkCreate?.userErrors||[];
+  if(vErrs.length) throw new Error(vErrs[0].message);
+
+  // Passo 4: Atualizar SKUs
+  const created=vData.productVariantsBulkCreate?.productVariants||[];
+  for(let i=0;i<created.length;i++){
+    const m=members[i];
+    if(m?.sku&&created[i]?.inventoryItem?.id){
+      try{await updateVariantSKU(created[i].inventoryItem.id, m.sku);}catch{}
+      await new Promise(r=>setTimeout(r,200));
+    }
+  }
+}
+
+function crReset() {
+  cState={rows:[],colMap:{},products:[],variantGroups:[],step:'upload'};
+  create();
+}
+
+// ═══════════════════════════════════════════
+// SETTINGS
+// ═══════════════════════════════════════════
+function settings() {
+  document.getElementById('topbar-actions').innerHTML='';
+  document.getElementById('content').innerHTML=`
+    <div style="max-width:520px">
+      <div style="margin-bottom:24px">
+        <div class="settings-label">Ligação Shopify</div>
+        <div class="card">
+          <div class="form-grid">
+            <div class="form-group"><label>Shop Domain</label><input type="text" id="cfg-shop" value="${state.settings.shop}" placeholder="beestore.myshopify.com"></div>
+            <div class="form-group"><label>Access Token (shpat_...)</label><input type="password" id="cfg-token" value="${state.settings.token}" placeholder="shpat_xxxxxxxx"></div>
+            <div class="form-group"><label>Versão da API</label>
+              <select id="cfg-version">
+                <option value="2026-01" ${state.settings.apiVersion==='2026-01'?'selected':''}>2026-01 (mais recente)</option>
+                <option value="2025-10" ${state.settings.apiVersion==='2025-10'?'selected':''}>2025-10</option>
+              </select>
+            </div>
+            <div style="display:flex;gap:8px">
+              <button class="btn btn-primary" onclick="saveSettings()">Guardar</button>
+              <button class="btn btn-ghost" onclick="testConn()">Testar Ligação</button>
+            </div>
+            <div id="conn-result" style="font-size:13px"></div>
+          </div>
+        </div>
+      </div>
+      <div style="margin-bottom:24px">
+        <div class="settings-label">Dados Locais</div>
+        <div class="card">
+          <p style="color:var(--text2);font-size:13px;margin-bottom:14px">Todos os dados são guardados localmente no teu browser. O token Shopify nunca é enviado para o GitHub.</p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn btn-ghost btn-sm" onclick="exportData()">⬇ Exportar Backup</button>
+            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('import-input').click()">⬆ Importar Backup</button>
+            <button class="btn btn-danger btn-sm" onclick="clearData()">🗑 Limpar Tudo</button>
+          </div>
+          <input type="file" id="import-input" accept=".json" style="display:none" onchange="importData(this.files[0])">
+        </div>
+      </div>
+      <div>
+        <div class="settings-label">Proxy Cloudflare</div>
+        <div class="card">
+          <p style="color:var(--text2);font-size:13px">Worker ativo: <strong style="color:var(--blue)">shopify-proxy.victoraurich11.workers.dev</strong></p>
+        </div>
+      </div>
+    </div>`;
+}
+
+function saveSettings() {
+  state.settings={shop:document.getElementById('cfg-shop')?.value.trim(),token:document.getElementById('cfg-token')?.value.trim(),apiVersion:document.getElementById('cfg-version')?.value};
+  save(); updateBadges(); toast('Configurações guardadas','success');
+}
+
+async function testConn() {
+  saveSettings();
+  document.getElementById('conn-result').textContent='A testar...';
+  const r=await testConnection();
+  document.getElementById('conn-result').innerHTML=r.ok?`<span style="color:var(--green)">✓ Ligado a: ${r.name}</span>`:`<span style="color:var(--red)">✕ ${r.error}</span>`;
+}
+
+function exportData() {
+  const data={suppliers:state.suppliers,alerts:state.alerts,uploadHistory:state.uploadHistory,orphans:state.orphans,matches:state.matches};
+  const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));
+  a.download=`beestore-backup-${new Date().toISOString().slice(0,10)}.json`; a.click();
+}
+
+function importData(file) {
+  const r=new FileReader();
+  r.onload=e=>{
+    try{
+      const d=JSON.parse(e.target.result);
+      if(d.suppliers)state.suppliers=d.suppliers; if(d.alerts)state.alerts=d.alerts;
+      if(d.uploadHistory)state.uploadHistory=d.uploadHistory; if(d.orphans)state.orphans=d.orphans;
+      if(d.matches)state.matches=d.matches;
+      save(); render(); toast('Backup importado','success');
+    }catch{toast('Ficheiro inválido','error');}
+  };
+  r.readAsText(file);
+}
+
+function clearData() {
+  if(!confirm('Apagar todos os dados locais?')) return;
+  ['suppliers','alerts','uploadHistory','orphans','matches','shopifyProducts'].forEach(k=>{DB.set(k,[]);state[k]=[];});
+  render(); toast('Dados apagados','info');
+}
+
+// ═══════════════════════════════════════════
+// UTILS
+// ═══════════════════════════════════════════
+function openModal(){document.getElementById('modal-overlay').classList.add('open');}
+function closeModal(e){if(!e||e.target===document.getElementById('modal-overlay'))document.getElementById('modal-overlay').classList.remove('open');}
+function toast(msg,type='info'){
+  const el=document.createElement('div'); el.className=`toast-item ${type}`;
+  const icons={success:'✓',error:'✕',info:'ℹ'};
+  el.innerHTML=`<span>${icons[type]}</span><span>${msg}</span>`;
+  document.getElementById('toast').appendChild(el); setTimeout(()=>el.remove(),4000);
+}
+function timeAgo(d){const m=Math.floor((Date.now()-new Date(d))/60000);const h=Math.floor(m/60);const dy=Math.floor(h/24);return dy>0?dy+'d':h>0?h+'h':m>0?m+'min':'agora';}
+
+// ═══════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════
+navigate('dashboard');
+</script>
+</body>
+</html>
