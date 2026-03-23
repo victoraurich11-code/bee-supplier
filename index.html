@@ -989,8 +989,12 @@ async function applyChanges() {
   for(let i=0;i<toUpdate.length;i++){
     const p=toUpdate[i];
     const foundIdx=found.indexOf(p);
-    const applyPrice=document.querySelector(`.chk-price[data-idx="${foundIdx}"]`)?.checked;
-    const applyStock=document.querySelector(`.chk-stock[data-idx="${foundIdx}"]`)?.checked;
+    // Ler estado dos checkboxes da DOM — com fallback para true se não encontrar
+    const priceChkEl=document.querySelector(`.chk-price[data-idx="${foundIdx}"]`);
+    const stockChkEl=document.querySelector(`.chk-stock[data-idx="${foundIdx}"]`);
+    const applyPrice=priceChkEl ? priceChkEl.checked : false;
+    const applyStock=stockChkEl ? stockChkEl.checked : false;
+    log(`🔍 ${p.shopifyTitle.substring(0,30)} — applyPrice:${applyPrice} applyStock:${applyStock} invItemId:${p.shopifyVariant.inventoryItemId?'ok':'NULL'}`);
     try {
       if(applyPrice){
         await updateVariantPrice(p.shopifyProduct.id, p.shopifyVariant.id, p.finalPrice.toFixed(2));
