@@ -803,6 +803,7 @@ function renderAnalysis(found,notFound,isNew,supp) {
                 <td><span class="badge ${p.matchedBy==='SKU'?'badge-blue':'badge-orange'}" style="font-size:10px">${p.matchedBy}</span></td>
                 <td style="text-align:center"><input type="checkbox" class="chk-price" data-idx="${i}" ${priceChanged?'checked':''} ${!priceChanged?'disabled title="Preço igual"':''} onchange="state.analysisResult.found[${i}].applyPrice=this.checked;updateApplySummary()"></td>
                 <td style="text-align:center"><input type="checkbox" class="chk-stock" data-idx="${i}" ${stockChanged?'checked':''} ${!stockChanged?'disabled title="Stock igual"':''} onchange="state.analysisResult.found[${i}].applyStock=this.checked;updateApplySummary()"></td>
+              </tr>`;
             }).join('')}
           </tbody>
         </table>
