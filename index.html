@@ -568,7 +568,7 @@ function upload() {
       <div id="step-progress" style="display:none">
         <div class="card">
           <div class="card-title">A aplicar alterações no Shopify...</div>
-          <div id="progress-log" style="font-family:'DM Mono',monospace;font-size:12px;color:var(--text2);line-height:1.9;max-height:220px;overflow-y:auto"></div>
+          <div id="progress-log" style="font-family:'DM Mono',monospace;font-size:12px;color:var(--text2);line-height:1.9;max-height:420px;overflow-y:auto"></div>
           <div class="progress-bar" style="margin-top:12px"><div class="progress-fill" id="progress-fill" style="width:0%"></div></div>
         </div>
       </div>
@@ -977,20 +977,37 @@ async function applyChanges() {
   try{locationId=await getLocationId();}
   catch(e){log('⚠ Não foi possível obter localização: '+e.message);}
 
-  let updated=0, errors=0;
+  if(!locationId){
+    log('❌ Sem locationId — stock não será atualizado. Verifica as permissões do token.');
+  } else {
+    log(`📍 Location: ${locationId}`);
+  }
+
+  let updated=0, errors=0, stockUpdated=0, priceUpdated=0;
   log(`🚀 A processar ${toUpdate.length} produto(s)...`);
 
   for(let i=0;i<toUpdate.length;i++){
     const p=toUpdate[i];
-    const applyPrice=document.querySelector(`.chk-price[data-idx="${found.indexOf(p)}"]`)?.checked;
-    const applyStock=document.querySelector(`.chk-stock[data-idx="${found.indexOf(p)}"]`)?.checked;
+    const foundIdx=found.indexOf(p);
+    const applyPrice=document.querySelector(`.chk-price[data-idx="${foundIdx}"]`)?.checked;
+    const applyStock=document.querySelector(`.chk-stock[data-idx="${foundIdx}"]`)?.checked;
     try {
-      if(applyPrice) await updateVariantPrice(p.shopifyProduct.id, p.shopifyVariant.id, p.finalPrice.toFixed(2));
-      if(applyStock&&locationId&&p.shopifyVariant.inventoryItemId){
-        await updateVariantStock(p.shopifyVariant.inventoryItemId, locationId, p.stockVal);
+      if(applyPrice){
+        await updateVariantPrice(p.shopifyProduct.id, p.shopifyVariant.id, p.finalPrice.toFixed(2));
+        priceUpdated++;
+      }
+      if(applyStock){
+        if(!locationId) {
+          log(`⚠ ${p.shopifyTitle.substring(0,40)}: sem locationId, stock ignorado`);
+        } else if(!p.shopifyVariant.inventoryItemId){
+          log(`⚠ ${p.shopifyTitle.substring(0,40)}: sem inventoryItemId, stock ignorado`);
+        } else {
+          await updateVariantStock(p.shopifyVariant.inventoryItemId, locationId, p.stockVal);
+          stockUpdated++;
+        }
       }
       p.shopifyVariant.price=String(p.finalPrice); p.shopifyVariant.stock=p.stockVal;
-      log(`✅ ${p.shopifyTitle.substring(0,50)}${applyPrice?` | €${p.finalPrice.toFixed(2)}`:''}${applyStock?` | stock ${p.stockVal}`:''}`);
+      log(`✅ ${p.shopifyTitle.substring(0,50)}${applyPrice?` | €${p.finalPrice.toFixed(2)}`:''}${applyStock&&p.shopifyVariant.inventoryItemId?` | stock ${p.stockVal}`:''}`);
       updated++;
     } catch(e){
       log(`❌ ${p.shopifyTitle.substring(0,40)}: ${e.message}`);
@@ -1034,8 +1051,12 @@ async function applyChanges() {
   save();
 
   setProgress(100);
-  log(`<br>🎉 <strong>Concluído! ${updated} atualizados${errors>0?' | '+errors+' erros':''}${isNew.length>0?' | '+isNew.length+' novos em Alertas':''}</strong>`);
-  toast(`${updated} produto(s) atualizado(s) no Shopify`,'success');
+  const resumo=`🎉 <strong>Concluído!</strong> ${updated} produto(s) processado(s) — ${priceUpdated} preço(s) + ${stockUpdated} stock(s) atualizados${errors>0?' | ❌ '+errors+' erros':''}${isNew.length>0?' | 🆕 '+isNew.length+' novos em Alertas':''}`;
+  log('<br>'+resumo);
+  // Garantir que a mensagem final é visível
+  const logEl=document.getElementById('progress-log');
+  if(logEl) setTimeout(()=>{logEl.scrollTop=logEl.scrollHeight;},100);
+  toast(`${updated} produto(s) processado(s): ${priceUpdated} preços + ${stockUpdated} stocks`,'success');
   updateBadges();
 }
 
