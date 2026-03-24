@@ -342,7 +342,7 @@ async function updateVariantStock(inventoryItemId, locationId, newQty) {
           inventoryItemId,
           locationId,
           quantity: newQty,
-          ignoreCompareQuantity: true
+          changeFromQuantity: null
         }]
     }}
   );
