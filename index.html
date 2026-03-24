@@ -328,24 +328,28 @@ async function updateVariantPrice(productId, variantId, price) {
 }
 
 async function updateVariantStock(inventoryItemId, locationId, newQty) {
-  return shopifyGQL(
-    `mutation($input:InventorySetQuantitiesInput!){
-      inventorySetQuantities(input:$input){
-        inventoryAdjustmentGroup{reason}
-        userErrors{message}
-      }
-    }`,
-    { input: {
-        name: 'available',
-        reason: 'correction',
-        quantities: [{
-          inventoryItemId,
-          locationId,
-          quantity: newQty,
-          changeFromQuantity: null
-        }]
-    }}
-  );
+  // REST API é mais simples para stock - sem problemas de compareQuantity
+  const { shop, token, apiVersion } = state.settings;
+  const invItemNumId = inventoryItemId.replace('gid://shopify/InventoryItem/', '');
+  const locationNumId = locationId.replace('gid://shopify/Location/', '');
+  const PROXY_REST = 'https://shopify-proxy.victoraurich11.workers.dev';
+  const resp = await fetch(PROXY_REST, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Shopify-Shop': shop,
+      'X-Shopify-Token': token,
+      'X-Shopify-Version': apiVersion,
+      'X-Rest-Path': `/admin/api/${apiVersion}/inventory_levels/set.json`,
+    },
+    body: JSON.stringify({
+      location_id: parseInt(locationNumId),
+      inventory_item_id: parseInt(invItemNumId),
+      available: newQty
+    })
+  });
+  if(!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return await resp.json();
 }
 
 async function updateVariantSKU(inventoryItemId, sku) {
