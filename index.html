@@ -147,7 +147,15 @@ input:focus, select:focus, textarea:focus { border-color: var(--blue); box-shado
 
 /* PROGRESS */
 .progress-bar { height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
-.progress-fill { height: 100%; background: linear-gradient(90deg, var(--blue), #22C55E); border-radius: 3px; transition: width 0.3s; }
+.progress-fill { height: 100%; background: linear-gradient(90deg, var(--blue), #22C55E); border-radius: 3px; transition: width 0.4s ease; }
+
+/* PROGRESS SCREEN ANIMATIONS */
+@keyframes pulse-icon { 0%,100%{transform:scale(1);opacity:1} 50%{transform:scale(1.12);opacity:0.8} }
+@keyframes fadeInUp { from{opacity:0;transform:translateY(16px)} to{opacity:1;transform:translateY(0)} }
+@keyframes spin { to{transform:rotate(360deg)} }
+#prog-icon { animation: pulse-icon 1.8s ease-in-out infinite; display:inline-block; }
+#prog-success { animation: fadeInUp 0.4s ease; }
+.prog-summary-card { animation: fadeInUp 0.3s ease both; }
 
 /* TABS */
 .tabs { display: flex; gap: 2px; background: var(--panel); padding: 4px; border-radius: 10px; width: fit-content; margin-bottom: 18px; border: 1px solid var(--border); }
@@ -416,7 +424,7 @@ function buildTagUpdate(existingTags, newTags, removeTags=[]) {
 
 async function updateProductTags(productId, newTagsArray) {
   return shopifyGQL(
-    `mutation($input:ProductInput!){productUpdate(product:$input){product{id tags}userErrors{message}}}`,
+    `mutation($input:ProductUpdateInput!){productUpdate(product:$input){product{id tags}userErrors{message}}}`,
     { input: { id: productId, tags: newTagsArray } }
   );
 }
@@ -794,30 +802,48 @@ function dashboard() {
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px">
         ${suppCounts.length===0?`<div class="card" style="padding:20px;text-align:center;color:var(--text3)">Sem fornecedores configurados</div>`:
           suppCounts.map(s=>{
-            const sc=s.allOk?'var(--green)':s.crit>0?'var(--red)':s.warn>0?'var(--orange)':'var(--text3)';
-            const bc=s.allOk?'#16A34A':s.crit>0?'#DC2626':'#D97706';
+            const isAllOk=s.allOk&&s.total>0;
+            const hasCrit=s.crit>0;
+            const hasWarn=s.warn>0&&!hasCrit;
+            const statusColor=isAllOk?'var(--green)':hasCrit?'var(--red)':hasWarn?'var(--orange)':'var(--text3)';
+            const barColor=isAllOk?'#16A34A':hasCrit?'#DC2626':hasWarn?'#D97706':'#CDD3E0';
+            const bgTop=isAllOk?'#16A34A':hasCrit?'#DC2626':hasWarn?'#D97706':'#CDD3E0';
             const daysSince=s.lastUpload?Math.floor((Date.now()-new Date(s.lastUpload))/86400000):null;
-            const uploadAge=daysSince===null?'Nunca atualizado':daysSince===0?'Hoje':daysSince===1?'Ontem':`Há ${daysSince} dias`;
-            const uc=daysSince===null||daysSince>14?'var(--red)':daysSince>7?'var(--orange)':'var(--text2)';
-            return `<div class="card" style="padding:16px 18px;cursor:pointer;transition:box-shadow 0.15s" onmouseover="this.style.boxShadow='var(--shadow-lg)'" onmouseout="this.style.boxShadow='var(--shadow)'" onclick="navigate('health')">
-              <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:10px">
-                <div>
-                  <div style="font-family:'Syne',sans-serif;font-size:15px;font-weight:700">${s.name}</div>
-                  <div style="font-size:11px;color:${uc};margin-top:3px">${uploadAge}</div>
+            const uploadAge=daysSince===null?'Nunca':daysSince===0?'Hoje':daysSince===1?'Ontem':`${daysSince}d atrás`;
+            const ageColor=daysSince===null||daysSince>14?'var(--red)':daysSince>7?'var(--orange)':'var(--text3)';
+            const statusLabel=isAllOk?'Tudo em dia ✓':hasCrit?`${s.crit} crítico(s)`:hasWarn?`${s.warn} em vigilância`:'Sem dados de saúde';
+            return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;box-shadow:var(--shadow);cursor:pointer;transition:all 0.15s"
+              onmouseover="this.style.transform='translateY(-3px)';this.style.boxShadow='var(--shadow-lg)'"
+              onmouseout="this.style.transform='';this.style.boxShadow='var(--shadow)'"
+              onclick="navigate('health')">
+              <div style="height:4px;background:${bgTop}"></div>
+              <div style="padding:16px 18px">
+                <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px">
+                  <div style="flex:1;min-width:0">
+                    <div style="font-family:'Syne',sans-serif;font-size:15px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${s.name}</div>
+                    <div style="font-size:11px;font-weight:600;color:${statusColor};margin-top:3px">${statusLabel}</div>
+                  </div>
+                  <div style="text-align:right;flex-shrink:0;margin-left:12px">
+                    <div style="font-size:30px;font-weight:800;font-family:'Syne',sans-serif;color:${statusColor};line-height:1">${s.total}</div>
+                    <div style="font-size:10px;color:var(--text3)">produtos</div>
+                  </div>
                 </div>
-                <div style="text-align:right">
-                  <div style="font-size:24px;font-weight:800;font-family:'Syne',sans-serif;color:${sc};line-height:1">${s.total}</div>
-                  <div style="font-size:10px;color:var(--text3)">produtos</div>
+                ${s.total>0?`
+                <div style="margin-bottom:10px">
+                  <div style="height:6px;background:var(--border);border-radius:3px;overflow:hidden">
+                    <div style="height:100%;width:${s.pct}%;background:${barColor};border-radius:3px"></div>
+                  </div>
+                  <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:10px;color:var(--text3)">
+                    <span>${s.pct}% monitorizado</span>
+                    <span style="color:${ageColor}">Upload: ${uploadAge}</span>
+                  </div>
+                </div>`:
+                `<div style="font-size:11px;color:var(--text3);margin-bottom:10px">Faz o primeiro upload para monitorizar</div>`}
+                <div style="display:flex;gap:5px;flex-wrap:wrap">
+                  ${s.ok>0?`<span style="font-size:10px;background:var(--green-bg);color:var(--green);padding:2px 7px;border-radius:20px;border:1px solid #BBF7D0;font-weight:600">✅ ${s.ok}</span>`:''}
+                  ${s.warn>0?`<span style="font-size:10px;background:var(--orange-bg);color:var(--orange);padding:2px 7px;border-radius:20px;border:1px solid #FDE68A;font-weight:600">⚠ ${s.warn}</span>`:''}
+                  ${s.crit>0?`<span style="font-size:10px;background:var(--red-bg);color:var(--red);padding:2px 7px;border-radius:20px;border:1px solid #FECACA;font-weight:600">🔴 ${s.crit}</span>`:''}
                 </div>
-              </div>
-              <div style="height:5px;background:var(--border);border-radius:3px;overflow:hidden;margin-bottom:8px">
-                <div style="height:100%;width:${s.pct}%;background:${bc};border-radius:3px"></div>
-              </div>
-              <div style="display:flex;gap:8px;font-size:11px;align-items:center">
-                <span style="color:var(--green)">✅ ${s.ok}</span>
-                ${s.warn>0?`<span style="color:var(--orange)">⚠ ${s.warn}</span>`:''}
-                ${s.crit>0?`<span style="color:var(--red)">🔴 ${s.crit}</span>`:''}
-                <span style="margin-left:auto;font-weight:600;color:${sc}">${s.total>0?s.pct+'% ok':'—'}</span>
               </div>
             </div>`;
           }).join('')}
@@ -1375,202 +1401,150 @@ function detectDuplicates(rows, colMap) {
 function showDuplicateStep(groups, onContinue) {
   const el = document.getElementById('step-duplicates');
   if (!el) return onContinue([]);
-
   el.style.display = 'block';
   document.getElementById('step-mapping').style.display = 'none';
 
-  const decisions = groups.map(g=>({ ...g, decision: null }));
+  // Each group now allows granular selection — user picks which lines merge
+  // State: groupSelections[gi] = Set of selected item indices within that group
+  const groupSelections = groups.map(g => new Set(g.items.map((_,i)=>i))); // all selected by default
+  const groupDecisions = groups.map(() => null); // null = undecided, true = merge sel, false = all separate
 
-  function renderGroups() {
-    el.innerHTML = `
-      <div class="card" style="margin-bottom:16px;background:var(--yellow-bg);border-color:var(--yellow-border);padding:16px 20px">
-        <div style="display:flex;align-items:center;gap:12px">
-          <span style="font-size:28px">🔀</span>
-          <div>
-            <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:15px;color:var(--text)">
-              ${groups.length} possível(eis) duplicado(s) detetado(s)
-            </div>
-            <div style="font-size:13px;color:var(--text2);margin-top:2px">
-              Confirma se são o mesmo produto antes de continuar. Só avança quando decidires todos.
-            </div>
-          </div>
-          <div style="margin-left:auto;display:flex;gap:6px">
-            <button class="btn btn-ghost btn-sm" onclick="decideAll(true)">✓ Todos iguais</button>
-            <button class="btn btn-ghost btn-sm" onclick="decideAll(false)">✕ Todos diferentes</button>
-          </div>
-        </div>
-      </div>
+  function countDecided() { return groupDecisions.filter(d=>d!==null).length; }
 
-      <div id="dup-cards" style="display:flex;flex-direction:column;gap:12px;margin-bottom:16px">
-        ${decisions.map((g,gi)=>renderDupCard(g,gi)).join('')}
-      </div>
+  function renderCard(g, gi) {
+    const dec = groupDecisions[gi];
+    const sel = groupSelections[gi];
+    const decided = dec !== null;
+    const isMerge = dec === true;
+    const borderColor = !decided ? 'var(--yellow-border)' : isMerge ? '#BBF7D0' : '#BFDBFE';
+    const bgColor    = !decided ? 'var(--yellow-bg)'     : isMerge ? 'var(--green-bg)' : 'var(--blue-bg)';
+    const selItems   = g.items.filter((_,i)=>sel.has(i));
+    const mergedStock = selItems.reduce((a,x)=>a+x.stock,0);
+    const minCost     = selItems.length ? Math.min(...selItems.map(x=>x.cost)) : 0;
 
-      <div class="card" style="display:flex;align-items:center;gap:16px;position:sticky;bottom:0;z-index:10;padding:14px 20px">
-        <div id="dup-status" style="flex:1;font-size:13px;color:var(--text2)">
-          ${countDecided()} de ${decisions.length} decidido(s)
-        </div>
-        <button class="btn btn-ghost" onclick="resetUpload()">↩ Cancelar</button>
-        <button class="btn btn-primary" id="btn-dup-continue" onclick="continuePastDuplicates()" ${countDecided()<decisions.length?'disabled':''}>
-          Continuar para Análise →
-        </button>
-      </div>`;
-  }
-
-  function renderDupCard(g, gi) {
-    const decided = g.decision !== null;
-    const isSame = g.decision === true;
-    const isDiff = g.decision === false;
-    const borderColor = !decided?'var(--yellow-border)':isSame?'#BBF7D0':'#BFDBFE';
-    const bgColor = !decided?'var(--yellow-bg)':isSame?'var(--green-bg)':'var(--blue-bg)';
-
-    const mergedStock = g.items.reduce((a,x)=>a+x.stock,0);
-    const minCost = Math.min(...g.items.map(x=>x.cost));
-
-    return `<div class="card" style="border-color:${borderColor};background:${bgColor};padding:0;overflow:hidden" id="dup-card-${gi}">
+    return `<div class="card" style="border-color:${borderColor};background:${bgColor};padding:0;overflow:hidden;margin-bottom:12px" id="dup-card-${gi}">
       <!-- HEADER -->
-      <div style="padding:12px 16px;display:flex;align-items:center;gap:10px;border-bottom:1px solid ${borderColor}">
-        <span style="font-size:18px">🔀</span>
-        <div style="flex:1">
-          <span style="font-family:'DM Mono',monospace;font-size:11px;color:var(--text2)">Score: ${g.score}% similar</span>
-          ${decided?`<span style="margin-left:8px;font-size:11px;font-weight:600;color:${isSame?'var(--green)':'var(--blue)'}">${isSame?'✓ Mesmo produto':'✕ Produtos diferentes'}</span>`:''}
+      <div style="padding:11px 16px;display:flex;align-items:center;gap:10px;border-bottom:1px solid ${borderColor}">
+        <span style="font-size:16px">🔀</span>
+        <div style="flex:1;font-family:'DM Mono',monospace;font-size:11px;color:var(--text2)">
+          Score: ${g.score}% similar · ${g.items.length} linhas detetadas
+          ${decided ? `<strong style="margin-left:8px;color:${isMerge?'var(--green)':'var(--blue)'}">${isMerge?'✓ Merge':'✕ Separados'}</strong>` : ''}
         </div>
         <div style="display:flex;gap:6px">
-          <button class="btn btn-sm ${isSame?'btn-success':'btn-ghost'}" onclick="decide(${gi},true)">✓ Mesmo produto</button>
-          <button class="btn btn-sm ${isDiff?'btn-blue':'btn-ghost'}" onclick="decide(${gi},false)">✕ São diferentes</button>
+          <button class="btn btn-sm ${isMerge?'btn-success':'btn-ghost'}" onclick="decideDup(${gi},true)">✓ Agrupar selecionados</button>
+          <button class="btn btn-sm ${dec===false?'btn-blue':'btn-ghost'}" onclick="decideDup(${gi},false)">✕ Todos separados</button>
         </div>
       </div>
-      <!-- SIDE BY SIDE -->
-      <div style="display:grid;grid-template-columns:repeat(${g.items.length},1fr);gap:0">
-        ${g.items.map((item,ii)=>`
-          <div style="padding:14px 16px;${ii<g.items.length-1?'border-right:1px solid '+borderColor:''}">
-            <div style="font-size:12px;color:var(--text3);font-family:'DM Mono',monospace;margin-bottom:6px">Linha ${ii+1}</div>
-            <div style="font-weight:600;font-size:13px;margin-bottom:8px;line-height:1.4">${item.name}</div>
-            <div style="display:flex;flex-direction:column;gap:4px;font-size:12px">
-              <div><span style="color:var(--text3)">SKU:</span> <span class="mono">${item.sku||'—'}</span></div>
-              <div><span style="color:var(--text3)">Barcode:</span> <span class="mono">${item.barcode||'—'}</span></div>
-              <div><span style="color:var(--text3)">Stock:</span> <strong style="color:var(--blue)">${item.stock}</strong></div>
-              <div><span style="color:var(--text3)">Custo:</span> <strong>€${item.cost.toFixed(2)}</strong></div>
+      <!-- LINES — each with checkbox -->
+      <div style="display:flex;flex-direction:column">
+        ${g.items.map((item,ii)=>{
+          const checked = sel.has(ii);
+          const dimmed = decided && !checked;
+          return `<div style="display:flex;align-items:stretch;${ii<g.items.length-1?'border-bottom:1px solid '+borderColor:''}${dimmed?';opacity:0.45':''}">
+            <div style="display:flex;align-items:center;padding:0 14px;border-right:1px solid ${borderColor}">
+              <input type="checkbox" ${checked?'checked':''} onchange="toggleDupItem(${gi},${ii},this.checked)" style="width:16px;height:16px;accent-color:var(--blue)">
             </div>
-          </div>`).join('')}
+            <div style="flex:1;padding:12px 16px">
+              <div style="font-size:10px;color:var(--text3);font-family:'DM Mono',monospace;margin-bottom:4px">Linha ${ii+1}</div>
+              <div style="font-weight:600;font-size:13px;margin-bottom:6px;line-height:1.3">${item.name}</div>
+              <div style="display:flex;gap:16px;font-size:12px;flex-wrap:wrap">
+                <span><span style="color:var(--text3)">SKU:</span> <span class="mono">${item.sku||'—'}</span></span>
+                <span><span style="color:var(--text3)">Barcode:</span> <span class="mono">${item.barcode||'—'}</span></span>
+                <span><span style="color:var(--text3)">Stock:</span> <strong style="color:var(--blue)">${item.stock}</strong></span>
+                <span><span style="color:var(--text3)">Custo:</span> <strong>€${item.cost.toFixed(2)}</strong></span>
+              </div>
+            </div>
+          </div>`;
+        }).join('')}
       </div>
-      <!-- MERGE PREVIEW (only if decided as same) -->
-      ${isSame?`
-      <div style="padding:10px 16px;background:rgba(22,163,74,0.08);border-top:1px solid #BBF7D0;display:flex;gap:20px;font-size:12px">
-        <span style="color:var(--text2)">Resultado do merge:</span>
-        <span><strong style="color:var(--blue)">Stock: ${mergedStock}</strong> (${g.items.map(x=>x.stock).join('+')})</span>
-        <span><strong style="color:var(--green)">Custo base: €${minCost.toFixed(2)}</strong> (mínimo)</span>
-        <span style="color:var(--text3)">SKU: ${g.items[0].sku||'—'}</span>
-      </div>`:''}
+      <!-- MERGE PREVIEW -->
+      ${isMerge && selItems.length >= 2 ? `
+      <div style="padding:9px 16px;background:rgba(22,163,74,0.08);border-top:1px solid #BBF7D0;display:flex;gap:16px;font-size:12px;flex-wrap:wrap">
+        <span style="color:var(--text2)">Resultado:</span>
+        <span><strong style="color:var(--blue)">Stock: ${mergedStock}</strong> (${selItems.map(x=>x.stock).join('+')})</span>
+        <span><strong style="color:var(--green)">Custo base: €${minCost.toFixed(2)}</strong></span>
+        <span style="color:var(--text3)">SKU: ${selItems[0].sku||'—'}</span>
+        ${selItems.length < g.items.length ? `<span style="color:var(--orange)">⚠ ${g.items.length-selItems.length} linha(s) tratadas separadamente</span>` : ''}
+      </div>` : ''}
     </div>`;
   }
 
-  function countDecided() { return decisions.filter(g=>g.decision!==null).length; }
+  function renderAll() {
+    el.innerHTML = `
+      <div class="card" style="margin-bottom:14px;background:var(--yellow-bg);border-color:var(--yellow-border);padding:14px 18px">
+        <div style="display:flex;align-items:center;gap:12px">
+          <span style="font-size:24px">🔀</span>
+          <div>
+            <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:14px">${groups.length} possível(eis) duplicado(s) detetado(s)</div>
+            <div style="font-size:12px;color:var(--text2);margin-top:2px">Seleciona quais linhas são o mesmo produto. Só avança quando decidires todos.</div>
+          </div>
+          <div style="margin-left:auto;display:flex;gap:6px">
+            <button class="btn btn-ghost btn-sm" onclick="decideAllDups(true)">✓ Todos iguais</button>
+            <button class="btn btn-ghost btn-sm" onclick="decideAllDups(false)">✕ Todos diferentes</button>
+          </div>
+        </div>
+      </div>
+      <div id="dup-cards">${groups.map((g,gi)=>renderCard(g,gi)).join('')}</div>
+      <div class="card" style="display:flex;align-items:center;gap:14px;position:sticky;bottom:0;z-index:10;padding:12px 18px">
+        <div style="flex:1;font-size:13px;color:var(--text2)" id="dup-status">${countDecided()} de ${groups.length} decidido(s)</div>
+        <button class="btn btn-ghost" onclick="resetUpload()">↩ Cancelar</button>
+        <button class="btn btn-primary" id="btn-dup-continue" onclick="continuePastDuplicates()" ${countDecided()<groups.length?'disabled':''}>Continuar →</button>
+      </div>`;
+  }
 
-  window.decide = (gi, isSame) => {
-    decisions[gi].decision = isSame;
-    document.getElementById('dup-cards').innerHTML = decisions.map((g,i)=>renderDupCard(g,i)).join('');
-    document.getElementById('dup-status').textContent = `${countDecided()} de ${decisions.length} decidido(s)`;
+  function refreshCard(gi) {
+    const card = document.getElementById('dup-card-'+gi);
+    if(card) card.outerHTML = renderCard(groups[gi], gi);
+    document.getElementById('dup-status').textContent = `${countDecided()} de ${groups.length} decidido(s)`;
     const btn = document.getElementById('btn-dup-continue');
-    if(btn) btn.disabled = countDecided() < decisions.length;
+    if(btn) btn.disabled = countDecided() < groups.length;
+  }
+
+  window.toggleDupItem = (gi, ii, checked) => {
+    if(checked) groupSelections[gi].add(ii);
+    else groupSelections[gi].delete(ii);
+    // Re-render just this card
+    const oldCard = document.getElementById('dup-card-'+gi);
+    if(oldCard) { const tmp=document.createElement('div'); tmp.innerHTML=renderCard(groups[gi],gi); oldCard.replaceWith(tmp.firstChild); }
   };
 
-  window.decideAll = (isSame) => {
-    decisions.forEach(g=>g.decision=isSame);
-    document.getElementById('dup-cards').innerHTML = decisions.map((g,i)=>renderDupCard(g,i)).join('');
-    document.getElementById('dup-status').textContent = `${countDecided()} de ${decisions.length} decidido(s)`;
+  window.decideDup = (gi, isMerge) => {
+    groupDecisions[gi] = isMerge;
+    const oldCard = document.getElementById('dup-card-'+gi);
+    if(oldCard) { const tmp=document.createElement('div'); tmp.innerHTML=renderCard(groups[gi],gi); oldCard.replaceWith(tmp.firstChild); }
+    document.getElementById('dup-status').textContent = `${countDecided()} de ${groups.length} decidido(s)`;
+    const btn = document.getElementById('btn-dup-continue');
+    if(btn) btn.disabled = countDecided() < groups.length;
+  };
+
+  window.decideAllDups = (isMerge) => {
+    groups.forEach((_,gi) => groupDecisions[gi] = isMerge);
+    document.getElementById('dup-cards').innerHTML = groups.map((g,gi)=>renderCard(g,gi)).join('');
+    document.getElementById('dup-status').textContent = `${groups.length} de ${groups.length} decidido(s)`;
     const btn = document.getElementById('btn-dup-continue');
     if(btn) btn.disabled = false;
   };
 
   window.continuePastDuplicates = () => {
     el.style.display = 'none';
+    // Build decisions array compatible with runAnalysisWithDecisions
+    const decisions = groups.map((g,gi) => ({
+      ...g,
+      decision: groupDecisions[gi],
+      // Only merge the selected items
+      items: groupDecisions[gi] === true
+        ? g.items.filter((_,ii) => groupSelections[gi].has(ii))
+        : g.items,
+      unselectedItems: groupDecisions[gi] === true
+        ? g.items.filter((_,ii) => !groupSelections[gi].has(ii))
+        : [],
+    }));
     onContinue(decisions);
   };
 
-  renderGroups();
+  renderAll();
 }
 
-async function runAnalysis() {
-  ['name','sku','barcode','stock','price'].forEach(k=>{ const el=document.getElementById('col-'+k); if(el) state.colMap[k]=el.value; });
-  if(!state.settings.shop||!state.settings.token){ toast('Configura a ligação Shopify primeiro','error'); return; }
-  const btn=document.querySelector('#step-mapping .btn-primary');
-  btn.textContent='A analisar...'; btn.disabled=true;
-  let shopifyProds=state.shopifyProducts;
-  if(!shopifyProds.length){ try{ shopifyProds=await fetchShopifyProducts(); } catch(e){ toast('Erro: '+e.message,'error'); btn.textContent='Analisar Ficheiro →'; btn.disabled=false; return; } }
-
-  // STEP 2.5 — detect duplicates before matching
-  const dupGroups = detectDuplicates(state.parsedRows, state.colMap);
-  btn.textContent='Analisar Ficheiro →'; btn.disabled=false;
-
-  if (dupGroups.length > 0) {
-    showDuplicateStep(dupGroups, (decisions) => {
-      runAnalysisWithDecisions(decisions, shopifyProds);
-    });
-    return;
-  }
-  runAnalysisWithDecisions([], shopifyProds);
-}
-
-async function runAnalysisWithDecisions(dupDecisions, shopifyProds) {
-  // Build merged rows: apply duplicate decisions
-  let rows = [...state.parsedRows];
-  const removedIdxs = new Set();
-  dupDecisions.filter(g=>g.decision===true).forEach(g=>{
-    const items = g.items;
-    const mergedStock = items.reduce((a,x)=>a+x.stock,0);
-    const minCost = Math.min(...items.map(x=>x.cost));
-    const primary = items[0];
-    // Patch the primary row with merged values
-    const nc=state.colMap.name, sc=state.colMap.sku, stc=state.colMap.stock, pc=state.colMap.price;
-    if(stc) rows[primary.idx] = { ...rows[primary.idx], [stc]: String(mergedStock) };
-    if(pc) rows[primary.idx] = { ...rows[primary.idx], [pc]: String(minCost) };
-    // Mark secondary rows for removal
-    items.slice(1).forEach(item=>removedIdxs.add(item.idx));
-  });
-  rows = rows.filter((_,i)=>!removedIdxs.has(i));
-
-  const supp = state.suppliers.find(s=>s.id===state.uploadSuppId);
-  const {name:nc,sku:sc,barcode:bc,stock:stc,price:pc} = state.colMap;
-  const bySku={}, byBarcode={};
-  shopifyProds.forEach(p=>p.variants.forEach(v=>{
-    if(v.sku) bySku[v.sku.trim().toLowerCase()]={product:p,variant:v};
-    if(v.barcode) byBarcode[v.barcode.trim()]={product:p,variant:v};
-  }));
-
-  const found=[], notFound=[], isNew=[];
-  const knownSkus=new Set(), knownBarcodes=new Set();
-
-  rows.forEach((row,i)=>{
-    const sku=(row[sc]||'').trim();
-    const barcode=(row[bc]||'').trim();
-    const name=(row[nc]||sku||'Produto '+i).trim();
-    const stockVal=parseInt((row[stc]||'0').replace(/[^0-9]/g,''))||0;
-    const costPrice=parseFloat((row[pc]||'0').replace(',','.'))||0;
-    let rawPrice = supp.priceType==='pvp' ? costPrice : parseFloat((costPrice*(1+supp.margin/100)).toFixed(2));
-    const finalPrice = parseFloat(applyPriceRounding(rawPrice, supp.rounding).toFixed(2));
-
-    if(sku) knownSkus.add(sku.toLowerCase());
-    if(barcode) knownBarcodes.add(barcode);
-
-    const match=bySku[sku.toLowerCase()]||(barcode?byBarcode[barcode]:null);
-    if(match){
-      found.push({ _rowIdx:i, name, sku, barcode, stockVal, costPrice, rawPrice, finalPrice,
-        shopifyTitle:match.product.title, shopifyProduct:match.product, shopifyVariant:match.variant,
-        currentPrice:match.variant.price, currentStock:match.variant.stock,
-        matchedBy:bySku[sku.toLowerCase()]?'SKU':'Barcode', applyPrice:true, applyStock:true,
-      });
-      resetSkuHealth(sku, barcode);
-    } else {
-      const alreadyAlerted=state.alerts.some(a=>a.sku===sku&&!a.dismissed);
-      if(name&&!alreadyAlerted) isNew.push({_rowIdx:i,name,sku,barcode,stockVal,finalPrice,suppId:state.uploadSuppId,suppName:supp.name});
-      else if(name) notFound.push({_rowIdx:i,name,sku,barcode,stockVal,finalPrice});
-    }
-  });
-
-  state.analysisResult = { found, notFound, isNew, knownSkus, knownBarcodes, uploadTotal: rows.length };
-  renderAnalysis(found, notFound, isNew, supp);
-  btn.textContent='Analisar Ficheiro →'; btn.disabled=false;
-}
 
 function renderAnalysis(found, notFound, isNew, supp) {
   const el = document.getElementById('step-analysis');
@@ -1759,7 +1733,7 @@ async function applyChanges() {
       if(p.applyStock&&locationId&&p.shopifyVariant.inventoryItemId) {
         try {
           await shopifyGQL(`mutation($id:ID!,$input:InventoryItemInput!){inventoryItemUpdate(id:$id,input:$input){inventoryItem{id tracked}userErrors{message}}}`,{id:p.shopifyVariant.inventoryItemId,input:{tracked:true}});
-          await shopifyGQL(`mutation($invItemId:ID!,$locationId:ID!){inventoryActivate(inventoryItemId:$invItemId,locationId:$locationId){inventoryLevel{id}userErrors{message}}}`,{invItemId:p.shopifyVariant.inventoryItemId,locationId});
+          await shopifyGQL(`mutation($inventoryItemId:ID!,$locationId:ID!){inventoryActivate(inventoryItemId:$inventoryItemId,locationId:$locationId){inventoryLevel{id}userErrors{message}}}`,{inventoryItemId:p.shopifyVariant.inventoryItemId,locationId});
           await updateVariantStock(p.shopifyVariant.inventoryItemId,locationId,p.stockVal);
           stockUpdated++;
         } catch(se){ addError(`Stock — ${shortTitle}: ${se.message}`); }
