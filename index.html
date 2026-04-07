@@ -1475,30 +1475,69 @@ function detectDuplicates(rows, colMap) {
   const groups = [];
   const used = new Set();
 
-  for (let i=0; i<items.length; i++) {
-    if (used.has(i)) continue;
-    const a = items[i];
-    const cluster = [a];
-    for (let j=i+1; j<items.length; j++) {
-      if (used.has(j)) continue;
-      const b = items[j];
-      if (!a.name || !b.name) continue;
-      const score = nameSimilarity(a.name, b.name);
-      if (score < 88) continue;
-      // Price proximity check: within 15%
-      const maxCost = Math.max(a.cost, b.cost);
-      if (maxCost > 0) {
-        const diff = Math.abs(a.cost - b.cost) / maxCost;
-        if (diff > 0.15) continue;
+  if (items.length <= 400) {
+    // Catálogo pequeno: comparação O(n²) completa
+    for (let i=0; i<items.length; i++) {
+      if (used.has(i)) continue;
+      const a = items[i];
+      const cluster = [a];
+      for (let j=i+1; j<items.length; j++) {
+        if (used.has(j)) continue;
+        const b = items[j];
+        const score = nameSimilarity(a.name, b.name);
+        if (score < 88) continue;
+        const maxCost = Math.max(a.cost, b.cost);
+        if (maxCost > 0 && Math.abs(a.cost - b.cost) / maxCost > 0.15) continue;
+        cluster.push(b);
+        used.add(j);
       }
-      cluster.push(b);
-      used.add(j);
+      if (cluster.length > 1) {
+        used.add(i);
+        groups.push({ items: cluster, score: nameSimilarity(cluster[0].name, cluster[1].name), decision: null });
+      }
     }
-    if (cluster.length > 1) {
-      used.add(i);
-      groups.push({ items: cluster, score: cluster.length>1?nameSimilarity(cluster[0].name,cluster[1].name):100, decision: null });
-    }
+  } else {
+    // Catálogo grande: índice por palavra para evitar O(n²)
+    const wordBuckets = new Map();
+    items.forEach((item, i) => {
+      const words = item.name.toLowerCase().replace(/[^a-z0-9\s]/g,'').split(/\s+/).filter(w=>w.length>3);
+      words.slice(0, 2).forEach(w => {
+        if (!wordBuckets.has(w)) wordBuckets.set(w, []);
+        wordBuckets.get(w).push(i);
+      });
+    });
+
+    const checkedPairs = new Set();
+    wordBuckets.forEach(indices => {
+      // Ignora buckets com palavra demasiado comum (>40 produtos)
+      if (indices.length < 2 || indices.length > 40) return;
+      for (let a=0; a<indices.length; a++) {
+        const ai = indices[a];
+        if (used.has(ai)) continue;
+        const itemA = items[ai];
+        const cluster = [itemA];
+        for (let b=a+1; b<indices.length; b++) {
+          const bi = indices[b];
+          if (used.has(bi)) continue;
+          const pairKey = ai<bi ? ai+','+bi : bi+','+ai;
+          if (checkedPairs.has(pairKey)) continue;
+          checkedPairs.add(pairKey);
+          const itemB = items[bi];
+          const score = nameSimilarity(itemA.name, itemB.name);
+          if (score < 88) continue;
+          const maxCost = Math.max(itemA.cost, itemB.cost);
+          if (maxCost > 0 && Math.abs(itemA.cost - itemB.cost) / maxCost > 0.15) continue;
+          cluster.push(itemB);
+          used.add(bi);
+        }
+        if (cluster.length > 1) {
+          used.add(ai);
+          groups.push({ items: cluster, score: nameSimilarity(cluster[0].name, cluster[1].name), decision: null });
+        }
+      }
+    });
   }
+
   return groups;
 }
 
