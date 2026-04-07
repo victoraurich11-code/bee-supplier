@@ -1473,49 +1473,58 @@ function runAnalysis() {
       // Chave para histórico de custo (modo manual)
       const histKey = sku ? `${supp.id}::${sku.toLowerCase()}` : barcode ? `${supp.id}::bc::${barcode}` : null;
 
-      // Calcular variação de custo vs histórico (modo manual, ignorar < €0.10)
-      let costChange = null;
-      if (isManual && histKey && state.costHistory[histKey]) {
-        const custoAnterior = state.costHistory[histKey].custo;
-        const variacaoEuros = costRaw - custoAnterior;
-        if (Math.abs(variacaoEuros) >= 0.10) {
-          costChange = {
-            custoAnterior,
-            custoNovo: costRaw,
-            variacaoEuros,
-            variacaoPercentagem: custoAnterior > 0 ? (variacaoEuros / custoAnterior) * 100 : 0,
-            direcao: variacaoEuros > 0 ? 'subiu' : 'desceu',
-            histKey,
-          };
-        }
-      }
-
       let match = null, matchedBy = null;
       if (sku && skuMap[sku.toLowerCase()]) { match = skuMap[sku.toLowerCase()]; matchedBy = 'SKU'; }
       else if (barcode && barcodeMap[barcode]) { match = barcodeMap[barcode]; matchedBy = 'BARCODE'; }
 
-      const rowData = { name, sku, barcode, stockVal, costRaw, rawPrice, finalPrice, suppId: supp.id, suppName: supp.name, histKey };
-
       if (match) {
-        const priceChanged = parseFloat(match.variant.price || 0).toFixed(2) !== finalPrice.toFixed(2);
+        const currentShopifyPrice = parseFloat(match.variant.price) || 0;
+        // Modo manual: finalPrice = preço atual Shopify (sem alteração por defeito)
+        const effectiveFinalPrice = isManual ? currentShopifyPrice : finalPrice;
+        const effectiveRawPrice   = isManual ? currentShopifyPrice : rawPrice;
+
+        // Variação de custo vs histórico (modo manual, ignorar < €0.10)
+        let costChange = null;
+        if (isManual && histKey) {
+          const hist = state.costHistory[histKey];
+          const custoAnterior = hist ? hist.custo : null;
+          if (custoAnterior !== null) {
+            const variacaoEuros = costRaw - custoAnterior;
+            if (Math.abs(variacaoEuros) >= 0.10) {
+              costChange = {
+                custoAnterior, custoNovo: costRaw,
+                variacaoEuros,
+                variacaoPercentagem: custoAnterior > 0 ? (variacaoEuros / custoAnterior) * 100 : 0,
+                direcao: variacaoEuros > 0 ? 'subiu' : 'desceu',
+                histKey,
+              };
+            }
+          } else {
+            // Primeiro upload — sem histórico ainda
+            costChange = { direcao: 'novo', custoNovo: costRaw, histKey };
+          }
+        }
+
+        const priceChanged = currentShopifyPrice.toFixed(2) !== effectiveFinalPrice.toFixed(2);
         const stockChanged = (match.variant.stock ?? 0) !== stockVal;
+        const rowData = { name, sku, barcode, stockVal, costRaw, rawPrice: effectiveRawPrice, finalPrice: effectiveFinalPrice, suppId: supp.id, suppName: supp.name, histKey };
         found.push({
           ...rowData,
           shopifyProduct: match.product,
           shopifyVariant: match.variant,
           shopifyTitle: match.product.title,
-          currentPrice: parseFloat(match.variant.price) || 0,
+          currentPrice: currentShopifyPrice,
           currentStock: match.variant.stock ?? 0,
           matchedBy,
-          applyPrice: isManual ? false : priceChanged,
+          applyPrice: isManual ? false : priceChanged, // manual: false por defeito, ativado ao editar com ✏
           applyStock: stockChanged,
           _selected: true,
           costChange,
         });
       } else if (sku || barcode) {
-        isNew.push(rowData);
+        isNew.push({ name, sku, barcode, stockVal, costRaw, rawPrice, finalPrice, suppId: supp.id, suppName: supp.name, histKey });
       } else {
-        notFound.push(rowData);
+        notFound.push({ name, sku, barcode, stockVal, costRaw, rawPrice, finalPrice, suppId: supp.id, suppName: supp.name, histKey });
       }
     });
 
@@ -1796,8 +1805,8 @@ function renderAnalysis(found, notFound, isNew, supp) {
     <div style="background:var(--purple-bg);border:1px solid #C4B5FD;border-radius:10px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;gap:10px">
       <span style="font-size:20px">🏷</span>
       <div>
-        <div style="font-weight:700;font-size:13px;color:var(--purple)">Modo Manual — Preços não serão alterados automaticamente</div>
-        <div style="font-size:12px;color:var(--text2);margin-top:2px">O stock será atualizado normalmente. Variações de custo ficam registadas como alertas para revisão.</div>
+        <div style="font-weight:700;font-size:13px;color:var(--purple)">Modo Manual — Preços pré-preenchidos com valor atual do Shopify</div>
+        <div style="font-size:12px;color:var(--text2);margin-top:2px">Edita os preços que quiseres com ✏ e aplica. Variações de custo ficam assinaladas para decisão.</div>
       </div>
     </div>` : ''}
 
@@ -1821,53 +1830,39 @@ function renderAnalysis(found, notFound, isNew, supp) {
         </div>` : ''}
       </div>
       <div class="table-wrap" style="max-height:420px;overflow-y:auto">
-        ${isManual ? `
-        <table><thead><tr>
-          <th>Produto Shopify</th><th>SKU</th><th>Stock Atual → Novo</th><th>Variação de Custo</th><th>Via</th>
-          <th style="text-align:center;width:52px">📦</th>
-        </tr></thead>
-        <tbody>
-          ${found.map((p,i)=>{
-            const stockChanged=p.currentStock!==p.stockVal;
-            const cc=p.costChange;
-            return `<tr>
-              <td style="font-weight:600;max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.shopifyTitle}">${p.shopifyTitle}</td>
-              <td class="mono" style="font-size:11px;color:var(--text2)">${p.sku||'—'}</td>
-              <td class="mono" style="font-size:12px;white-space:nowrap">
-                <span style="color:var(--text2)">${p.currentStock??'?'}</span>
-                ${stockChanged?`<span style="color:var(--text3)"> → </span><strong style="color:var(--blue)">${p.stockVal}</strong>`:'<span style="color:var(--text3);font-size:11px"> (igual)</span>'}
-              </td>
-              <td style="font-size:12px;white-space:nowrap">
-                ${cc ? `<span style="font-size:15px;vertical-align:middle">${cc.direcao==='subiu'?'🔴':'🟢'}</span>
-                  <span class="mono" style="color:var(--text2)"> €${cc.custoAnterior.toFixed(2)}</span>
-                  <span style="color:var(--text3)"> → </span>
-                  <span class="mono" style="font-weight:600;color:${cc.direcao==='subiu'?'var(--red)':'var(--green)'}">€${cc.custoNovo.toFixed(2)}</span>
-                  <span class="mono" style="font-size:10px;color:${cc.direcao==='subiu'?'var(--red)':'var(--green)'};margin-left:4px">(${cc.direcao==='subiu'?'+':''}${cc.variacaoPercentagem.toFixed(1)}%)</span>`
-                : '<span style="color:var(--text3);font-size:11px">—</span>'}
-              </td>
-              <td><span class="badge ${p.matchedBy==='SKU'?'badge-blue':'badge-orange'}" style="font-size:10px">${p.matchedBy}</span></td>
-              <td style="text-align:center"><input type="checkbox" class="chk-stock" data-idx="${i}" ${stockChanged?'checked':''} ${!stockChanged?'disabled':''} onchange="state.analysisResult.found[${i}].applyStock=this.checked;updateApplySummary()"></td>
-            </tr>`;
-          }).join('')}
-        </tbody></table>` : `
         <table><thead><tr>
           <th style="width:36px"><input type="checkbox" id="chk-all-found" onchange="toggleAllFound(this.checked)" checked></th>
-          <th>Produto Shopify</th><th>SKU</th><th>Preço Atual → Novo</th><th>Stock Atual → Novo</th><th>Via</th>
+          <th>Produto Shopify</th><th>SKU</th>
+          ${isManual ? '<th>Custo Fornecedor</th>' : ''}
+          <th>Preço Venda ${isManual ? '(atual → edita se necessário)' : 'Atual → Novo'}</th>
+          <th>Stock Atual → Novo</th><th>Via</th>
           <th style="text-align:center;width:52px">💶</th><th style="text-align:center;width:52px">📦</th>
         </tr></thead>
         <tbody id="found-tbody">
           ${found.map((p,i)=>{
             const priceChanged=parseFloat(p.currentPrice||0).toFixed(2)!==p.finalPrice.toFixed(2);
             const stockChanged=p.currentStock!==p.stockVal;
-            const roundingDiff = p.rawPrice!==p.finalPrice ? `<span style="font-size:10px;color:var(--text3);margin-left:4px">(raw €${p.rawPrice.toFixed(2)})</span>` : '';
+            const roundingDiff = (!isManual && p.rawPrice!==p.finalPrice) ? `<span style="font-size:10px;color:var(--text3);margin-left:4px">(raw €${p.rawPrice.toFixed(2)})</span>` : '';
+            const cc = p.costChange;
+            const costCell = isManual ? `<td style="font-size:12px;white-space:nowrap">
+              ${cc && cc.direcao!=='novo' ? `
+                <span style="font-size:14px;vertical-align:middle">${cc.direcao==='subiu'?'🔴':'🟢'}</span>
+                <span class="mono" style="color:var(--text2);font-size:11px"> €${cc.custoAnterior.toFixed(2)} → </span>
+                <span class="mono" style="font-weight:600;color:${cc.direcao==='subiu'?'var(--red)':'var(--green)'}">€${cc.custoNovo.toFixed(2)}</span>
+                <span style="font-size:10px;color:${cc.direcao==='subiu'?'var(--red)':'var(--green)'};margin-left:3px">(${cc.direcao==='subiu'?'+':''}${cc.variacaoPercentagem.toFixed(1)}%)</span>`
+              : cc && cc.direcao==='novo' ? `<span style="color:var(--text3);font-size:11px">🆕 €${cc.custoNovo.toFixed(2)} (1.º upload)</span>`
+              : `<span style="color:var(--text3);font-size:11px">⚪ €${p.costRaw.toFixed(2)} (igual)</span>`}
+            </td>` : '';
             return `<tr id="found-row-${i}">
               <td><input type="checkbox" class="chk-found" data-idx="${i}" checked onchange="updateFoundRow(${i},this.checked)"></td>
               <td style="font-weight:600;max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.shopifyTitle}">${p.shopifyTitle}</td>
               <td class="mono" style="font-size:11px;color:var(--text2)">${p.sku||'—'}</td>
+              ${costCell}
               <td style="font-size:12px;white-space:nowrap">
                 <span class="mono" style="color:var(--text2)">€${parseFloat(p.currentPrice||0).toFixed(2)}</span>
-                ${priceChanged?`<span style="color:var(--text3)"> → </span><span class="price-display-${i} mono" style="color:var(--green);font-weight:600">€${p.finalPrice.toFixed(2)}</span>${roundingDiff}<button onclick="editPrice(${i})" style="background:none;border:none;cursor:pointer;padding:2px 4px;color:var(--text3);font-size:13px;vertical-align:middle">✏</button>`
-                :'<span style="color:var(--text3);font-size:11px"> (igual)</span>'}
+                ${priceChanged
+                  ? `<span style="color:var(--text3)"> → </span><span class="price-display-${i} mono" style="color:var(--green);font-weight:600">€${p.finalPrice.toFixed(2)}</span>${roundingDiff}<button onclick="editPrice(${i})" style="background:none;border:none;cursor:pointer;padding:2px 4px;color:var(--text3);font-size:13px;vertical-align:middle">✏</button>`
+                  : `<span class="price-display-${i} mono" style="display:none">€${p.finalPrice.toFixed(2)}</span><button onclick="editPrice(${i})" style="background:none;border:none;cursor:pointer;padding:2px 4px;color:var(--text3);font-size:13px;vertical-align:middle" title="Editar preço">✏</button>`}
               </td>
               <td class="mono" style="font-size:12px;white-space:nowrap">
                 <span style="color:var(--text2)">${p.currentStock??'?'}</span>
@@ -1878,7 +1873,7 @@ function renderAnalysis(found, notFound, isNew, supp) {
               <td style="text-align:center"><input type="checkbox" class="chk-stock" data-idx="${i}" ${stockChanged?'checked':''} ${!stockChanged?'disabled':''} onchange="state.analysisResult.found[${i}].applyStock=this.checked;updateApplySummary()"></td>
             </tr>`;
           }).join('')}
-        </tbody></table>`}
+        </tbody></table>
       </div>
     </div>`:''
     }
@@ -1934,7 +1929,7 @@ function editPrice(idx) {
   input.style.cssText='width:80px;padding:3px 6px;font-family:"DM Mono",monospace;font-size:12px;border:1px solid var(--blue);border-radius:5px;color:var(--text);background:var(--surface);outline:none;';
   const confirmBtn=document.createElement('button'); confirmBtn.textContent='✓'; confirmBtn.style.cssText='background:var(--green);color:white;border:none;border-radius:5px;padding:3px 7px;cursor:pointer;font-size:12px;margin-left:4px;';
   const cancelBtn=document.createElement('button'); cancelBtn.textContent='✕'; cancelBtn.style.cssText='background:var(--panel);color:var(--text2);border:1px solid var(--border);border-radius:5px;padding:3px 7px;cursor:pointer;font-size:12px;margin-left:3px;';
-  const save=()=>{ const newVal=parseFloat(input.value); if(isNaN(newVal)||newVal<=0){toast('Preço inválido','error');return;} p.finalPrice=newVal; displayEl.textContent='€'+newVal.toFixed(2); displayEl.style.display=''; if(editBtn) editBtn.style.display=''; input.remove(); confirmBtn.remove(); cancelBtn.remove(); const priceChk=document.querySelector(`.chk-price[data-idx="${idx}"]`); if(priceChk){priceChk.disabled=false;priceChk.checked=true;} updateApplySummary(); toast('Preço atualizado','success'); };
+  const save=()=>{ const newVal=parseFloat(input.value); if(isNaN(newVal)||newVal<=0){toast('Preço inválido','error');return;} p.finalPrice=newVal; p.applyPrice=true; displayEl.textContent='€'+newVal.toFixed(2); displayEl.style.display=''; if(editBtn) editBtn.style.display=''; input.remove(); confirmBtn.remove(); cancelBtn.remove(); const priceChk=document.querySelector(`.chk-price[data-idx="${idx}"]`); if(priceChk){priceChk.disabled=false;priceChk.checked=true;} updateApplySummary(); toast('Preço atualizado','success'); };
   const cancel=()=>{ displayEl.style.display=''; if(editBtn) editBtn.style.display=''; input.remove(); confirmBtn.remove(); cancelBtn.remove(); };
   confirmBtn.onclick=save; cancelBtn.onclick=cancel; input.onkeydown=(e)=>{if(e.key==='Enter')save();if(e.key==='Escape')cancel();};
   parent.appendChild(input); parent.appendChild(confirmBtn); parent.appendChild(cancelBtn); input.focus(); input.select();
