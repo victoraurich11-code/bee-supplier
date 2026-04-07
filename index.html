@@ -2181,13 +2181,23 @@ async function createFromAlert(alertId) {
   if(!title){toast('Título obrigatório','error');return;}
   toast('A criar produto...','info');
   try{
-    const data=await shopifyGQL(`mutation($input:ProductInput!){productCreate(input:$input){product{id variants(first:1){edges{node{inventoryItem{id}}}}}userErrors{message}}}`,{input:{title,vendor,status:'DRAFT',variants:[{price:String(price),barcode:barcode||undefined}]}});
+    // Step 1: create product without variants (API 2026-01 removed variants from ProductInput)
+    const data=await shopifyGQL(`mutation($input:ProductInput!){productCreate(input:$input){product{id variants(first:1){edges{node{id inventoryItem{id}}}}}userErrors{message}}}`,{input:{title,vendor,status:'DRAFT'}});
     if(data.productCreate.userErrors.length){toast(data.productCreate.userErrors[0].message,'error');return;}
-    const invId=data.productCreate.product?.variants?.edges[0]?.node?.inventoryItem?.id;
+    const product=data.productCreate.product;
+    const variantId=product?.variants?.edges[0]?.node?.id;
+    const invId=product?.variants?.edges[0]?.node?.inventoryItem?.id;
+    // Step 2: update default variant with price and barcode
+    if(variantId){
+      const variantInput={id:variantId,price:String(price)};
+      if(barcode) variantInput.barcode=barcode;
+      const vData=await shopifyGQL(`mutation($productId:ID!,$variants:[ProductVariantsBulkInput!]!){productVariantsBulkUpdate(productId:$productId,variants:$variants){userErrors{message}}}`,{productId:product.id,variants:[variantInput]});
+      if(vData.productVariantsBulkUpdate.userErrors.length){toast(vData.productVariantsBulkUpdate.userErrors[0].message,'error');return;}
+    }
     if(invId&&sku) await updateVariantSKU(invId,sku);
     // Apply tags immediately
     const a=state.alerts.find(x=>x.id===alertId);
-    if(a?.suppId) await updateProductTags(data.productCreate.product.id, [`sup:${a.suppId}`, 'cat:atualizado', `last-seen:${YYYYMM()}`]);
+    if(a?.suppId) await updateProductTags(product.id, [`sup:${a.suppId}`, 'cat:atualizado', `last-seen:${YYYYMM()}`]);
     dismissAlert(alertId); closeModal();
     toast('Produto criado com tags de fornecedor ✓','success');
     fetchShopifyProducts();
