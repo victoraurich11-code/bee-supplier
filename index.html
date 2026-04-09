@@ -260,6 +260,10 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--blue); cur
         <div class="dot" id="conn-dot"></div>
         <span id="conn-text">Não ligado</span>
       </div>
+      <div class="connection-status" style="margin-top:6px">
+        <div class="dot" id="cloud-dot"></div>
+        <span id="cloud-text">Cloud —</span>
+      </div>
     </div>
   </aside>
 
@@ -286,6 +290,12 @@ const DB = {
   set: (k,v) => { try { localStorage.setItem('bsm3_'+k, JSON.stringify(v)); } catch(e) { console.warn('localStorage cheio, não foi possível guardar "'+k+'":', e.message); } },
 };
 
+const DEFAULT_SETTINGS = {
+  shop:'', token:'', apiVersion:'2026-01',
+  supabaseUrl:'https://zbsuyzeeuychzzcmgsyl.supabase.co',
+  supabaseKey:'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inpic3V5emVldXljaHp6Y21nc3lsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2ODg2NzYsImV4cCI6MjA5MTI2NDY3Nn0.IwW9PHuUhklZOkLOH6ktCxBhcQbFUMjQkXHg8o1hAfA'
+};
+
 let state = {
   page: 'dashboard',
   suppliers: DB.get('suppliers', []),
@@ -294,7 +304,7 @@ let state = {
   skuHealth: DB.get('skuHealth', {}), // { [sku]: { suppId, suppName, missedUploads, lastSeen, productId, variantId, invItemId, title } }
   matches: DB.get('matches', []),
   shopifyProducts: DB.get('shopifyProducts', []),
-  settings: DB.get('settings', { shop:'', token:'', apiVersion:'2026-01' }),
+  settings: { ...DEFAULT_SETTINGS, ...DB.get('settings', {}) },
   costHistory: DB.get('costHistory', {}),  // { [suppId::sku]: { custo, data } }
   costAlerts: DB.get('costAlerts', []),     // alertas de variação de custo (modo manual)
   parsedRows: [], uploadSuppId: null, colMap: {}, analysisResult: null,
@@ -312,6 +322,105 @@ function save() {
     localStorage.removeItem('bsm3_shopifyProducts');
     console.warn('Cache Shopify removido (localStorage cheio). Re-sincroniza os produtos.', e.message);
   }
+  // Cloud sync em background — não bloqueia a UI
+  saveToCloud().catch(e => console.warn('Cloud sync falhou:', e));
+}
+
+// ═══════════════════════════════════════════
+// SUPABASE CLOUD SYNC
+// ═══════════════════════════════════════════
+let _cloudSyncing = false;
+
+async function cloudUpsert(key, value) {
+  const { supabaseUrl, supabaseKey } = state.settings;
+  if (!supabaseUrl || !supabaseKey) return;
+  const res = await fetch(`${supabaseUrl}/rest/v1/bee_data`, {
+    method: 'POST',
+    headers: {
+      'apikey': supabaseKey,
+      'Authorization': `Bearer ${supabaseKey}`,
+      'Content-Type': 'application/json',
+      'Prefer': 'resolution=merge-duplicates'
+    },
+    body: JSON.stringify({ key, value, updated_at: new Date().toISOString() })
+  });
+  if (!res.ok) throw new Error(`cloudUpsert ${key}: ${res.status}`);
+}
+
+async function saveToCloud() {
+  const { supabaseUrl, supabaseKey } = state.settings;
+  if (!supabaseUrl || !supabaseKey) return;
+  if (_cloudSyncing) return;
+  _cloudSyncing = true;
+  try {
+    const keys = ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','shopifyProducts'];
+    await Promise.allSettled(keys.map(k => cloudUpsert(k, state[k])));
+    updateCloudStatus(true);
+  } catch(e) {
+    updateCloudStatus(false);
+    throw e;
+  } finally {
+    _cloudSyncing = false;
+  }
+}
+
+async function loadFromCloud() {
+  const { supabaseUrl, supabaseKey } = state.settings;
+  if (!supabaseUrl || !supabaseKey) return false;
+  try {
+    const res = await fetch(`${supabaseUrl}/rest/v1/bee_data?select=key,value`, {
+      headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
+    });
+    if (!res.ok) return false;
+    const rows = await res.json();
+    if (!rows.length) return false;
+    const map = Object.fromEntries(rows.map(r => [r.key, r.value]));
+    const keys = ['suppliers','alerts','uploadHistory','skuHealth','matches','costHistory','costAlerts','shopifyProducts'];
+    keys.forEach(k => { if (map[k] !== undefined) state[k] = map[k]; });
+    // Restaura settings da cloud mas preserva as credenciais locais (supabase + shopify token)
+    if (map.settings) {
+      const keep = { supabaseUrl: state.settings.supabaseUrl, supabaseKey: state.settings.supabaseKey, token: state.settings.token };
+      state.settings = { ...DEFAULT_SETTINGS, ...map.settings, ...keep };
+    }
+    // Persiste no localStorage para offline
+    ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts'].forEach(k => DB.set(k, state[k]));
+    try { localStorage.setItem('bsm3_shopifyProducts', JSON.stringify(state.shopifyProducts)); } catch {}
+    updateCloudStatus(true);
+    return true;
+  } catch(e) {
+    console.warn('Cloud load falhou:', e);
+    updateCloudStatus(false);
+    return false;
+  }
+}
+
+async function testCloudConn() {
+  const { supabaseUrl, supabaseKey } = state.settings;
+  const el = document.getElementById('cloud-result');
+  if (!supabaseUrl || !supabaseKey) { if(el) el.innerHTML=`<span style="color:var(--red)">✕ Configura URL e Chave</span>`; return; }
+  if(el) el.textContent = 'A testar...';
+  try {
+    const res = await fetch(`${supabaseUrl}/rest/v1/bee_data?limit=1`, {
+      headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
+    });
+    if (res.ok) { if(el) el.innerHTML=`<span style="color:var(--green)">✓ Ligado ao Supabase</span>`; updateCloudStatus(true); }
+    else { if(el) el.innerHTML=`<span style="color:var(--red)">✕ Erro ${res.status}</span>`; }
+  } catch(e) { if(el) el.innerHTML=`<span style="color:var(--red)">✕ ${e.message}</span>`; }
+}
+
+async function syncNow() {
+  toast('A sincronizar com a cloud...','info');
+  const ok = await loadFromCloud();
+  if (ok) { render(); toast('Dados carregados da cloud','success'); }
+  else toast('Erro ao sincronizar — verifica a ligação','error');
+}
+
+function updateCloudStatus(ok) {
+  const dot = document.getElementById('cloud-dot');
+  const txt = document.getElementById('cloud-text');
+  if (!dot || !txt) return;
+  dot.className = 'dot ' + (ok ? 'ok' : 'err');
+  txt.textContent = ok ? 'Cloud sincronizado' : 'Cloud offline';
 }
 
 // ═══════════════════════════════════════════
@@ -2516,6 +2625,23 @@ function settings() {
           <input type="file" id="import-input" accept=".json" style="display:none" onchange="importData(this.files[0])">
         </div>
       </div>
+      <div style="margin-bottom:24px">
+        <div class="settings-label">Sincronização Cloud (Supabase)</div>
+        <div class="card">
+          <p style="color:var(--text2);font-size:13px;margin-bottom:14px">Dados guardados na cloud — nunca perdes informação ao mudar de dispositivo ou limpar o browser.</p>
+          <div class="form-grid">
+            <div class="form-group"><label>Supabase URL</label><input type="text" id="cfg-supa-url" value="${state.settings.supabaseUrl||''}" placeholder="https://xxxx.supabase.co"></div>
+            <div class="form-group"><label>Anon Key</label><input type="password" id="cfg-supa-key" value="${state.settings.supabaseKey||''}" placeholder="eyJ..."></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn btn-primary btn-sm" onclick="saveSettingsCloud()">Guardar</button>
+              <button class="btn btn-ghost btn-sm" onclick="testCloudConn()">Testar Ligação</button>
+              <button class="btn btn-blue btn-sm" onclick="syncNow()">⬇ Carregar da Cloud</button>
+              <button class="btn btn-ghost btn-sm" onclick="saveToCloud().then(()=>toast('Enviado para a cloud','success'))">⬆ Enviar para Cloud</button>
+            </div>
+            <div id="cloud-result" style="font-size:13px"></div>
+          </div>
+        </div>
+      </div>
       <div>
         <div class="settings-label">Proxy Cloudflare</div>
         <div class="card">
@@ -2525,7 +2651,14 @@ function settings() {
     </div>`;
 }
 
-function saveSettings() { state.settings={shop:document.getElementById('cfg-shop')?.value.trim(),token:document.getElementById('cfg-token')?.value.trim(),apiVersion:document.getElementById('cfg-version')?.value}; save(); updateBadges(); toast('Configurações guardadas','success'); }
+function saveSettings() {
+  state.settings = { ...state.settings, shop:document.getElementById('cfg-shop')?.value.trim(), token:document.getElementById('cfg-token')?.value.trim(), apiVersion:document.getElementById('cfg-version')?.value };
+  save(); updateBadges(); toast('Configurações guardadas','success');
+}
+function saveSettingsCloud() {
+  state.settings = { ...state.settings, supabaseUrl:document.getElementById('cfg-supa-url')?.value.trim(), supabaseKey:document.getElementById('cfg-supa-key')?.value.trim() };
+  save(); toast('Configuração cloud guardada','success');
+}
 async function testConn() { saveSettings(); document.getElementById('conn-result').textContent='A testar...'; const r=await testConnection(); document.getElementById('conn-result').innerHTML=r.ok?`<span style="color:var(--green)">✓ Ligado a: ${r.name}</span>`:`<span style="color:var(--red)">✕ ${r.error}</span>`; }
 
 function exportData() {
@@ -2562,7 +2695,12 @@ function timeAgo(d){ const m=Math.floor((Date.now()-new Date(d))/60000); const h
 // ═══════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════
-navigate('dashboard');
+(async () => {
+  // Carrega dados da cloud antes de renderizar (se Supabase configurado)
+  const loaded = await loadFromCloud();
+  if (loaded) toast('Dados carregados da cloud ☁','success');
+  navigate('dashboard');
+})();
 </script>
 </body>
 </html>
