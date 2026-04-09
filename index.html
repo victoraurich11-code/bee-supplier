@@ -283,7 +283,7 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--blue); cur
 // ═══════════════════════════════════════════
 const DB = {
   get: (k, d=null) => { try { const v=localStorage.getItem('bsm3_'+k); return v?JSON.parse(v):d; } catch { return d; } },
-  set: (k,v) => localStorage.setItem('bsm3_'+k, JSON.stringify(v)),
+  set: (k,v) => { try { localStorage.setItem('bsm3_'+k, JSON.stringify(v)); } catch(e) { console.warn('localStorage cheio, não foi possível guardar "'+k+'":', e.message); } },
 };
 
 let state = {
@@ -295,11 +295,13 @@ let state = {
   matches: DB.get('matches', []),
   shopifyProducts: DB.get('shopifyProducts', []),
   settings: DB.get('settings', { shop:'', token:'', apiVersion:'2026-01' }),
+  costHistory: DB.get('costHistory', {}),  // { [suppId::sku]: { custo, data } }
+  costAlerts: DB.get('costAlerts', []),     // alertas de variação de custo (modo manual)
   parsedRows: [], uploadSuppId: null, colMap: {}, analysisResult: null,
 };
 
 function save() {
-  ['suppliers','alerts','uploadHistory','skuHealth','matches','shopifyProducts','settings'].forEach(k => DB.set(k, state[k]));
+  ['suppliers','alerts','uploadHistory','skuHealth','matches','shopifyProducts','settings','costHistory','costAlerts'].forEach(k => DB.set(k, state[k]));
 }
 
 // ═══════════════════════════════════════════
@@ -438,7 +440,6 @@ async function applyTagsToProduct(productId, existingTags, suppId, catTag, extra
 async function applyZeroStockTag(productId, existingTags) {
   const finalTags = buildTagUpdate(existingTags, ['cat:critico', 'bsm:zerado-auto', `last-seen:${YYYYMM()}`]);
   await updateProductTags(productId, finalTags);
-  return finalTags;
 }
 
 async function applyWatchTag(productId, existingTags, suppId, missedCount) {
@@ -446,7 +447,6 @@ async function applyWatchTag(productId, existingTags, suppId, missedCount) {
   const missed = `bsm:ausente-${missedCount}`;
   const finalTags = buildTagUpdate(existingTags, [`sup:${suppId}`, catTag, missed], existingTags.filter(t=>t.startsWith('bsm:ausente-')));
   await updateProductTags(productId, finalTags);
-  return finalTags;
 }
 
 // ═══════════════════════════════════════════
@@ -584,16 +584,16 @@ async function applyHealthTagsOnly(suppId, productIds) {
     const p = state.shopifyProducts.find(x=>x.id===pid);
     if (!p) continue;
     const missed = state.skuHealth[(p.variants[0]?.sku||'').toLowerCase()]?.missedUploads||1;
+    const threshold = supp?.zeroThreshold||4;
+    const catTag = missed >= threshold ? 'cat:critico' : 'cat:em-vigilancia';
     try {
-      const newTags = await applyWatchTag(p.id, p.tags||[], suppId, missed);
-      p.tags = newTags; // atualiza cache local para que saúde do catálogo reflita imediatamente
+      await applyWatchTag(p.id, p.tags||[], suppId, missed);
       done++;
     } catch(e) { console.warn('tag error', e); }
     await sleep(200);
   }
   toast(`Tags de saúde atualizadas em ${done} produto(s)`, 'success');
   addHealthAlerts(suppId, productIds);
-  save();
   updateBadges();
 }
 
@@ -615,12 +615,9 @@ async function applyZeroAndTags(suppId) {
         await updateVariantStock(invId, locationId, 0);
       }
       const p = state.shopifyProducts.find(x=>x.id===productId);
-      const newTags = await applyZeroStockTag(productId, p?.tags||[]);
+      await applyZeroStockTag(productId, p?.tags||[]);
       // Update local cache
-      if (p) {
-        p.variants.forEach(v => { if(v.id===variantId) v.stock=0; });
-        p.tags = newTags; // atualiza tags locais para reflectir cat:critico na saúde do catálogo
-      }
+      if (p) p.variants.forEach(v => { if(v.id===variantId) v.stock=0; });
       zeroed++;
       toast(`Stock zerado: ${title.substring(0,40)}`, 'info');
     } catch(e) { errors++; toast(`Erro: ${title.substring(0,30)} — ${e.message}`, 'error'); }
@@ -1111,16 +1108,70 @@ function catBadge(catTag) {
 // ═══════════════════════════════════════════
 // SUPPLIERS
 // ═══════════════════════════════════════════
+// ═══════════════════════════════════════════
+// ALERTAS DE CUSTO (MODO MANUAL)
+// ═══════════════════════════════════════════
+function renderCostAlertsPanel(suppId=null) {
+  const alerts = state.costAlerts.filter(a => !a.dismissed && (!suppId || a.suppId===suppId));
+  if (!alerts.length) return '';
+  const bySup = {};
+  alerts.forEach(a => {
+    if (!bySup[a.suppId]) bySup[a.suppId] = { suppName: a.suppName, alerts: [] };
+    bySup[a.suppId].alerts.push(a);
+  });
+  return Object.entries(bySup).map(([sid, group]) => `
+    <div class="card" style="margin-top:16px;border-left:4px solid var(--orange)">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+        <div style="flex:1">
+          <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:13px">⚠ Variações de Custo — ${group.suppName}</div>
+          <div style="font-size:11px;color:var(--text2);margin-top:2px">${group.alerts.length} produto(s) com custo alterado — revê e marca como tratado</div>
+        </div>
+        <button class="btn btn-ghost btn-sm" onclick="dismissAllCostAlerts('${sid}')">✓ Marcar todos como tratados</button>
+      </div>
+      <div class="table-wrap">
+        <table><thead><tr><th></th><th>Produto</th><th>SKU</th><th>Custo Anterior</th><th>Custo Novo</th><th>Variação</th><th></th></tr></thead>
+        <tbody>
+          ${group.alerts.map(a=>`
+          <tr>
+            <td style="font-size:16px;width:28px;text-align:center">${a.direcao==='subiu'?'🔴':'🟢'}</td>
+            <td style="font-weight:600;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${a.produto}</td>
+            <td class="mono" style="font-size:11px">${a.sku||'—'}</td>
+            <td class="mono">€${a.custoAnterior.toFixed(2)}</td>
+            <td class="mono" style="font-weight:600;color:${a.direcao==='subiu'?'var(--red)':'var(--green)'}">€${a.custoNovo.toFixed(2)}</td>
+            <td class="mono" style="color:${a.direcao==='subiu'?'var(--red)':'var(--green)'}">
+              ${a.direcao==='subiu'?'+':''}€${a.variacaoEuros.toFixed(2)}
+              <span style="font-size:10px;margin-left:3px">(${a.direcao==='subiu'?'+':''}${a.variacaoPercentagem.toFixed(2)}%)</span>
+            </td>
+            <td><button class="btn btn-ghost btn-sm" onclick="dismissCostAlert('${a.id}')">✓ Tratado</button></td>
+          </tr>`).join('')}
+        </tbody></table>
+      </div>
+    </div>`).join('');
+}
+
+function dismissCostAlert(id) {
+  const a = state.costAlerts.find(a => a.id===id);
+  if (a) { a.dismissed=true; save(); render(); }
+}
+
+function dismissAllCostAlerts(suppId) {
+  state.costAlerts.filter(a => a.suppId===suppId).forEach(a => a.dismissed=true);
+  save(); render();
+}
+
 function suppliers() {
   document.getElementById('topbar-actions').innerHTML=`<button class="btn btn-primary" onclick="openSupplierModal()">+ Novo Fornecedor</button>`;
+  const pendingCostAlerts = {};
+  state.costAlerts.filter(a=>!a.dismissed).forEach(a=>{ pendingCostAlerts[a.suppId]=(pendingCostAlerts[a.suppId]||0)+1; });
   document.getElementById('content').innerHTML=`
     <div class="table-wrap">
       <div class="table-header"><span style="font-family:'Syne',sans-serif;font-weight:700">${state.suppliers.length} fornecedor(es)</span></div>
-      <table><thead><tr><th>Nome</th><th>Tag ID</th><th>Tipo Preço</th><th>Margem</th><th>Arredondamento</th><th>Threshold zero</th><th>Colunas</th><th>Último Upload</th><th>Estado</th><th></th></tr></thead><tbody>
-      ${state.suppliers.length===0?`<tr><td colspan="10"><div class="empty-state"><div class="empty-icon">🏭</div><p>Nenhum fornecedor criado ainda.<br>Clica em "+ Novo Fornecedor" para começar.</p></div></td></tr>`:
+      <table><thead><tr><th>Nome</th><th>Tag ID</th><th>Modo Preço</th><th>Tipo Preço</th><th>Margem</th><th>Arredondamento</th><th>Threshold zero</th><th>Colunas</th><th>Último Upload</th><th>Estado</th><th></th></tr></thead><tbody>
+      ${state.suppliers.length===0?`<tr><td colspan="11"><div class="empty-state"><div class="empty-icon">🏭</div><p>Nenhum fornecedor criado ainda.<br>Clica em "+ Novo Fornecedor" para começar.</p></div></td></tr>`:
         state.suppliers.map(s=>`<tr>
-          <td><div style="font-weight:600">${s.name}</div></td>
+          <td><div style="font-weight:600">${s.name}</div>${pendingCostAlerts[s.id]?`<div style="font-size:11px;color:var(--orange);margin-top:2px">⚠ ${pendingCostAlerts[s.id]} alerta(s) de custo</div>`:''}</td>
           <td><span class="tag-pill tp-sup">sup:${s.id}</span></td>
+          <td><span class="badge ${s.pricingMode==='manual'?'badge-purple':'badge-gray'}" style="font-size:10px">${s.pricingMode==='manual'?'Manual':'Auto'}</span></td>
           <td><span class="badge ${s.priceType==='pvp'?'badge-blue':'badge-yellow'}">${s.priceType==='pvp'?'PVP':'Custo+Marg.'}</span></td>
           <td class="mono">${s.priceType==='pvp'?'—':'+'+s.margin+'%'}</td>
           <td><span class="badge badge-gray" style="font-size:10px">${roundingLabel(s.rounding)}</span></td>
@@ -1131,7 +1182,8 @@ function suppliers() {
           <td><div style="display:flex;gap:6px"><button class="btn btn-ghost btn-sm" onclick="openSupplierModal('${s.id}')">✏ Editar</button><button class="btn btn-danger btn-sm" onclick="deleteSupplier('${s.id}')">✕</button></div></td>
         </tr>`).join('')}
       </tbody></table>
-    </div>`;
+    </div>
+    ${renderCostAlertsPanel()}`;
 }
 
 function openSupplierModal(id=null) {
@@ -1143,6 +1195,14 @@ function openSupplierModal(id=null) {
       <div class="form-row">
         <div class="form-group"><label>Nome *</label><input type="text" id="s-name" value="${s?.name||''}" placeholder="ex: Teletech, Depau..."></div>
         <div class="form-group"><label>Estado</label><select id="s-active"><option value="true" ${(!s||s.active)?'selected':''}>Ativo</option><option value="false" ${s&&!s.active?'selected':''}>Inativo</option></select></div>
+      </div>
+      <div class="form-group">
+        <label>Modo de Preço</label>
+        <select id="s-pricingmode">
+          <option value="automatico" ${s?.pricingMode!=='manual'?'selected':''}>Automático — margem aplicada no upload</option>
+          <option value="manual" ${s?.pricingMode==='manual'?'selected':''}>Manual — preços nunca alterados automaticamente</option>
+        </select>
+        <span style="font-size:11px;color:var(--text2);margin-top:4px;display:block">No modo manual, variações de custo geram alertas visuais para revisão. O preço de venda nunca é tocado.</span>
       </div>
       <div class="form-group"><label>Tipo de Preço</label>
         <select id="s-pricetype" onchange="toggleMarginField()">
@@ -1211,6 +1271,7 @@ function saveSupplier(id) {
     colStock: document.getElementById('s-colstock').value.trim(),
     colPrice: document.getElementById('s-colprice').value.trim(),
     colStatus: document.getElementById('s-colstatus').value.trim(),
+    pricingMode: document.getElementById('s-pricingmode')?.value || 'automatico',
     lastUpload: id ? state.suppliers.find(s=>s.id===id)?.lastUpload : null,
   };
   if(id) state.suppliers = state.suppliers.map(s=>s.id===id?data:s);
@@ -1349,114 +1410,148 @@ function showColMapper(rows, suppId) {
 
 
 // ═══════════════════════════════════════════
-// STEP 2 — ANÁLISE DO FICHEIRO
+// STEP 2 — ANALYSIS (entry point for "Analisar Ficheiro" button)
 // ═══════════════════════════════════════════
 function runAnalysis() {
-  // Sync colMap with current select values
-  ['name','sku','barcode','stock','price'].forEach(k => {
-    const el = document.getElementById('col-'+k);
-    if (el) state.colMap[k] = el.value;
-  });
-
-  if (!state.parsedRows.length) { toast('Sem dados para analisar','error'); return; }
+  if (!state.parsedRows.length) { toast('Nenhum ficheiro carregado', 'error'); return; }
   const supp = state.suppliers.find(s => s.id === state.uploadSuppId);
-  if (!supp) { toast('Fornecedor inválido','error'); return; }
+  if (!supp) { toast('Fornecedor não encontrado', 'error'); return; }
 
   const groups = detectDuplicates(state.parsedRows, state.colMap);
+
+  function doAnalysis(decisions) {
+    const { name: nc, sku: sc, barcode: bc, stock: stc, price: pc } = state.colMap;
+    const isManual = supp.pricingMode === 'manual';
+
+    // Apply duplicate merge decisions
+    const skipIdxs = new Set();
+    const extraRows = [];
+    decisions.forEach(d => {
+      if (d.decision === true) {
+        d.items.forEach(x => skipIdxs.add(x.idx));
+        const mergedStock = d.items.reduce((a, x) => a + x.stock, 0);
+        const minCost = Math.min(...d.items.map(x => x.cost));
+        extraRows.push({ [nc]: d.items[0].name, [sc]: d.items[0].sku, [bc]: d.items[0].barcode, [stc]: String(mergedStock), [pc]: String(minCost) });
+        d.unselectedItems.forEach(x => {
+          skipIdxs.add(x.idx);
+          extraRows.push({ [nc]: x.name, [sc]: x.sku, [bc]: x.barcode, [stc]: String(x.stock), [pc]: String(x.cost) });
+        });
+      }
+    });
+
+    const effectiveRows = [
+      ...state.parsedRows.filter((_, i) => !skipIdxs.has(i)),
+      ...extraRows,
+    ];
+
+    // Build SKU/barcode lookup maps from cached Shopify products
+    const skuMap = {}, barcodeMap = {};
+    state.shopifyProducts.forEach(p => {
+      p.variants.forEach(v => {
+        if (v.sku) skuMap[v.sku.trim().toLowerCase()] = { product: p, variant: v };
+        if (v.barcode) barcodeMap[v.barcode.trim()] = { product: p, variant: v };
+      });
+    });
+
+    const found = [], notFound = [], isNew = [];
+    const knownSkus = new Set(), knownBarcodes = new Set();
+
+    effectiveRows.forEach(row => {
+      const name = (row[nc] || '').trim();
+      if (!name) return;
+      const sku = (row[sc] || '').trim();
+      const barcode = (row[bc] || '').trim();
+      const stockVal = parseInt((row[stc] || '0').toString().replace(/[^0-9]/g, '')) || 0;
+      const costRaw = parseFloat((row[pc] || '0').toString().replace(',', '.')) || 0;
+
+      if (sku) knownSkus.add(sku.toLowerCase());
+      if (barcode) knownBarcodes.add(barcode);
+
+      const rawPrice = supp.priceType === 'pvp' ? costRaw : costRaw * (1 + (supp.margin || 0) / 100);
+      const finalPrice = applyPriceRounding(rawPrice, supp.rounding);
+
+      // Chave para histórico de custo (modo manual)
+      const histKey = sku ? `${supp.id}::${sku.toLowerCase()}` : barcode ? `${supp.id}::bc::${barcode}` : null;
+
+      let match = null, matchedBy = null;
+      if (sku && skuMap[sku.toLowerCase()]) { match = skuMap[sku.toLowerCase()]; matchedBy = 'SKU'; }
+      else if (barcode && barcodeMap[barcode]) { match = barcodeMap[barcode]; matchedBy = 'BARCODE'; }
+
+      if (match) {
+        const currentShopifyPrice = parseFloat(match.variant.price) || 0;
+        // Modo manual: finalPrice = preço atual Shopify (sem alteração por defeito)
+        const effectiveFinalPrice = isManual ? currentShopifyPrice : finalPrice;
+        const effectiveRawPrice   = isManual ? currentShopifyPrice : rawPrice;
+
+        // Variação de custo vs histórico (modo manual, ignorar < €0.10)
+        let costChange = null;
+        if (isManual && histKey) {
+          const hist = state.costHistory[histKey];
+          const custoAnterior = hist ? hist.custo : null;
+          if (custoAnterior !== null) {
+            const variacaoEuros = costRaw - custoAnterior;
+            if (Math.abs(variacaoEuros) >= 0.10) {
+              costChange = {
+                custoAnterior, custoNovo: costRaw,
+                variacaoEuros,
+                variacaoPercentagem: custoAnterior > 0 ? (variacaoEuros / custoAnterior) * 100 : 0,
+                direcao: variacaoEuros > 0 ? 'subiu' : 'desceu',
+                histKey,
+              };
+            }
+          } else {
+            // Primeiro upload — sem histórico ainda
+            costChange = { direcao: 'novo', custoNovo: costRaw, histKey };
+          }
+        }
+
+        const priceChanged = currentShopifyPrice.toFixed(2) !== effectiveFinalPrice.toFixed(2);
+        const stockChanged = (match.variant.stock ?? 0) !== stockVal;
+        const rowData = { name, sku, barcode, stockVal, costRaw, rawPrice: effectiveRawPrice, finalPrice: effectiveFinalPrice, suppId: supp.id, suppName: supp.name, histKey };
+        found.push({
+          ...rowData,
+          shopifyProduct: match.product,
+          shopifyVariant: match.variant,
+          shopifyTitle: match.product.title,
+          currentPrice: currentShopifyPrice,
+          currentStock: match.variant.stock ?? 0,
+          matchedBy,
+          applyPrice: isManual ? false : priceChanged, // manual: false por defeito, ativado ao editar com ✏
+          applyStock: stockChanged,
+          _selected: true,
+          costChange,
+        });
+      } else if (sku || barcode) {
+        isNew.push({ name, sku, barcode, stockVal, costRaw, rawPrice, finalPrice, suppId: supp.id, suppName: supp.name, histKey });
+      } else {
+        notFound.push({ name, sku, barcode, stockVal, costRaw, rawPrice, finalPrice, suppId: supp.id, suppName: supp.name, histKey });
+      }
+    });
+
+    // Extrair variações de custo para persistência posterior
+    const costChanges = found.filter(p => p.costChange).map(p => ({
+      ...p.costChange,
+      name: p.name, sku: p.sku, barcode: p.barcode,
+      suppId: supp.id, suppName: supp.name,
+    }));
+
+    state.analysisResult = {
+      found, isNew,
+      knownSkus, knownBarcodes,
+      uploadTotal: effectiveRows.filter(r => (r[nc] || '').trim()).length,
+      costChanges,
+      isManual,
+    };
+    renderAnalysis(found, notFound, isNew, supp);
+  }
+
   if (groups.length > 0) {
-    showDuplicateStep(groups, runAnalysisWithDecisions);
+    showDuplicateStep(groups, doAnalysis);
   } else {
-    runAnalysisWithDecisions([]);
+    doAnalysis([]);
   }
 }
 
-function runAnalysisWithDecisions(decisions) {
-  const supp = state.suppliers.find(s => s.id === state.uploadSuppId);
-  if (!supp) { toast('Fornecedor não encontrado','error'); return; }
-  const cm = state.colMap;
-
-  // Apply duplicate merge decisions
-  const mergedIndices = new Set();
-  const extraRows = [];
-  decisions.forEach(group => {
-    if (group.decision === true && group.items.length) {
-      const mergedStock = group.items.reduce((a, x) => a + x.stock, 0);
-      const minCost = Math.min(...group.items.map(x => x.cost));
-      group.items.forEach(item => mergedIndices.add(item.idx));
-      const mergedRow = { ...state.parsedRows[group.items[0].idx] };
-      if (cm.stock) mergedRow[cm.stock] = String(mergedStock);
-      if (cm.price) mergedRow[cm.price] = String(minCost);
-      extraRows.push(mergedRow);
-      group.unselectedItems.forEach(item => {
-        mergedIndices.add(item.idx);
-        extraRows.push({ ...state.parsedRows[item.idx] });
-      });
-    }
-  });
-  const processRows = [
-    ...state.parsedRows.filter((_, i) => !mergedIndices.has(i)),
-    ...extraRows
-  ];
-
-  // Build Shopify lookup indexes
-  const shopifyBySku = {}, shopifyByBarcode = {};
-  state.shopifyProducts.forEach(p => {
-    p.variants.forEach(v => {
-      const skuKey = (v.sku||'').trim().toLowerCase();
-      const bc = (v.barcode||'').trim();
-      if (skuKey) shopifyBySku[skuKey] = { product: p, variant: v };
-      if (bc) shopifyByBarcode[bc] = { product: p, variant: v };
-    });
-  });
-
-  const found = [], notFound = [], isNew = [];
-  const knownSkus = new Set(), knownBarcodes = new Set();
-  const shopifyLoaded = state.shopifyProducts.length > 0;
-
-  processRows.forEach(row => {
-    const name = (row[cm.name]||'').trim();
-    const sku = (row[cm.sku]||'').trim();
-    const barcode = (row[cm.barcode]||'').trim();
-    const stockRaw = String(row[cm.stock]||'0');
-    const priceRaw = String(row[cm.price]||'0');
-    if (!name && !sku && !barcode) return;
-
-    const stockVal = parseInt(stockRaw.replace(/[^0-9]/g,'')) || 0;
-    const costVal = parseFloat(priceRaw.replace(',','.')) || 0;
-    let rawPrice = costVal;
-    if (supp.priceType === 'cost') rawPrice = costVal * (1 + (supp.margin || 0) / 100);
-    const finalPrice = applyPriceRounding(rawPrice, supp.rounding);
-
-    if (sku) knownSkus.add(sku.toLowerCase());
-    if (barcode) knownBarcodes.add(barcode);
-
-    let matchObj = null, matchedBy = null;
-    if (sku) { const m = shopifyBySku[sku.toLowerCase()]; if (m) { matchObj = m; matchedBy = 'SKU'; } }
-    if (!matchObj && barcode) { const m = shopifyByBarcode[barcode]; if (m) { matchObj = m; matchedBy = 'Barcode'; } }
-
-    if (matchObj) {
-      const priceChanged = parseFloat(matchObj.variant.price||0).toFixed(2) !== finalPrice.toFixed(2);
-      const stockChanged = matchObj.variant.stock !== stockVal;
-      found.push({
-        shopifyTitle: matchObj.product.title, shopifyProduct: matchObj.product,
-        shopifyVariant: matchObj.variant, sku: sku || matchObj.variant.sku,
-        currentPrice: matchObj.variant.price, finalPrice, rawPrice,
-        currentStock: matchObj.variant.stock, stockVal, matchedBy,
-        applyPrice: priceChanged, applyStock: stockChanged,
-      });
-    } else if (shopifyLoaded) {
-      isNew.push({ name, sku, barcode, finalPrice, stockVal, suppId: supp.id, suppName: supp.name });
-    } else {
-      notFound.push({ name, sku, barcode });
-    }
-  });
-
-  state.analysisResult = { found, isNew, knownSkus, knownBarcodes, uploadTotal: processRows.length };
-  document.getElementById('step-duplicates').style.display = 'none';
-  document.getElementById('step-mapping').style.display = 'none';
-  if (!shopifyLoaded) toast('⚠ Produtos Shopify não sincronizados — matching desativado. Sincroniza primeiro para atualizar preços/stock.', 'warning');
-  renderAnalysis(found, notFound, isNew, supp);
-}
 
 // ═══════════════════════════════════════════
 // STEP 2.5 — DUPLICATE DETECTION & MERGE
@@ -1486,30 +1581,69 @@ function detectDuplicates(rows, colMap) {
   const groups = [];
   const used = new Set();
 
-  for (let i=0; i<items.length; i++) {
-    if (used.has(i)) continue;
-    const a = items[i];
-    const cluster = [a];
-    for (let j=i+1; j<items.length; j++) {
-      if (used.has(j)) continue;
-      const b = items[j];
-      if (!a.name || !b.name) continue;
-      const score = nameSimilarity(a.name, b.name);
-      if (score < 88) continue;
-      // Price proximity check: within 15%
-      const maxCost = Math.max(a.cost, b.cost);
-      if (maxCost > 0) {
-        const diff = Math.abs(a.cost - b.cost) / maxCost;
-        if (diff > 0.15) continue;
+  if (items.length <= 400) {
+    // Catálogo pequeno: comparação O(n²) completa
+    for (let i=0; i<items.length; i++) {
+      if (used.has(i)) continue;
+      const a = items[i];
+      const cluster = [a];
+      for (let j=i+1; j<items.length; j++) {
+        if (used.has(j)) continue;
+        const b = items[j];
+        const score = nameSimilarity(a.name, b.name);
+        if (score < 88) continue;
+        const maxCost = Math.max(a.cost, b.cost);
+        if (maxCost > 0 && Math.abs(a.cost - b.cost) / maxCost > 0.15) continue;
+        cluster.push(b);
+        used.add(j);
       }
-      cluster.push(b);
-      used.add(j);
+      if (cluster.length > 1) {
+        used.add(i);
+        groups.push({ items: cluster, score: nameSimilarity(cluster[0].name, cluster[1].name), decision: null });
+      }
     }
-    if (cluster.length > 1) {
-      used.add(i);
-      groups.push({ items: cluster, score: cluster.length>1?nameSimilarity(cluster[0].name,cluster[1].name):100, decision: null });
-    }
+  } else {
+    // Catálogo grande: índice por palavra para evitar O(n²)
+    const wordBuckets = new Map();
+    items.forEach((item, i) => {
+      const words = item.name.toLowerCase().replace(/[^a-z0-9\s]/g,'').split(/\s+/).filter(w=>w.length>3);
+      words.slice(0, 2).forEach(w => {
+        if (!wordBuckets.has(w)) wordBuckets.set(w, []);
+        wordBuckets.get(w).push(i);
+      });
+    });
+
+    const checkedPairs = new Set();
+    wordBuckets.forEach(indices => {
+      // Ignora buckets com palavra demasiado comum (>40 produtos)
+      if (indices.length < 2 || indices.length > 40) return;
+      for (let a=0; a<indices.length; a++) {
+        const ai = indices[a];
+        if (used.has(ai)) continue;
+        const itemA = items[ai];
+        const cluster = [itemA];
+        for (let b=a+1; b<indices.length; b++) {
+          const bi = indices[b];
+          if (used.has(bi)) continue;
+          const pairKey = ai<bi ? ai+','+bi : bi+','+ai;
+          if (checkedPairs.has(pairKey)) continue;
+          checkedPairs.add(pairKey);
+          const itemB = items[bi];
+          const score = nameSimilarity(itemA.name, itemB.name);
+          if (score < 88) continue;
+          const maxCost = Math.max(itemA.cost, itemB.cost);
+          if (maxCost > 0 && Math.abs(itemA.cost - itemB.cost) / maxCost > 0.15) continue;
+          cluster.push(itemB);
+          used.add(bi);
+        }
+        if (cluster.length > 1) {
+          used.add(ai);
+          groups.push({ items: cluster, score: nameSimilarity(cluster[0].name, cluster[1].name), decision: null });
+        }
+      }
+    });
   }
+
   return groups;
 }
 
@@ -1663,44 +1797,72 @@ function showDuplicateStep(groups, onContinue) {
 
 function renderAnalysis(found, notFound, isNew, supp) {
   const el = document.getElementById('step-analysis');
+  const isManual = supp.pricingMode === 'manual';
+  const costChanges = found.filter(p => p.costChange);
   el.style.display='block';
   el.innerHTML=`
-    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px">
+    ${isManual ? `
+    <div style="background:var(--purple-bg);border:1px solid #C4B5FD;border-radius:10px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;gap:10px">
+      <span style="font-size:20px">🏷</span>
+      <div>
+        <div style="font-weight:700;font-size:13px;color:var(--purple)">Modo Manual — Preços pré-preenchidos com valor atual do Shopify</div>
+        <div style="font-size:12px;color:var(--text2);margin-top:2px">Edita os preços que quiseres com ✏ e aplica. Variações de custo ficam assinaladas para decisão.</div>
+      </div>
+    </div>` : ''}
+
+    <div style="display:grid;grid-template-columns:repeat(${isManual ? '4' : '3'},1fr);gap:10px;margin-bottom:16px">
       <div class="stat-card" style="border-left:3px solid var(--green)"><div class="stat-num" style="color:var(--green)">${found.length}</div><div class="stat-lbl">Encontrados no Shopify</div></div>
       <div class="stat-card" style="border-left:3px solid var(--blue)"><div class="stat-num" style="color:var(--blue)">${isNew.length}</div><div class="stat-lbl">Produtos Novos (alertas)</div></div>
+      ${isManual ? `<div class="stat-card" style="border-left:3px solid var(--purple)"><div class="stat-num" style="color:var(--purple)">${costChanges.length}</div><div class="stat-lbl">Variações de Custo</div></div>` : ''}
       <div class="stat-card" style="border-left:3px solid var(--orange)"><div class="stat-num" style="color:var(--orange)">${notFound.length}</div><div class="stat-lbl">Não Encontrados</div></div>
     </div>
 
     ${found.length>0?`
     <div class="review-section rs-found" style="margin-bottom:16px">
-      <div class="review-section-title">✅ ${found.length} Produtos Encontrados
+      <div class="review-section-title">${isManual ? '📦' : '✅'} ${found.length} Produtos Encontrados
+        ${!isManual ? `
         <div style="margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
           <span style="font-size:11px;color:var(--text2);font-family:'DM Mono',monospace">Aplicar a todos:</span>
           <button class="btn btn-ghost btn-sm" onclick="setAllMode('both')">Preço + Stock</button>
           <button class="btn btn-ghost btn-sm" onclick="setAllMode('price')">Só Preço</button>
           <button class="btn btn-ghost btn-sm" onclick="setAllMode('stock')">Só Stock</button>
           <button class="btn btn-ghost btn-sm" onclick="toggleAllFound(false)" style="color:var(--text3)">Limpar</button>
-        </div>
+        </div>` : ''}
       </div>
       <div class="table-wrap" style="max-height:420px;overflow-y:auto">
         <table><thead><tr>
           <th style="width:36px"><input type="checkbox" id="chk-all-found" onchange="toggleAllFound(this.checked)" checked></th>
-          <th>Produto Shopify</th><th>SKU</th><th>Preço Atual → Novo</th><th>Stock Atual → Novo</th><th>Via</th>
+          <th>Produto Shopify</th><th>SKU</th>
+          ${isManual ? '<th>Custo Fornecedor</th>' : ''}
+          <th>Preço Venda ${isManual ? '(atual → edita se necessário)' : 'Atual → Novo'}</th>
+          <th>Stock Atual → Novo</th><th>Via</th>
           <th style="text-align:center;width:52px">💶</th><th style="text-align:center;width:52px">📦</th>
         </tr></thead>
         <tbody id="found-tbody">
           ${found.map((p,i)=>{
             const priceChanged=parseFloat(p.currentPrice||0).toFixed(2)!==p.finalPrice.toFixed(2);
             const stockChanged=p.currentStock!==p.stockVal;
-            const roundingDiff = p.rawPrice!==p.finalPrice ? `<span style="font-size:10px;color:var(--text3);margin-left:4px">(raw €${p.rawPrice.toFixed(2)})</span>` : '';
+            const roundingDiff = (!isManual && p.rawPrice!==p.finalPrice) ? `<span style="font-size:10px;color:var(--text3);margin-left:4px">(raw €${p.rawPrice.toFixed(2)})</span>` : '';
+            const cc = p.costChange;
+            const costCell = isManual ? `<td style="font-size:12px;white-space:nowrap">
+              ${cc && cc.direcao!=='novo' ? `
+                <span style="font-size:14px;vertical-align:middle">${cc.direcao==='subiu'?'🔴':'🟢'}</span>
+                <span class="mono" style="color:var(--text2);font-size:11px"> €${cc.custoAnterior.toFixed(2)} → </span>
+                <span class="mono" style="font-weight:600;color:${cc.direcao==='subiu'?'var(--red)':'var(--green)'}">€${cc.custoNovo.toFixed(2)}</span>
+                <span style="font-size:10px;color:${cc.direcao==='subiu'?'var(--red)':'var(--green)'};margin-left:3px">(${cc.direcao==='subiu'?'+':''}${cc.variacaoPercentagem.toFixed(1)}%)</span>`
+              : cc && cc.direcao==='novo' ? `<span style="color:var(--text3);font-size:11px">🆕 €${cc.custoNovo.toFixed(2)} (1.º upload)</span>`
+              : `<span style="color:var(--text3);font-size:11px">⚪ €${p.costRaw.toFixed(2)} (igual)</span>`}
+            </td>` : '';
             return `<tr id="found-row-${i}">
               <td><input type="checkbox" class="chk-found" data-idx="${i}" checked onchange="updateFoundRow(${i},this.checked)"></td>
               <td style="font-weight:600;max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.shopifyTitle}">${p.shopifyTitle}</td>
               <td class="mono" style="font-size:11px;color:var(--text2)">${p.sku||'—'}</td>
+              ${costCell}
               <td style="font-size:12px;white-space:nowrap">
                 <span class="mono" style="color:var(--text2)">€${parseFloat(p.currentPrice||0).toFixed(2)}</span>
-                ${priceChanged?`<span style="color:var(--text3)"> → </span><span class="price-display-${i} mono" style="color:var(--green);font-weight:600">€${p.finalPrice.toFixed(2)}</span>${roundingDiff}<button onclick="editPrice(${i})" style="background:none;border:none;cursor:pointer;padding:2px 4px;color:var(--text3);font-size:13px;vertical-align:middle">✏</button>`
-                :'<span style="color:var(--text3);font-size:11px"> (igual)</span>'}
+                ${priceChanged
+                  ? `<span style="color:var(--text3)"> → </span><span class="price-display-${i} mono" style="color:var(--green);font-weight:600">€${p.finalPrice.toFixed(2)}</span>${roundingDiff}<button onclick="editPrice(${i})" style="background:none;border:none;cursor:pointer;padding:2px 4px;color:var(--text3);font-size:13px;vertical-align:middle">✏</button>`
+                  : `<span class="price-display-${i} mono" style="display:none">€${p.finalPrice.toFixed(2)}</span><button onclick="editPrice(${i})" style="background:none;border:none;cursor:pointer;padding:2px 4px;color:var(--text3);font-size:13px;vertical-align:middle" title="Editar preço">✏</button>`}
               </td>
               <td class="mono" style="font-size:12px;white-space:nowrap">
                 <span style="color:var(--text2)">${p.currentStock??'?'}</span>
@@ -1739,10 +1901,10 @@ function renderAnalysis(found, notFound, isNew, supp) {
     <div class="card" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;position:sticky;bottom:0;z-index:10">
       <div style="flex:1">
         <div style="font-weight:600;font-size:14px;color:var(--text)" id="apply-summary">A calcular...</div>
-        <div style="font-size:12px;color:var(--text2);margin-top:2px">Tags de fornecedor e saúde serão aplicadas automaticamente</div>
+        <div style="font-size:12px;color:var(--text2);margin-top:2px">${isManual ? 'Modo Manual — preços não alterados. Stock e tags serão aplicados.' : 'Tags de fornecedor e saúde serão aplicadas automaticamente'}</div>
       </div>
       <button class="btn btn-ghost" onclick="resetUpload()">↩ Recomeçar</button>
-      <button class="btn btn-primary" onclick="applyChanges()">✓ Aplicar no Shopify</button>
+      <button class="btn btn-primary" onclick="applyChanges()">${isManual ? '✓ Aplicar Stock + Registar Alertas' : '✓ Aplicar no Shopify'}</button>
     </div>`;
   updateApplySummary();
 }
@@ -1767,7 +1929,7 @@ function editPrice(idx) {
   input.style.cssText='width:80px;padding:3px 6px;font-family:"DM Mono",monospace;font-size:12px;border:1px solid var(--blue);border-radius:5px;color:var(--text);background:var(--surface);outline:none;';
   const confirmBtn=document.createElement('button'); confirmBtn.textContent='✓'; confirmBtn.style.cssText='background:var(--green);color:white;border:none;border-radius:5px;padding:3px 7px;cursor:pointer;font-size:12px;margin-left:4px;';
   const cancelBtn=document.createElement('button'); cancelBtn.textContent='✕'; cancelBtn.style.cssText='background:var(--panel);color:var(--text2);border:1px solid var(--border);border-radius:5px;padding:3px 7px;cursor:pointer;font-size:12px;margin-left:3px;';
-  const save=()=>{ const newVal=parseFloat(input.value); if(isNaN(newVal)||newVal<=0){toast('Preço inválido','error');return;} p.finalPrice=newVal; displayEl.textContent='€'+newVal.toFixed(2); displayEl.style.display=''; if(editBtn) editBtn.style.display=''; input.remove(); confirmBtn.remove(); cancelBtn.remove(); const priceChk=document.querySelector(`.chk-price[data-idx="${idx}"]`); if(priceChk){priceChk.disabled=false;priceChk.checked=true;} updateApplySummary(); toast('Preço atualizado','success'); };
+  const save=()=>{ const newVal=parseFloat(input.value); if(isNaN(newVal)||newVal<=0){toast('Preço inválido','error');return;} p.finalPrice=newVal; p.applyPrice=true; displayEl.textContent='€'+newVal.toFixed(2); displayEl.style.display=''; if(editBtn) editBtn.style.display=''; input.remove(); confirmBtn.remove(); cancelBtn.remove(); const priceChk=document.querySelector(`.chk-price[data-idx="${idx}"]`); if(priceChk){priceChk.disabled=false;priceChk.checked=true;} updateApplySummary(); toast('Preço atualizado','success'); };
   const cancel=()=>{ displayEl.style.display=''; if(editBtn) editBtn.style.display=''; input.remove(); confirmBtn.remove(); cancelBtn.remove(); };
   confirmBtn.onclick=save; cancelBtn.onclick=cancel; input.onkeydown=(e)=>{if(e.key==='Enter')save();if(e.key==='Escape')cancel();};
   parent.appendChild(input); parent.appendChild(confirmBtn); parent.appendChild(cancelBtn); input.focus(); input.select();
@@ -1793,18 +1955,25 @@ function updateFoundRow(idx, checked) {
 
 function updateApplySummary() {
   const el=document.getElementById('apply-summary'); if(!el||!state.analysisResult) return;
-  const selected=state.analysisResult.found.filter(p=>p._selected!==false).length;
-  const priceUpdates=state.analysisResult.found.filter(p=>p._selected!==false&&p.applyPrice).length;
   const stockUpdates=state.analysisResult.found.filter(p=>p._selected!==false&&p.applyStock).length;
-  el.textContent=`${selected} produto(s) — ${priceUpdates} preço(s) + ${stockUpdates} stock(s)`;
+  if (state.analysisResult.isManual) {
+    const costChanges=state.analysisResult.costChanges?.length||0;
+    el.textContent=`${stockUpdates} stock(s) a atualizar${costChanges>0?' · '+costChanges+' variação(ões) de custo a registar':''}`;
+  } else {
+    const selected=state.analysisResult.found.filter(p=>p._selected!==false).length;
+    const priceUpdates=state.analysisResult.found.filter(p=>p._selected!==false&&p.applyPrice).length;
+    el.textContent=`${selected} produto(s) — ${priceUpdates} preço(s) + ${stockUpdates} stock(s)`;
+  }
 }
 
 async function applyChanges() {
   if(!state.analysisResult) return;
   const {found, isNew, knownSkus, knownBarcodes, uploadTotal} = state.analysisResult;
   const supp = state.suppliers.find(s=>s.id===state.uploadSuppId);
+  const isManualMode = state.analysisResult?.isManual;
   const toUpdate = found.filter(p=>p._selected!==false&&(p.applyPrice||p.applyStock));
-  if(!toUpdate.length&&!isNew.length){ toast('Nada selecionado para aplicar','error'); return; }
+  const hasCostChanges = isManualMode && (state.analysisResult?.costChanges?.length > 0);
+  if(!toUpdate.length&&!isNew.length&&!hasCostChanges){ toast('Nada selecionado para aplicar','error'); return; }
 
   document.getElementById('step-analysis').style.display='none';
   document.getElementById('step-mapping').style.display='none';
@@ -1866,14 +2035,37 @@ async function applyChanges() {
     state.alerts.push({ id:'alert_'+Date.now()+Math.random(), type:'new_product', title:'Novo produto detetado', desc:`${p.name}${p.sku?' ('+p.sku+')':''} — ${p.suppName} — €${p.finalPrice.toFixed(2)}`, sku:p.sku, barcode:p.barcode, name:p.name, price:p.finalPrice, stock:p.stockVal, suppId:p.suppId, date:new Date().toISOString(), dismissed:false });
   });
 
+  // Modo manual: guardar alertas de custo e atualizar histórico de custos
+  const costChangesRegistered = [];
+  if (isManualMode) {
+    const costChanges = state.analysisResult?.costChanges || [];
+    costChanges.forEach(cc => {
+      state.costAlerts.push({
+        id: 'ca_'+Date.now()+Math.random(),
+        suppId: state.uploadSuppId, suppName: supp.name,
+        produto: cc.name, sku: cc.sku, barcode: cc.barcode,
+        custoAnterior: cc.custoAnterior, custoNovo: cc.custoNovo,
+        variacaoEuros: cc.variacaoEuros, variacaoPercentagem: cc.variacaoPercentagem,
+        direcao: cc.direcao, date: new Date().toISOString(), dismissed: false,
+      });
+      costChangesRegistered.push(cc);
+    });
+    // Atualizar baseline de custo para TODOS os produtos processados
+    state.analysisResult?.found?.forEach(p => {
+      if (p.histKey) state.costHistory[p.histKey] = { custo: p.costRaw, data: new Date().toISOString() };
+    });
+  }
+
   state.uploadHistory.unshift({ id:'upl_'+Date.now(), supplierId:state.uploadSuppId, supplierName:supp.name, date:new Date().toISOString(), total:uploadTotal, updated, errors, newProducts:isNew.length });
   state.suppliers = state.suppliers.map(s=>s.id===state.uploadSuppId?{...s,lastUpload:new Date().toISOString()}:s);
   save();
 
-  setUI('🔍', 'A verificar saúde do catálogo...', '', 90, `A comparar produtos ${supp.name}...`);
-  if(state.shopifyProducts.length>0) {
-    await runPostUploadHealthCheck(state.uploadSuppId, { skus: knownSkus, barcodes: knownBarcodes, total: uploadTotal });
-  }
+  try {
+    setUI('🔍', 'A verificar saúde do catálogo...', '', 90, `A comparar produtos ${supp.name}...`);
+    if(state.shopifyProducts.length>0) {
+      await runPostUploadHealthCheck(state.uploadSuppId, { skus: knownSkus, barcodes: knownBarcodes, total: uploadTotal });
+    }
+  } catch(e) { console.warn('Health check falhou:', e.message); }
 
   // SHOW SUCCESS STATE
   const f=document.getElementById('progress-fill'); if(f) f.style.width='100%';
@@ -1893,6 +2085,7 @@ async function applyChanges() {
       {n:stockUpdated, lbl:'Stocks', color:'var(--blue)'},
       {n:tagsApplied, lbl:'Tags', color:'var(--purple)'},
       ...(isNew.length>0?[{n:isNew.length, lbl:'Novos alertas', color:'var(--orange)'}]:[]),
+      ...(costChangesRegistered.length>0?[{n:costChangesRegistered.length, lbl:'Alertas custo', color:'var(--purple)'}]:[]),
       ...(errors>0?[{n:errors, lbl:'Erros', color:'var(--red)'}]:[]),
     ].map(x=>`<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px;text-align:center">
       <div style="font-family:'Syne',sans-serif;font-size:22px;font-weight:800;color:${x.color}">${x.n}</div>
@@ -1988,13 +2181,23 @@ async function createFromAlert(alertId) {
   if(!title){toast('Título obrigatório','error');return;}
   toast('A criar produto...','info');
   try{
-    const data=await shopifyGQL(`mutation($input:ProductInput!){productCreate(input:$input){product{id variants(first:1){edges{node{inventoryItem{id}}}}}userErrors{message}}}`,{input:{title,vendor,status:'DRAFT',variants:[{price:String(price),barcode:barcode||undefined}]}});
+    // Step 1: create product without variants (API 2026-01 removed variants from ProductInput)
+    const data=await shopifyGQL(`mutation($input:ProductInput!){productCreate(input:$input){product{id variants(first:1){edges{node{id inventoryItem{id}}}}}userErrors{message}}}`,{input:{title,vendor,status:'DRAFT'}});
     if(data.productCreate.userErrors.length){toast(data.productCreate.userErrors[0].message,'error');return;}
-    const invId=data.productCreate.product?.variants?.edges[0]?.node?.inventoryItem?.id;
+    const product=data.productCreate.product;
+    const variantId=product?.variants?.edges[0]?.node?.id;
+    const invId=product?.variants?.edges[0]?.node?.inventoryItem?.id;
+    // Step 2: update default variant with price and barcode
+    if(variantId){
+      const variantInput={id:variantId,price:String(price)};
+      if(barcode) variantInput.barcode=barcode;
+      const vData=await shopifyGQL(`mutation($productId:ID!,$variants:[ProductVariantsBulkInput!]!){productVariantsBulkUpdate(productId:$productId,variants:$variants){userErrors{message}}}`,{productId:product.id,variants:[variantInput]});
+      if(vData.productVariantsBulkUpdate.userErrors.length){toast(vData.productVariantsBulkUpdate.userErrors[0].message,'error');return;}
+    }
     if(invId&&sku) await updateVariantSKU(invId,sku);
     // Apply tags immediately
     const a=state.alerts.find(x=>x.id===alertId);
-    if(a?.suppId) await updateProductTags(data.productCreate.product.id, [`sup:${a.suppId}`, 'cat:atualizado', `last-seen:${YYYYMM()}`]);
+    if(a?.suppId) await updateProductTags(product.id, [`sup:${a.suppId}`, 'cat:atualizado', `last-seen:${YYYYMM()}`]);
     dismissAlert(alertId); closeModal();
     toast('Produto criado com tags de fornecedor ✓','success');
     fetchShopifyProducts();
