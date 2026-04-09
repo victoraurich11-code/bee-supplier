@@ -440,6 +440,7 @@ async function applyTagsToProduct(productId, existingTags, suppId, catTag, extra
 async function applyZeroStockTag(productId, existingTags) {
   const finalTags = buildTagUpdate(existingTags, ['cat:critico', 'bsm:zerado-auto', `last-seen:${YYYYMM()}`]);
   await updateProductTags(productId, finalTags);
+  return finalTags;
 }
 
 async function applyWatchTag(productId, existingTags, suppId, missedCount) {
@@ -447,6 +448,7 @@ async function applyWatchTag(productId, existingTags, suppId, missedCount) {
   const missed = `bsm:ausente-${missedCount}`;
   const finalTags = buildTagUpdate(existingTags, [`sup:${suppId}`, catTag, missed], existingTags.filter(t=>t.startsWith('bsm:ausente-')));
   await updateProductTags(productId, finalTags);
+  return finalTags;
 }
 
 // ═══════════════════════════════════════════
@@ -587,13 +589,15 @@ async function applyHealthTagsOnly(suppId, productIds) {
     const threshold = supp?.zeroThreshold||4;
     const catTag = missed >= threshold ? 'cat:critico' : 'cat:em-vigilancia';
     try {
-      await applyWatchTag(p.id, p.tags||[], suppId, missed);
+      const newTags = await applyWatchTag(p.id, p.tags||[], suppId, missed);
+      p.tags = newTags; // atualiza cache local para saúde do catálogo refletir imediatamente
       done++;
     } catch(e) { console.warn('tag error', e); }
     await sleep(200);
   }
   toast(`Tags de saúde atualizadas em ${done} produto(s)`, 'success');
   addHealthAlerts(suppId, productIds);
+  save();
   updateBadges();
 }
 
@@ -615,9 +619,12 @@ async function applyZeroAndTags(suppId) {
         await updateVariantStock(invId, locationId, 0);
       }
       const p = state.shopifyProducts.find(x=>x.id===productId);
-      await applyZeroStockTag(productId, p?.tags||[]);
+      const newTags = await applyZeroStockTag(productId, p?.tags||[]);
       // Update local cache
-      if (p) p.variants.forEach(v => { if(v.id===variantId) v.stock=0; });
+      if (p) {
+        p.variants.forEach(v => { if(v.id===variantId) v.stock=0; });
+        p.tags = newTags; // atualiza tags locais para cat:critico aparecer na saúde do catálogo
+      }
       zeroed++;
       toast(`Stock zerado: ${title.substring(0,40)}`, 'info');
     } catch(e) { errors++; toast(`Erro: ${title.substring(0,30)} — ${e.message}`, 'error'); }
@@ -2524,7 +2531,7 @@ function importData(file) {
 
 function clearData() {
   if(!confirm('Apagar todos os dados locais?')) return;
-  ['suppliers','alerts','uploadHistory','skuHealth','matches','shopifyProducts'].forEach(k=>{DB.set(k,k==='skuHealth'?{}:[]); state[k]=k==='skuHealth'?{}:[];});
+  ['suppliers','alerts','uploadHistory','skuHealth','matches','shopifyProducts','costHistory','costAlerts'].forEach(k=>{const empty=k==='skuHealth'||k==='costHistory'?{}:[]; DB.set(k,empty); state[k]=empty;});
   render(); toast('Dados apagados','info');
 }
 
