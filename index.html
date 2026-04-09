@@ -301,7 +301,17 @@ let state = {
 };
 
 function save() {
-  ['suppliers','alerts','uploadHistory','skuHealth','matches','shopifyProducts','settings','costHistory','costAlerts'].forEach(k => DB.set(k, state[k]));
+  // Dados críticos guardados primeiro — nunca devem ser perdidos
+  ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts'].forEach(k => DB.set(k, state[k]));
+  // Cache Shopify: pode ser grande (>5MB) e causar quota exceeded.
+  // Guardado por último e de forma isolada para não bloquear os dados críticos acima.
+  try {
+    localStorage.setItem('bsm3_shopifyProducts', JSON.stringify(state.shopifyProducts));
+  } catch(e) {
+    // Quota excedida: limpa o cache para libertar espaço; o utilizador só precisa de re-sincronizar
+    localStorage.removeItem('bsm3_shopifyProducts');
+    console.warn('Cache Shopify removido (localStorage cheio). Re-sincroniza os produtos.', e.message);
+  }
 }
 
 // ═══════════════════════════════════════════
