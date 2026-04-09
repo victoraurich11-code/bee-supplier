@@ -1289,25 +1289,70 @@ function suppliers() {
   document.getElementById('topbar-actions').innerHTML=`<button class="btn btn-primary" onclick="openSupplierModal()">+ Novo Fornecedor</button>`;
   const pendingCostAlerts = {};
   state.costAlerts.filter(a=>!a.dismissed).forEach(a=>{ pendingCostAlerts[a.suppId]=(pendingCostAlerts[a.suppId]||0)+1; });
+
+  const cards = state.suppliers.length === 0
+    ? `<div class="card" style="padding:40px;text-align:center;color:var(--text3);grid-column:1/-1">
+        <div style="font-size:48px;margin-bottom:12px">🏭</div>
+        <p style="font-size:15px;font-weight:600;color:var(--text2)">Nenhum fornecedor criado ainda</p>
+        <p style="font-size:13px;margin-top:6px">Clica em "+ Novo Fornecedor" para começar.</p>
+      </div>`
+    : state.suppliers.map(s => {
+        const daysSince = s.lastUpload ? Math.floor((Date.now()-new Date(s.lastUpload))/86400000) : null;
+        const uploadAge = daysSince===null?'Nunca':daysSince===0?'Hoje':daysSince===1?'Ontem':`${daysSince}d atrás`;
+        const ageColor = daysSince===null||daysSince>14?'var(--red)':daysSince>7?'var(--orange)':'var(--text3)';
+        const colsDone = [s.colName,s.colSku,s.colBarcode,s.colStock,s.colPrice].filter(Boolean).length;
+        const costAlertCount = pendingCostAlerts[s.id]||0;
+        const accentColor = s.active ? (s.pricingMode==='manual'?'var(--purple)':'var(--blue)') : 'var(--border2)';
+        return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;box-shadow:var(--shadow);display:flex;flex-direction:column">
+          <div style="height:4px;background:${accentColor}"></div>
+          <div style="padding:18px 20px;flex:1">
+            <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:14px">
+              <div style="flex:1;min-width:0">
+                <div style="font-family:'Syne',sans-serif;font-size:16px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${s.name}</div>
+                <div style="margin-top:5px;display:flex;gap:6px;flex-wrap:wrap">
+                  <span class="badge ${s.active?'badge-green':'badge-gray'}" style="font-size:10px">${s.active?'Ativo':'Inativo'}</span>
+                  <span class="badge ${s.pricingMode==='manual'?'badge-purple':'badge-gray'}" style="font-size:10px">${s.pricingMode==='manual'?'Preço Manual':'Preço Auto'}</span>
+                  ${costAlertCount>0?`<span class="badge badge-orange" style="font-size:10px">⚠ ${costAlertCount} alerta(s) custo</span>`:''}
+                </div>
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 16px;font-size:12px">
+              <div>
+                <div style="color:var(--text3);font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Tag ID</div>
+                <span class="tag-pill tp-sup" style="font-size:10px">sup:${s.id}</span>
+              </div>
+              <div>
+                <div style="color:var(--text3);font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Tipo de Preço</div>
+                <span style="color:var(--text2)">${s.priceType==='pvp'?'PVP Sugerido':'Custo + '+s.margin+'% margem'}</span>
+              </div>
+              <div>
+                <div style="color:var(--text3);font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Arredondamento</div>
+                <span style="color:var(--text2)">${roundingLabel(s.rounding)}</span>
+              </div>
+              <div>
+                <div style="color:var(--text3);font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Zero após</div>
+                <span style="color:var(--text2)">${s.zeroThreshold||4} uploads sem aparecer</span>
+              </div>
+              <div>
+                <div style="color:var(--text3);font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Colunas</div>
+                <span style="color:${colsDone<3?'var(--orange)':'var(--text2)'}">${colsDone}/5 mapeadas</span>
+              </div>
+              <div>
+                <div style="color:var(--text3);font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Último Upload</div>
+                <span style="color:${ageColor}">${uploadAge}</span>
+              </div>
+            </div>
+          </div>
+          <div style="padding:12px 20px;border-top:1px solid var(--border);display:flex;gap:8px;background:var(--panel)">
+            <button class="btn btn-ghost btn-sm" style="flex:1" onclick="openSupplierModal('${s.id}')">✏ Editar</button>
+            <button class="btn btn-danger btn-sm" onclick="deleteSupplier('${s.id}')">✕</button>
+          </div>
+        </div>`;
+      }).join('');
+
   document.getElementById('content').innerHTML=`
-    <div class="table-wrap">
-      <div class="table-header"><span style="font-family:'Syne',sans-serif;font-weight:700">${state.suppliers.length} fornecedor(es)</span></div>
-      <table><thead><tr><th>Nome</th><th>Tag ID</th><th>Modo Preço</th><th>Tipo Preço</th><th>Margem</th><th>Arredondamento</th><th>Threshold zero</th><th>Colunas</th><th>Último Upload</th><th>Estado</th><th></th></tr></thead><tbody>
-      ${state.suppliers.length===0?`<tr><td colspan="11"><div class="empty-state"><div class="empty-icon">🏭</div><p>Nenhum fornecedor criado ainda.<br>Clica em "+ Novo Fornecedor" para começar.</p></div></td></tr>`:
-        state.suppliers.map(s=>`<tr>
-          <td><div style="font-weight:600">${s.name}</div>${pendingCostAlerts[s.id]?`<div style="font-size:11px;color:var(--orange);margin-top:2px">⚠ ${pendingCostAlerts[s.id]} alerta(s) de custo</div>`:''}</td>
-          <td><span class="tag-pill tp-sup">sup:${s.id}</span></td>
-          <td><span class="badge ${s.pricingMode==='manual'?'badge-purple':'badge-gray'}" style="font-size:10px">${s.pricingMode==='manual'?'Manual':'Auto'}</span></td>
-          <td><span class="badge ${s.priceType==='pvp'?'badge-blue':'badge-yellow'}">${s.priceType==='pvp'?'PVP':'Custo+Marg.'}</span></td>
-          <td class="mono">${s.priceType==='pvp'?'—':'+'+s.margin+'%'}</td>
-          <td><span class="badge badge-gray" style="font-size:10px">${roundingLabel(s.rounding)}</span></td>
-          <td class="mono">${s.zeroThreshold||4} uploads</td>
-          <td style="font-size:11px;color:var(--text2)">${[s.colName,s.colSku,s.colBarcode,s.colStock,s.colPrice].filter(Boolean).length}/5</td>
-          <td class="mono" style="color:var(--text2)">${s.lastUpload?new Date(s.lastUpload).toLocaleDateString('pt-PT'):'—'}</td>
-          <td><span class="badge ${s.active?'badge-green':'badge-gray'}">${s.active?'Ativo':'Inativo'}</span></td>
-          <td><div style="display:flex;gap:6px"><button class="btn btn-ghost btn-sm" onclick="openSupplierModal('${s.id}')">✏ Editar</button><button class="btn btn-danger btn-sm" onclick="deleteSupplier('${s.id}')">✕</button></div></td>
-        </tr>`).join('')}
-      </tbody></table>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;margin-bottom:24px">
+      ${cards}
     </div>
     ${renderCostAlertsPanel()}`;
 }
