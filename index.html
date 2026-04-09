@@ -1265,11 +1265,11 @@ function renderCostAlertsPanel(suppId=null) {
             <td style="font-size:16px;width:28px;text-align:center">${a.direcao==='subiu'?'🔴':'🟢'}</td>
             <td style="font-weight:600;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${a.produto}</td>
             <td class="mono" style="font-size:11px">${a.sku||'—'}</td>
-            <td class="mono">€${a.custoAnterior.toFixed(2)}</td>
-            <td class="mono" style="font-weight:600;color:${a.direcao==='subiu'?'var(--red)':'var(--green)'}">€${a.custoNovo.toFixed(2)}</td>
+            <td class="mono">€${(+a.custoAnterior||0).toFixed(2)}</td>
+            <td class="mono" style="font-weight:600;color:${a.direcao==='subiu'?'var(--red)':'var(--green)'}">€${(+a.custoNovo||0).toFixed(2)}</td>
             <td class="mono" style="color:${a.direcao==='subiu'?'var(--red)':'var(--green)'}">
-              ${a.direcao==='subiu'?'+':''}€${a.variacaoEuros.toFixed(2)}
-              <span style="font-size:10px;margin-left:3px">(${a.direcao==='subiu'?'+':''}${a.variacaoPercentagem.toFixed(2)}%)</span>
+              ${a.direcao==='subiu'?'+':''}€${(+a.variacaoEuros||0).toFixed(2)}
+              <span style="font-size:10px;margin-left:3px">(${a.direcao==='subiu'?'+':''}${(+a.variacaoPercentagem||0).toFixed(2)}%)</span>
             </td>
             <td><button class="btn btn-ghost btn-sm" onclick="dismissCostAlert('${a.id}')">✓ Tratado</button></td>
           </tr>`).join('')}
