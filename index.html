@@ -251,6 +251,7 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--blue); cur
       <div class="nav-item" onclick="navigate('upload')" id="nav-upload"><span class="icon">⬆</span> Processar Ficheiro</div>
       <div class="nav-item" onclick="navigate('health')" id="nav-health"><span class="icon">🩺</span> Saúde do Catálogo <span class="nav-badge yellow" id="health-badge" style="display:none">0</span></div>
       <div class="nav-item" onclick="navigate('alerts')" id="nav-alerts"><span class="icon">🔔</span> Alertas <span class="nav-badge" id="alert-badge" style="display:none">0</span></div>
+      <div class="nav-item" onclick="navigate('mercado')" id="nav-mercado"><span class="icon">📊</span> Mercado <span class="nav-badge yellow" id="badge-mercado" style="display:none">!</span></div>
       <div class="nav-item" onclick="navigate('matching')" id="nav-matching"><span class="icon">🔗</span> Matching</div>
       <div class="nav-item" onclick="navigate('create')" id="nav-create"><span class="icon">✚</span> Criar Produtos</div>
       <div class="nav-item" onclick="navigate('settings')" id="nav-settings"><span class="icon">⚙</span> Configurações</div>
@@ -307,12 +308,13 @@ let state = {
   settings: { ...DEFAULT_SETTINGS, ...DB.get('settings', {}) },
   costHistory: DB.get('costHistory', {}),  // { [suppId::sku]: { custo, data } }
   costAlerts: DB.get('costAlerts', []),     // alertas de variação de custo (modo manual)
+  kkCache: DB.get('kkCache', {}),           // { [productId]: { preco_min, lojas, matchedBy, query, ts } }
   parsedRows: [], uploadSuppId: null, colMap: {}, analysisResult: null,
 };
 
 function save() {
   // Dados críticos guardados primeiro — nunca devem ser perdidos
-  ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts'].forEach(k => DB.set(k, state[k]));
+  ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','kkCache'].forEach(k => DB.set(k, state[k]));
   // Cache Shopify: pode ser grande (>5MB) e causar quota exceeded.
   // Guardado por último e de forma isolada para não bloquear os dados críticos acima.
   try {
@@ -466,6 +468,8 @@ function applyPriceRounding(price, mode) {
 // SHOPIFY API
 // ═══════════════════════════════════════════
 const PROXY = 'https://shopify-proxy.victoraurich11.workers.dev';
+const KK_PROXY = 'https://zbsuyzeeuychzzcmgsyl.supabase.co/functions/v1/kk-search';
+const KK_BUILD_ID_KEY = 'kk_build_id';
 
 async function shopifyGQL(query, variables={}) {
   const { shop, token, apiVersion } = state.settings;
@@ -859,13 +863,13 @@ function navigate(page) {
   state.page = page;
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   document.getElementById('nav-'+page)?.classList.add('active');
-  const titles = { dashboard:'Dashboard', suppliers:'Fornecedores', upload:'Processar Ficheiro', health:'Saúde do Catálogo', alerts:'Alertas', matching:'Matching Inteligente', create:'Criar Produtos', settings:'Configurações' };
+  const titles = { dashboard:'Dashboard', suppliers:'Fornecedores', upload:'Processar Ficheiro', health:'Saúde do Catálogo', alerts:'Alertas', mercado:'Mercado (KuantoKusta)', matching:'Matching Inteligente', create:'Criar Produtos', settings:'Configurações' };
   document.getElementById('page-title').textContent = titles[page]||page;
   render();
 }
 
 function render() {
-  ({ dashboard, suppliers, upload, health, alerts, matching, create, settings })[state.page]?.();
+  ({ dashboard, suppliers, upload, health, alerts, mercado, matching, create, settings })[state.page]?.();
   updateBadges();
 }
 
@@ -2731,6 +2735,23 @@ function settings() {
           </div>
         </div>
       </div>
+      <div style="margin-bottom:24px">
+        <div class="settings-label">Mercado KuantoKusta</div>
+        <div class="card">
+          <p style="color:var(--text2);font-size:13px;margin-bottom:12px">
+            A consulta automática de preços requer uma API key gratuita da <strong>ScraperAPI</strong>
+            (5 000 pedidos/mês grátis) para contornar a proteção anti-bot do KuantoKusta.
+          </p>
+          <div class="form-group">
+            <label>ScraperAPI Key <a href="https://www.scraperapi.com/" target="_blank" style="font-size:11px;color:var(--blue);margin-left:6px">→ Obter grátis</a></label>
+            <input type="password" id="cfg-scraper-key" value="${state.settings.scraperApiKey||''}" placeholder="Deixar vazio para usar sem API key (pode falhar)">
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="saveScraperKey()">Guardar</button>
+          <p style="font-size:12px;color:var(--text2);margin-top:10px">
+            Sem API key: o Mercado fica em modo manual — usa os links "Ver no KK" por produto.
+          </p>
+        </div>
+      </div>
       <div>
         <div class="settings-label">Proxy Cloudflare</div>
         <div class="card">
@@ -2747,6 +2768,10 @@ function saveSettings() {
 function saveSettingsCloud() {
   state.settings = { ...state.settings, supabaseUrl:document.getElementById('cfg-supa-url')?.value.trim(), supabaseKey:document.getElementById('cfg-supa-key')?.value.trim() };
   save(); toast('Configuração cloud guardada','success');
+}
+function saveScraperKey() {
+  state.settings = { ...state.settings, scraperApiKey: document.getElementById('cfg-scraper-key')?.value.trim() };
+  save(); toast('API Key guardada','success');
 }
 async function testConn() { saveSettings(); document.getElementById('conn-result').textContent='A testar...'; const r=await testConnection(); document.getElementById('conn-result').innerHTML=r.ok?`<span style="color:var(--green)">✓ Ligado a: ${r.name}</span>`:`<span style="color:var(--red)">✕ ${r.error}</span>`; }
 
@@ -2780,6 +2805,280 @@ function toast(msg,type='info'){
 }
 function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 function timeAgo(d){ const m=Math.floor((Date.now()-new Date(d))/60000); const h=Math.floor(m/60); const dy=Math.floor(h/24); return dy>0?dy+'d':h>0?h+'h':m>0?m+'min':'agora'; }
+
+// ═══════════════════════════════════════════
+// KK MARKET — KuantoKusta price monitoring
+// ═══════════════════════════════════════════
+
+function kkGetBrowserCookies() {
+  // Read non-HttpOnly cookies from KuantoKusta if we happen to have them
+  // (only works if user visited KK recently in same browser)
+  try {
+    const cookieMap = Object.fromEntries(
+      document.cookie.split(';').map(c => { const [k,...v]=c.trim().split('='); return [k,v.join('=')]; })
+    );
+    return { datadome: cookieMap['datadome'] || null };
+  } catch { return {}; }
+}
+
+async function kkSearch(query) {
+  const cookies = kkGetBrowserCookies();
+  const buildId = localStorage.getItem(KK_BUILD_ID_KEY) || undefined;
+  const scraperApiKey = state.settings?.scraperApiKey?.trim() || undefined;
+
+  const body = { name: query };
+  if (cookies.datadome) body.datadome = cookies.datadome;
+  if (buildId) body.buildId = buildId;
+  if (scraperApiKey) body.scraperApiKey = scraperApiKey;
+
+  const resp = await fetch(KK_PROXY, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (!resp.ok) throw new Error(`KK proxy error ${resp.status}`);
+  const result = await resp.json();
+  // Cache buildId from live KK tab if available
+  if (result.buildId) localStorage.setItem(KK_BUILD_ID_KEY, result.buildId);
+  return result;
+}
+
+async function kkLookupProduct(product) {
+  const cacheKey = product.id;
+  const cached = state.kkCache[cacheKey];
+  if (cached && (Date.now() - cached.ts) < 86400000) return cached;
+
+  const barcode = product.variants?.[0]?.barcode?.trim();
+  const name = product.title?.trim();
+  let result = null;
+
+  if (barcode && /^[0-9]{8,14}$/.test(barcode)) {
+    try {
+      const data = await kkSearch(barcode);
+      if (data?.needsApiKey) {
+        const entry = { preco_min: null, lojas: [], matchedBy: null, query: barcode, needsApiKey: true, ts: Date.now() };
+        state.kkCache[cacheKey] = entry;
+        save();
+        return entry;
+      }
+      const produtos = data?.data || data?.data?.produtos || [];
+      if (produtos.length > 0) result = parseKKResult(produtos[0], "EAN", barcode);
+    } catch(e) { console.warn("KK EAN lookup failed", e); }
+  }
+
+  if (!result && name) {
+    const shortName = name.split(" ").slice(0, 4).join(" ");
+    try {
+      const data = await kkSearch(shortName);
+      // Support both old mobile API format and new _next/data format
+      const produtos = data?.data || data?.data?.produtos || [];
+      if (data?.needsApiKey) {
+        // Proxy blocked — return a stub so UI can show the KK link
+        const entry = { preco_min: null, lojas: [], matchedBy: null, query: shortName, needsApiKey: true, ts: Date.now() };
+        state.kkCache[cacheKey] = entry;
+        save();
+        return entry;
+      }
+      const best = bestMatch(produtos, name);
+      if (best && best.score >= 65) result = parseKKResult(best.produto, "Nome", shortName);
+    } catch(e) { console.warn("KK name lookup failed", e); }
+  }
+
+  const entry = result || { preco_min: null, lojas: [], matchedBy: null, query: name, ts: Date.now() };
+  state.kkCache[cacheKey] = entry;
+  save();
+  return entry;
+}
+
+function parseKKResult(produto, matchedBy, query) {
+  // Support both mobile API (preco_min, lojas) and _next/data format (priceMin, totalOffers, url)
+  const preco_min = parseFloat(produto.priceMin ?? produto.preco_min) || null;
+  const lojas = (produto.lojas || produto.precos || [])
+    .map(l => ({ nome: l.nome || l.loja || "—", preco: parseFloat(l.preco) || 0 }))
+    .filter(l => l.preco > 0)
+    .sort((a, b) => a.preco - b.preco)
+    .slice(0, 5);
+  const kkUrl = produto.url || null;
+  const totalOffers = produto.totalOffers || lojas.length || 0;
+  return { preco_min, lojas, matchedBy, query, kkNome: produto.name || produto.nome, kkUrl, totalOffers, ts: Date.now() };
+}
+
+function bestMatch(produtos, targetName) {
+  if (!produtos.length) return null;
+  const normalize = s => s.toLowerCase().replace(/[^a-z0-9]/g, " ").trim();
+  const target = normalize(targetName);
+  let best = null;
+  for (const p of produtos) {
+    const candidate = normalize(p.name || p.nome || "");
+    const score = jaccardSimilarity(target, candidate);
+    if (!best || score > best.score) best = { produto: p, score: Math.round(score * 100) };
+  }
+  return best;
+}
+
+function jaccardSimilarity(a, b) {
+  const setA = new Set(a.split(" ").filter(Boolean));
+  const setB = new Set(b.split(" ").filter(Boolean));
+  const intersection = [...setA].filter(x => setB.has(x)).length;
+  const union = new Set([...setA, ...setB]).size;
+  return union === 0 ? 0 : intersection / union;
+}
+
+function kkSemaforo(pvpAtual, precoMin) {
+  if (!precoMin || !pvpAtual) return { cor: "gray", label: "Sem dados", icon: "—" };
+  const diff = ((pvpAtual - precoMin) / precoMin) * 100;
+  if (diff > 5)  return { cor: "red",    label: `+${diff.toFixed(1)}% vs mkt`, icon: "🔴" };
+  if (diff > -5) return { cor: "orange", label: `~${diff.toFixed(1)}% vs mkt`, icon: "🟡" };
+  return               { cor: "green",  label: `${diff.toFixed(1)}% vs mkt`,  icon: "🟢" };
+}
+
+async function mercado() {
+  document.getElementById("topbar-actions").innerHTML = `
+    <button class="btn btn-ghost btn-sm" onclick="kkRefreshAll()">↻ Atualizar todos</button>
+    <button class="btn btn-danger btn-sm" onclick="kkClearCache()">🗑 Limpar cache</button>
+  `;
+  if (!state.shopifyProducts.length) {
+    document.getElementById("content").innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">📡</div>
+        <p>Carrega os produtos do Shopify primeiro.<br>
+        <button class="btn btn-primary" style="margin-top:14px"
+          onclick="fetchShopifyProducts().then(()=>navigate('mercado'))">
+          Sincronizar Shopify</button></p>
+      </div>`;
+    return;
+  }
+  renderMercadoTable();
+}
+
+function renderMercadoTable() {
+  const products = state.shopifyProducts.slice(0, 500);
+  const rows = products.map(p => {
+    const pvp = parseFloat(p.variants?.[0]?.price) || 0;
+    const cached = state.kkCache[p.id];
+    const sem = kkSemaforo(pvp, cached?.preco_min);
+    return { p, pvp, cached, sem };
+  });
+
+  const caros    = rows.filter(r => r.sem.cor === "red").length;
+  const ok       = rows.filter(r => r.sem.cor === "orange").length;
+  const baratos  = rows.filter(r => r.sem.cor === "green").length;
+  const semdados = rows.filter(r => r.sem.cor === "gray").length;
+  const comCache = rows.filter(r => r.cached?.preco_min).length;
+
+  document.getElementById("content").innerHTML = `
+    <div class="stats-grid" style="grid-template-columns:repeat(5,1fr);margin-bottom:20px">
+      <div class="stat-card" style="border-left:3px solid var(--red)"><div class="stat-num" style="color:var(--red)">${caros}</div><div class="stat-lbl">🔴 Caros vs mercado</div></div>
+      <div class="stat-card" style="border-left:3px solid #f59e0b"><div class="stat-num" style="color:#f59e0b">${ok}</div><div class="stat-lbl">🟡 Dentro do mercado</div></div>
+      <div class="stat-card" style="border-left:3px solid var(--green)"><div class="stat-num" style="color:var(--green)">${baratos}</div><div class="stat-lbl">🟢 Abaixo do mercado</div></div>
+      <div class="stat-card"><div class="stat-num">${semdados}</div><div class="stat-lbl">— Sem dados KK</div></div>
+      <div class="stat-card" style="border-left:3px solid var(--accent)"><div class="stat-num" style="color:var(--accent)">${comCache}/${products.length}</div><div class="stat-lbl">Em cache</div></div>
+    </div>
+    <div class="table-wrap">
+      <div class="table-header" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <div style="display:flex;gap:4px">
+          <button class="btn btn-ghost btn-sm" onclick="setMktFilter('all')">Todos</button>
+          <button class="btn btn-ghost btn-sm" onclick="setMktFilter('red')">🔴 Caros</button>
+          <button class="btn btn-ghost btn-sm" onclick="setMktFilter('orange')">🟡 OK</button>
+          <button class="btn btn-ghost btn-sm" onclick="setMktFilter('green')">🟢 Baratos</button>
+          <button class="btn btn-ghost btn-sm" onclick="setMktFilter('gray')">— Sem dados</button>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="kkLoadBatch()" id="btn-kk-load">
+          ▶ Carregar preços KK (${semdados} em falta)
+        </button>
+      </div>
+      <div id="mkt-table-body">${renderMktRows(rows, "all")}</div>
+    </div>
+  `;
+
+  window._mktRows = rows;
+  window.setMktFilter = (f) => {
+    document.getElementById("mkt-table-body").innerHTML = renderMktRows(window._mktRows, f);
+  };
+}
+
+function renderMktRows(rows, filter) {
+  let filtered = filter === "all" ? rows : rows.filter(r => r.sem.cor === filter);
+  if (!filtered.length) return `<div class="empty-state" style="padding:32px"><div class="empty-icon">✅</div><p>Sem produtos nesta categoria</p></div>`;
+  return `<div style="overflow-x:auto;max-height:520px;overflow-y:auto">
+    <table>
+      <thead><tr>
+        <th>Produto</th><th>SKU</th><th>PVP Atual</th>
+        <th>KK Mín</th><th>Diferença</th><th>Estado</th>
+        <th>Lojas (top 3)</th><th>Match</th><th></th>
+      </tr></thead>
+      <tbody>
+        ${filtered.map(({p, pvp, cached, sem}) => `
+        <tr>
+          <td style="font-weight:600;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.title}">${p.title}</td>
+          <td class="mono" style="font-size:11px;color:var(--text2)">${p.variants?.[0]?.sku || "—"}</td>
+          <td class="mono">€${pvp.toFixed(2)}</td>
+          <td class="mono" style="font-weight:600;color:${sem.cor==="red"?"var(--red)":sem.cor==="green"?"var(--green)":"var(--text)"}">
+            ${cached?.preco_min ? "€"+cached.preco_min.toFixed(2) : "—"}
+          </td>
+          <td class="mono" style="font-size:12px">${cached?.preco_min ? sem.label : "—"}</td>
+          <td style="font-size:18px;text-align:center">${sem.icon}</td>
+          <td style="font-size:11px;max-width:180px">
+            ${cached?.needsApiKey
+              ? `<a href="https://www.kuantokusta.pt/search?q=${encodeURIComponent(p.title.split(' ').slice(0,4).join(' '))}" target="_blank" style="color:var(--blue);font-size:11px">Ver no KK ↗</a>`
+              : (cached?.kkUrl
+                  ? `<a href="${cached.kkUrl}" target="_blank" style="color:var(--blue);font-size:11px">${cached?.totalOffers||0} loja(s) ↗</a>`
+                  : (cached?.lojas||[]).slice(0,3).map(l =>
+                      `<div style="display:flex;justify-content:space-between;gap:8px">
+                        <span style="color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${l.nome}</span>
+                        <span class="mono" style="flex-shrink:0">€${l.preco.toFixed(2)}</span>
+                      </div>`
+                    ).join("")
+                )
+            }
+          </td>
+          <td>${cached?.matchedBy ? `<span class="badge ${cached.matchedBy==="EAN"?"badge-green":"badge-orange"}" style="font-size:10px">${cached.matchedBy}</span>` : ""}</td>
+          <td><button class="btn btn-ghost btn-sm" onclick="kkRefreshOne('${p.id}')">↻</button></td>
+        </tr>`).join("")}
+      </tbody>
+    </table>
+  </div>`;
+}
+
+async function kkLoadBatch() {
+  const btn = document.getElementById("btn-kk-load");
+  if (btn) { btn.disabled = true; btn.textContent = "A carregar..."; }
+  const pendentes = state.shopifyProducts.filter(p => {
+    const c = state.kkCache[p.id];
+    return !c || !c.preco_min || (Date.now() - c.ts) > 86400000;
+  }).slice(0, 100);
+
+  let done = 0;
+  for (const p of pendentes) {
+    await kkLookupProduct(p);
+    done++;
+    if (btn) btn.textContent = `A carregar... ${done}/${pendentes.length}`;
+    await sleep(600);
+  }
+  toast(`${done} produtos consultados no KuantoKusta`, "success");
+  renderMercadoTable();
+}
+
+async function kkRefreshOne(productId) {
+  delete state.kkCache[productId];
+  const p = state.shopifyProducts.find(x => x.id === productId);
+  if (p) await kkLookupProduct(p);
+  renderMercadoTable();
+}
+
+function kkRefreshAll() {
+  state.kkCache = {};
+  save();
+  kkLoadBatch();
+}
+
+function kkClearCache() {
+  if (!confirm("Limpar cache KuantoKusta?")) return;
+  state.kkCache = {};
+  save();
+  renderMercadoTable();
+  toast("Cache KuantoKusta limpa", "info");
+}
 
 // ═══════════════════════════════════════════
 // INIT
