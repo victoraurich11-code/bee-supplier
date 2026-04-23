@@ -2952,8 +2952,8 @@ async function mercado() {
 }
 
 function renderMercadoTable() {
-  const products = state.shopifyProducts.slice(0, 500);
-  const rows = products.map(p => {
+  const allProducts = state.shopifyProducts;
+  const rows = allProducts.map(p => {
     const pvp = parseFloat(p.variants?.[0]?.price) || 0;
     const cached = state.kkCache[p.id];
     const sem = kkSemaforo(pvp, cached?.preco_min);
@@ -2963,16 +2963,24 @@ function renderMercadoTable() {
   const caros    = rows.filter(r => r.sem.cor === "red").length;
   const ok       = rows.filter(r => r.sem.cor === "orange").length;
   const baratos  = rows.filter(r => r.sem.cor === "green").length;
-  const semdados = rows.filter(r => r.sem.cor === "gray").length;
   const comCache = rows.filter(r => r.cached?.preco_min).length;
+
+  // Pendentes: sem cache válido (não conta needsApiKey como pendente real)
+  const totalPendentes = allProducts.filter(p => {
+    const c = state.kkCache[p.id];
+    return !c || (!c.preco_min && !c.needsApiKey) || (Date.now() - c.ts) > 86400000;
+  }).length;
+
+  const batchSize = window._kkBatchSize || 100;
+  const creditEstimate = Math.min(batchSize, totalPendentes);
 
   document.getElementById("content").innerHTML = `
     <div class="stats-grid" style="grid-template-columns:repeat(5,1fr);margin-bottom:20px">
       <div class="stat-card" style="border-left:3px solid var(--red)"><div class="stat-num" style="color:var(--red)">${caros}</div><div class="stat-lbl">🔴 Caros vs mercado</div></div>
       <div class="stat-card" style="border-left:3px solid #f59e0b"><div class="stat-num" style="color:#f59e0b">${ok}</div><div class="stat-lbl">🟡 Dentro do mercado</div></div>
       <div class="stat-card" style="border-left:3px solid var(--green)"><div class="stat-num" style="color:var(--green)">${baratos}</div><div class="stat-lbl">🟢 Abaixo do mercado</div></div>
-      <div class="stat-card"><div class="stat-num">${semdados}</div><div class="stat-lbl">— Sem dados KK</div></div>
-      <div class="stat-card" style="border-left:3px solid var(--accent)"><div class="stat-num" style="color:var(--accent)">${comCache}/${products.length}</div><div class="stat-lbl">Em cache</div></div>
+      <div class="stat-card" style="border-left:3px solid var(--blue)"><div class="stat-num" style="color:var(--blue)">${totalPendentes}</div><div class="stat-lbl">⏳ Sem preço KK</div></div>
+      <div class="stat-card" style="border-left:3px solid var(--accent)"><div class="stat-num" style="color:var(--accent)">${comCache}/${allProducts.length}</div><div class="stat-lbl">Em cache</div></div>
     </div>
     <div class="table-wrap">
       <div class="table-header" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -2983,9 +2991,21 @@ function renderMercadoTable() {
           <button class="btn btn-ghost btn-sm" onclick="setMktFilter('green')">🟢 Baratos</button>
           <button class="btn btn-ghost btn-sm" onclick="setMktFilter('gray')">— Sem dados</button>
         </div>
-        <button class="btn btn-primary btn-sm" onclick="kkLoadBatch()" id="btn-kk-load">
-          ▶ Carregar preços KK (${semdados} em falta)
-        </button>
+        <div style="display:flex;gap:6px;align-items:center;margin-left:auto">
+          ${totalPendentes > 0 ? `
+            <span style="font-size:12px;color:var(--text2)">
+              <strong style="color:var(--text)">${totalPendentes}</strong> produtos sem preço ·
+              <strong style="color:var(--blue)">${creditEstimate}</strong> créditos usados agora
+            </span>
+            <input type="number" id="kk-batch-input" value="${batchSize}" min="10" max="1000" step="10"
+              style="width:72px;padding:5px 8px;font-size:12px;text-align:center"
+              onchange="window._kkBatchSize=Math.max(10,Math.min(1000,+this.value||100));renderMercadoTable()"
+              title="Produtos a carregar neste batch">
+            <button class="btn btn-primary btn-sm" onclick="kkLoadBatch()" id="btn-kk-load">
+              ▶ Carregar ${Math.min(batchSize, totalPendentes)} de ${totalPendentes}
+            </button>
+          ` : `<span style="font-size:12px;color:var(--green)">✅ Todos os produtos têm preço KK</span>`}
+        </div>
       </div>
       <div id="mkt-table-body">${renderMktRows(rows, "all")}</div>
     </div>
@@ -3042,11 +3062,15 @@ function renderMktRows(rows, filter) {
 
 async function kkLoadBatch() {
   const btn = document.getElementById("btn-kk-load");
-  if (btn) { btn.disabled = true; btn.textContent = "A carregar..."; }
-  const pendentes = state.shopifyProducts.filter(p => {
+  if (btn) { btn.disabled = true; }
+
+  const batchSize = window._kkBatchSize || 100;
+  const todosList = state.shopifyProducts.filter(p => {
     const c = state.kkCache[p.id];
-    return !c || !c.preco_min || (Date.now() - c.ts) > 86400000;
-  }).slice(0, 100);
+    return !c || (!c.preco_min && !c.needsApiKey) || (Date.now() - c.ts) > 86400000;
+  });
+  const totalPendentes = todosList.length;
+  const pendentes = todosList.slice(0, batchSize);
 
   let done = 0;
   for (const p of pendentes) {
@@ -3055,7 +3079,13 @@ async function kkLoadBatch() {
     if (btn) btn.textContent = `A carregar... ${done}/${pendentes.length}`;
     await sleep(600);
   }
-  toast(`${done} produtos consultados no KuantoKusta`, "success");
+
+  const restantes = totalPendentes - done;
+  if (restantes > 0) {
+    toast(`${done} produtos carregados · ainda faltam ${restantes} — clica novamente para continuar`, "success");
+  } else {
+    toast(`✅ Todos os ${done} produtos consultados no KuantoKusta`, "success");
+  }
   renderMercadoTable();
 }
 
