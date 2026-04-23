@@ -2747,11 +2747,19 @@ function settings() {
             <input type="password" id="cfg-scraper-key" value="${state.settings.scraperApiKey||''}" placeholder="Deixar vazio para usar sem API key (pode falhar)">
           </div>
           <div class="form-group" style="margin-top:12px">
-            <label>Markup mínimo sobre KK <span style="font-weight:400;color:var(--text2)">(para sugestão de preço)</span></label>
+            <label>Markup mínimo sobre KK <span style="font-weight:400;color:var(--text2)">(competitividade)</span></label>
             <div style="display:flex;align-items:center;gap:8px">
               <input type="number" id="cfg-kk-markup" value="${state.settings.kkMarkup??8}" min="0" max="200" step="0.5" style="width:90px">
-              <span style="color:var(--text2);font-size:13px">% · ex: KK mín €100 → sugerido €${(100*(1+(+(state.settings.kkMarkup??8))/100)).toFixed(2)}</span>
+              <span style="color:var(--text2);font-size:13px">% · ex: KK mín €100 → €${(100*(1+(+(state.settings.kkMarkup??8))/100)).toFixed(2)}</span>
             </div>
+          </div>
+          <div class="form-group" style="margin-top:12px">
+            <label>Margem mínima sobre custo 🛡️ <span style="font-weight:400;color:var(--text2)">(proteção — nunca sugere abaixo disto)</span></label>
+            <div style="display:flex;align-items:center;gap:8px">
+              <input type="number" id="cfg-kk-margem" value="${state.settings.kkMargemMin??20}" min="0" max="500" step="0.5" style="width:90px">
+              <span style="color:var(--text2);font-size:13px">% · ex: custo €50 → floor €${(50*(1+(+(state.settings.kkMargemMin??20))/100)).toFixed(2)}</span>
+            </div>
+            <p style="font-size:11px;color:var(--text3);margin-top:6px">Se o produto não tiver custo registado (nunca processado por upload), esta proteção não se aplica.</p>
           </div>
           <button class="btn btn-primary btn-sm" onclick="saveScraperKey()">Guardar</button>
           <p style="font-size:12px;color:var(--text2);margin-top:10px">
@@ -2777,11 +2785,13 @@ function saveSettingsCloud() {
   save(); toast('Configuração cloud guardada','success');
 }
 function saveScraperKey() {
-  const markup = parseFloat(document.getElementById('cfg-kk-markup')?.value ?? 8);
+  const markup    = parseFloat(document.getElementById('cfg-kk-markup')?.value ?? 8);
+  const margemMin = parseFloat(document.getElementById('cfg-kk-margem')?.value ?? 20);
   state.settings = {
     ...state.settings,
     scraperApiKey: document.getElementById('cfg-scraper-key')?.value.trim(),
-    kkMarkup: isNaN(markup) ? 8 : Math.max(0, Math.min(200, markup)),
+    kkMarkup:    isNaN(markup)    ? 8  : Math.max(0, Math.min(200, markup)),
+    kkMargemMin: isNaN(margemMin) ? 20 : Math.max(0, Math.min(500, margemMin)),
   };
   save(); toast('Configurações KuantoKusta guardadas','success');
 }
@@ -3029,10 +3039,25 @@ function renderMercadoTable() {
   };
 }
 
+function kkGetCusto(product) {
+  const sku = product.variants?.[0]?.sku?.toLowerCase()?.trim();
+  const barcode = product.variants?.[0]?.barcode?.trim();
+  let custoMin = null;
+  for (const [key, val] of Object.entries(state.costHistory || {})) {
+    const match = (sku && key.endsWith(`::${sku}`)) ||
+                  (barcode && key.endsWith(`::bc::${barcode}`));
+    if (match && val?.custo > 0) {
+      if (custoMin === null || val.custo < custoMin) custoMin = val.custo;
+    }
+  }
+  return custoMin; // null se não encontrado
+}
+
 function renderMktRows(rows, filter) {
   let filtered = filter === "all" ? rows : rows.filter(r => r.sem.cor === filter);
   if (!filtered.length) return `<div class="empty-state" style="padding:32px"><div class="empty-icon">✅</div><p>Sem produtos nesta categoria</p></div>`;
-  const markup = parseFloat(state.settings?.kkMarkup ?? 8);
+  const markup     = parseFloat(state.settings?.kkMarkup    ?? 8);
+  const margemMin  = parseFloat(state.settings?.kkMargemMin ?? 20);
   return `<div style="overflow-x:auto;max-height:520px;overflow-y:auto">
     <table>
       <thead><tr>
@@ -3043,7 +3068,14 @@ function renderMktRows(rows, filter) {
       <tbody>
         ${filtered.map(({p, pvp, cached, sem}) => {
           const variantId = p.variants?.[0]?.id;
-          const sugerido = cached?.preco_min ? +(cached.preco_min * (1 + markup / 100)).toFixed(2) : null;
+          const custo = kkGetCusto(p);
+          let sugerido = null, sugeridoFloor = null;
+          if (cached?.preco_min) {
+            const porKK    = +(cached.preco_min * (1 + markup / 100)).toFixed(2);
+            const porCusto = custo ? +(custo * (1 + margemMin / 100)).toFixed(2) : null;
+            sugerido      = porCusto ? Math.max(porKK, porCusto) : porKK;
+            sugeridoFloor = porCusto && porCusto >= porKK ? "custo" : "kk";
+          }
           const pvpCellId = `pvp-cell-${p.id}`;
           return `
         <tr id="mkt-row-${p.id}">
@@ -3073,7 +3105,7 @@ function renderMktRows(rows, filter) {
           </td>
           <td>${cached?.matchedBy ? `<span class="badge ${cached.matchedBy==="EAN"?"badge-green":"badge-orange"}" style="font-size:10px">${cached.matchedBy}</span>` : ""}</td>
           <td style="white-space:nowrap">
-            ${sugerido ? `<button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--blue)" onclick="kkEditPvp('${p.id}','${variantId}',${pvp},${sugerido})" title="Sugerir €${sugerido} (KK mín +${markup}%)">💡 €${sugerido}</button>` : ""}
+            ${sugerido ? `<button class="btn btn-ghost btn-sm" style="font-size:10px;color:${sugeridoFloor==='custo'?'var(--orange)':'var(--blue)'}" onclick="kkEditPvp('${p.id}','${variantId}',${pvp},${sugerido})" title="${sugeridoFloor==='custo'?`Protegido pela margem mínima (custo +${margemMin}%)`:`KK mín +${markup}%`}">💡 €${sugerido}${sugeridoFloor==='custo'?' 🛡️':''}</button>` : ""}
             <button class="btn btn-ghost btn-sm" onclick="kkRefreshOne('${p.id}')">↻</button>
           </td>
         </tr>`;
