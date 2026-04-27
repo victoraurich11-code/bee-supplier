@@ -309,12 +309,18 @@ let state = {
   costHistory: DB.get('costHistory', {}),  // { [suppId::sku]: { custo, data } }
   costAlerts: DB.get('costAlerts', []),     // alertas de variação de custo (modo manual)
   kkCache: DB.get('kkCache', {}),           // { [productId]: { preco_min, lojas, matchedBy, query, ts } }
+  // ── Identidade canónica de produtos (F1) ──
+  // canonicalId = "pc_<variantNumId>" durante a migração, pode ser arbitrário em criações futuras.
+  // Um produto canónico = 1 variante Shopify. Múltiplos aliases (sku/barcode/fornecedor) apontam-lhe.
+  productCanonicals: DB.get('productCanonicals', {}), // { [canonicalId]: { id, shopifyProductId, shopifyVariantId, shopifyInventoryItemId, primarySku, primaryBarcode, title, brand } }
+  productAliases: DB.get('productAliases', []),       // [{ id, canonicalId, suppId, sku, barcode, source, confidence, addedAt, addedBy }]
+  negativeMatches: DB.get('negativeMatches', []),     // [{ canonicalId, suppId, sku, barcode, rejectedAt }]
   parsedRows: [], uploadSuppId: null, colMap: {}, analysisResult: null,
 };
 
 function save() {
   // Dados críticos guardados primeiro — nunca devem ser perdidos
-  ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','kkCache'].forEach(k => DB.set(k, state[k]));
+  ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','kkCache','productCanonicals','productAliases','negativeMatches'].forEach(k => DB.set(k, state[k]));
   // Cache Shopify: pode ser grande (>5MB) e causar quota exceeded.
   // Guardado por último e de forma isolada para não bloquear os dados críticos acima.
   try {
@@ -355,7 +361,7 @@ async function saveToCloud() {
   if (_cloudSyncing) return;
   _cloudSyncing = true;
   try {
-    const keys = ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','shopifyProducts'];
+    const keys = ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','shopifyProducts','productCanonicals','productAliases','negativeMatches'];
     await Promise.allSettled(keys.map(k => cloudUpsert(k, state[k])));
     updateCloudStatus(true);
   } catch(e) {
@@ -378,8 +384,8 @@ async function loadFromCloud() {
     if (!rows.length) return false;
     const map = Object.fromEntries(rows.map(r => [r.key, r.value]));
     // Aplicar com validação de tipo — garante que arrays são arrays e objetos são objetos
-    const arrayKeys = ['suppliers','alerts','uploadHistory','matches','costAlerts','shopifyProducts'];
-    const objectKeys = ['skuHealth','costHistory'];
+    const arrayKeys = ['suppliers','alerts','uploadHistory','matches','costAlerts','shopifyProducts','productAliases','negativeMatches'];
+    const objectKeys = ['skuHealth','costHistory','productCanonicals'];
     arrayKeys.forEach(k => { if (Array.isArray(map[k])) state[k] = map[k]; });
     objectKeys.forEach(k => { if (map[k] && typeof map[k]==='object' && !Array.isArray(map[k])) state[k] = map[k]; });
     // Restaura settings da cloud mas preserva as credenciais locais (supabase + shopify token)
@@ -388,7 +394,7 @@ async function loadFromCloud() {
       state.settings = { ...DEFAULT_SETTINGS, ...map.settings, ...keep };
     }
     // Persiste no localStorage para offline
-    ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts'].forEach(k => DB.set(k, state[k]));
+    ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','productCanonicals','productAliases','negativeMatches'].forEach(k => DB.set(k, state[k]));
     try { localStorage.setItem('bsm3_shopifyProducts', JSON.stringify(state.shopifyProducts)); } catch {}
     updateCloudStatus(true);
     return true;
@@ -482,7 +488,24 @@ async function shopifyGQL(query, variables={}) {
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   const json = await resp.json();
   if (json.errors) throw new Error(json.errors[0].message);
+  // Mutations Shopify devolvem userErrors dentro do payload mesmo com HTTP 200.
+  // Varremos recursivamente e falhamos ruidosamente para evitar updates "fantasma".
+  const ue = findUserErrors(json.data);
+  if (ue) throw new Error(`Shopify: ${ue}`);
   return json.data;
+}
+
+function findUserErrors(node) {
+  if (!node || typeof node !== 'object') return null;
+  if (Array.isArray(node.userErrors) && node.userErrors.length) {
+    const e = node.userErrors[0];
+    return e.message || JSON.stringify(e);
+  }
+  for (const k of Object.keys(node)) {
+    const r = findUserErrors(node[k]);
+    if (r) return r;
+  }
+  return null;
 }
 
 async function testConnection() {
@@ -532,8 +555,18 @@ async function updateVariantStock(inventoryItemId, locationId, newQty) {
     headers: { 'Content-Type':'application/json', 'X-Shopify-Shop':shop, 'X-Shopify-Token':token, 'X-Shopify-Version':apiVersion, 'X-Rest-Path':`/admin/api/${apiVersion}/inventory_levels/set.json` },
     body: JSON.stringify({ location_id:parseInt(locationNumId), inventory_item_id:parseInt(invItemNumId), available:newQty })
   });
-  if(!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return await resp.json();
+  if(!resp.ok) {
+    let detail = '';
+    try { detail = JSON.stringify(await resp.json()); } catch {}
+    throw new Error(`HTTP ${resp.status}${detail?' — '+detail.slice(0,200):''}`);
+  }
+  const json = await resp.json();
+  if (json.errors) throw new Error(`Shopify: ${typeof json.errors==='string'?json.errors:JSON.stringify(json.errors)}`);
+  if (!json.inventory_level) throw new Error('Shopify: resposta sem inventory_level — stock pode não ter sido aplicado');
+  if (typeof json.inventory_level.available === 'number' && json.inventory_level.available !== newQty) {
+    throw new Error(`Shopify: stock confirmado é ${json.inventory_level.available}, esperado ${newQty}`);
+  }
+  return json;
 }
 
 async function updateVariantSKU(inventoryItemId, sku) {
@@ -626,9 +659,9 @@ async function runPostUploadHealthCheck(suppId, processedSkus) {
   const coveragePct = avgExpected > 0 ? Math.round((uploadSize / avgExpected) * 100) : 100;
 
   if (coveragePct < 70 && avgExpected > 50) {
-    toast(`⚠ Listagem ${supp.name} parece incompleta (${coveragePct}% da média histórica). Verificar antes de escalar alertas.`, 'warning');
-    // Still update skuHealth counters but don't show zero-stock modal
-    updateMissedCounters(missing, suppId, false);
+    // P0b: upload suspeitosamente pequeno — exigir decisão explícita do utilizador.
+    // Não escalamos automaticamente nem ignoramos: deixamos a escolha visível.
+    showPartialUploadModal({ suppId, suppName: supp.name, missing, coveragePct, avgExpected, uploadSize });
     return;
   }
 
@@ -639,7 +672,9 @@ async function runPostUploadHealthCheck(suppId, processedSkus) {
   const toAlert = missing.map(p => {
     const health = state.skuHealth[p.variants[0]?.sku?.toLowerCase()] || {};
     const missed = (health.missedUploads||0);
-    return { ...p, missed, v: p.variants[0] };
+    // F4: candidatos a substituição vindos das linhas isNew do mesmo upload.
+    const candidates = findReplacementCandidates(p, suppId);
+    return { ...p, missed, v: p.variants[0], candidates };
   });
 
   // Show confirmation modal
@@ -665,6 +700,66 @@ function updateMissedCounters(missingProducts, suppId, escalate) {
   save();
 }
 
+// P0b — Upload anormalmente pequeno: utilizador decide entre 3 caminhos.
+// Estado pendente é guardado em window porque o modal usa onclick inline.
+function showPartialUploadModal({ suppId, suppName, missing, coveragePct, avgExpected, uploadSize }) {
+  window._partialUploadCtx = { suppId, suppName, missing, coveragePct };
+  const sample = missing.slice(0, 8).map(p => `<li style="margin-bottom:3px">${(p.title||'').replace(/</g,'&lt;')} <span style="color:var(--text2);font-size:11px">— SKU ${p.variants?.[0]?.sku||'—'}</span></li>`).join('');
+  const moreCount = Math.max(0, missing.length - 8);
+  document.getElementById('modal-content').innerHTML = `
+    <div class="modal-title">⚠ Upload Incompleto Detetado: ${suppName}</div>
+    <div style="background:#FEF3C7;border:1px solid #FCD34D;border-radius:8px;padding:12px 14px;margin:12px 0;font-size:13px;line-height:1.5">
+      Este upload tem <strong>${uploadSize} linhas</strong>, mas a média dos últimos 5 uploads é <strong>${avgExpected}</strong>.<br>
+      Cobertura: <strong style="color:#B45309">${coveragePct}%</strong> · Produtos ausentes: <strong>${missing.length}</strong>.<br>
+      <span style="color:var(--text2)">Pode ser uma listagem parcial do fornecedor (recomendado: tratar como parcial) ou uma redução real do catálogo (continuar e escalar normalmente).</span>
+    </div>
+    <details style="margin-bottom:16px">
+      <summary style="cursor:pointer;font-size:12px;color:var(--text2);font-weight:600">Ver ${missing.length} produto(s) ausentes</summary>
+      <ul style="max-height:180px;overflow-y:auto;font-size:12px;margin:8px 0 0 18px;padding:0">
+        ${sample}${moreCount > 0 ? `<li style="color:var(--text2);font-style:italic">…e mais ${moreCount}</li>` : ''}
+      </ul>
+    </details>
+    <div class="modal-footer" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">
+      <button class="btn btn-ghost" onclick="cancelPartialUpload()">Cancelar (não fazer nada)</button>
+      <button class="btn btn-primary" onclick="treatAsPartial()">Tratar como upload parcial</button>
+      <button class="btn btn-danger" onclick="continueAnyway()">Continuar e escalar normalmente</button>
+    </div>
+    <div style="margin-top:10px;font-size:11px;color:var(--text2);text-align:right">
+      <em>Parcial</em>: contadores não avançam, nada é zerado · <em>Continuar</em>: escala como upload completo (pode levar a zerar produtos)
+    </div>`;
+  openModal();
+}
+
+window.cancelPartialUpload = function() {
+  window._partialUploadCtx = null;
+  closeModal();
+  toast('Upload mantido. Nenhuma ação aplicada à saúde do catálogo.', 'info');
+};
+
+window.treatAsPartial = function() {
+  const ctx = window._partialUploadCtx; if (!ctx) return;
+  closeModal();
+  // Mantém comportamento conservador anterior: não escala contadores nem propõe zero.
+  toast(`Upload tratado como parcial — ${ctx.missing.length} produto(s) preservados sem alterações`, 'success');
+  window._partialUploadCtx = null;
+};
+
+window.continueAnyway = function() {
+  const ctx = window._partialUploadCtx; if (!ctx) return;
+  const { suppId, suppName, missing, coveragePct } = ctx;
+  closeModal();
+  window._partialUploadCtx = null;
+  // Repete o caminho normal: incrementa contadores e abre modal de zero.
+  updateMissedCounters(missing, suppId, true);
+  const toAlert = missing.map(p => {
+    const health = state.skuHealth[p.variants[0]?.sku?.toLowerCase()] || {};
+    const missed = (health.missedUploads || 0);
+    const candidates = findReplacementCandidates(p, suppId);
+    return { ...p, missed, v: p.variants[0], candidates };
+  });
+  showZeroConfirmModal(toAlert, suppId, suppName, coveragePct);
+};
+
 function showZeroConfirmModal(products, suppId, suppName, coveragePct) {
   const supp = state.suppliers.find(s=>s.id===suppId);
   const threshold = supp?.zeroThreshold||4;
@@ -680,13 +775,32 @@ function showZeroConfirmModal(products, suppId, suppName, coveragePct) {
       <div style="font-family:'Syne',sans-serif;font-size:12px;font-weight:700;color:var(--red);text-transform:uppercase;letter-spacing:1px;margin-bottom:10px">
         🔴 ${readyToZero.length} produto(s) ausentes há ${threshold}+ uploads — proposta: zerar stock
       </div>
-      <div style="max-height:200px;overflow-y:auto">
-        ${readyToZero.map(p=>`
-          <div class="zero-product-row">
-            <input type="checkbox" class="chk-zero" data-id="${p.id}" data-varid="${p.variants[0]?.id}" data-invid="${p.variants[0]?.inventoryItemId}" data-title="${p.title.replace(/"/g,'&quot;')}" checked style="flex-shrink:0">
-            <div class="zpr-title">${p.title}</div>
-            <div class="zpr-stock">stock: ${p.variants[0]?.stock??'?'} → 0</div>
-          </div>`).join('')}
+      <div style="max-height:280px;overflow-y:auto">
+        ${readyToZero.map(p=>{
+          const top = (p.candidates||[])[0];
+          const vId = p.variants[0]?.id || '';
+          const sk = (top?.row.sku||'').replace(/'/g,"\\'");
+          const bc = (top?.row.barcode||'').replace(/'/g,"\\'");
+          return `
+          <div class="zero-product-row" data-pid="${p.id}" style="${top?'flex-direction:column;align-items:stretch;gap:0':''}">
+            <div style="display:flex;align-items:center;gap:10px;width:100%">
+              <input type="checkbox" class="chk-zero" data-id="${p.id}" data-varid="${vId}" data-invid="${p.variants[0]?.inventoryItemId}" data-title="${p.title.replace(/"/g,'&quot;')}" checked style="flex-shrink:0">
+              <div class="zpr-title">${p.title}</div>
+              <div class="zpr-stock">stock: ${p.variants[0]?.stock??'?'} → 0</div>
+            </div>
+            ${top ? `
+              <div class="replace-suggestion" data-pid="${p.id}" style="margin-top:8px;padding:10px 12px;background:#EFF6FF;border:1px solid #BFDBFE;border-radius:8px;font-size:12px">
+                <div style="font-weight:700;margin-bottom:4px;color:#1E40AF">⇄ Possível substituição (${top.score}%)</div>
+                <div style="margin-bottom:4px"><strong>${(top.row.name||'').replace(/</g,'&lt;')}</strong></div>
+                <div style="color:var(--text2);margin-bottom:6px">SKU <code>${(top.row.sku||'—').replace(/</g,'&lt;')}</code>${top.row.barcode?` · EAN ${top.row.barcode}`:''} — ${top.breakdown}</div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap">
+                  <button class="btn btn-sm btn-primary" onclick="acceptReplacement('${p.id}','${vId}','${sk}','${bc}','${suppId}')">Aceitar como substituição</button>
+                  <button class="btn btn-sm btn-ghost" onclick="rejectReplacement('${p.id}','${vId}','${sk}','${bc}','${suppId}')">É diferente</button>
+                </div>
+              </div>
+            ` : ''}
+          </div>`;
+        }).join('')}
       </div>
     </div>` : ''}
 
@@ -2440,7 +2554,7 @@ function matching() {
           <td class="mono">${m.shopifySku||'—'}</td>
           <td style="color:var(--blue)">${m.supplierName}</td>
           <td class="mono">${m.supplierSku}</td>
-          <td><span class="badge ${m.score>85?'badge-green':m.score>60?'badge-yellow':'badge-orange'}">${m.score}%</span></td>
+          <td><span class="badge ${m.score>85?'badge-green':m.score>60?'badge-yellow':'badge-orange'}" title="${(m.breakdown||'').replace(/"/g,'&quot;')}">${m.score}%</span>${m.breakdown?`<div style="font-size:10px;color:var(--text2);margin-top:2px">${m.breakdown}</div>`:''}</td>
           <td><div style="display:flex;gap:4px">
             <button class="btn btn-success btn-sm" onclick="acceptMatch('${m.id}')">✓ Aceitar</button>
             <button class="btn btn-ghost btn-sm" onclick="rejectMatch('${m.id}')">✕</button>
@@ -2464,28 +2578,107 @@ async function runMatching() {
   if(!state.shopifyProducts.length){toast('Sincroniza o Shopify primeiro','error');return;}
   state.matches=[];
   const newProds=state.alerts.filter(a=>a.type==='new_product'&&!a.dismissed);
-  newProds.forEach(np=>{
-    if(!np.name) return;
-    let best=null, bestScore=0;
-    state.shopifyProducts.forEach(sp=>{ const score=similarity(np.name,sp.title); if(score>bestScore&&score>=50){bestScore=score;best=sp;} });
-    if(best&&!state.matches.some(m=>m.shopifyId===best.id&&m.supplierSku===np.sku)){
-      state.matches.push({ id:'match_'+Date.now()+Math.random(), shopifyId:best.id, shopifyTitle:best.title, shopifySku:best.variants[0]?.sku, shopifyVariantId:best.variants[0]?.id, shopifyInventoryItemId:best.variants[0]?.inventoryItemId, supplierName:np.name, supplierSku:np.sku, supplierBarcode:np.barcode, score:bestScore, alertId:np.id, dismissed:false });
+  let skippedByAlias = 0, skippedByNegative = 0;
+
+  // Index O(1) — evita O(N²) com bases grandes (Shopify 1000+ produtos × milhares de aliases).
+  // variantId → canonical
+  const canonicalByVariant = new Map();
+  for (const c of Object.values(state.productCanonicals)) {
+    if (c.shopifyVariantId) canonicalByVariant.set(c.shopifyVariantId, c);
+  }
+  // Aliases indexados por sku-norm e barcode-norm.
+  const aliasBySku = new Map(), aliasByBarcode = new Map();
+  for (const a of state.productAliases) {
+    const sk = normSku(a.sku); if (sk) (aliasBySku.get(sk) || aliasBySku.set(sk, []).get(sk)).push(a);
+    const bc = normBarcode(a.barcode); if (bc) (aliasByBarcode.get(bc) || aliasByBarcode.set(bc, []).get(bc)).push(a);
+  }
+  // Negativos indexados por canonicalId.
+  const negByCanonical = new Map();
+  for (const n of state.negativeMatches) {
+    if (!negByCanonical.has(n.canonicalId)) negByCanonical.set(n.canonicalId, []);
+    negByCanonical.get(n.canonicalId).push(n);
+  }
+  const isNeg = (cid, suppId, sku, barcode) => {
+    const arr = negByCanonical.get(cid); if (!arr) return false;
+    const skN = normSku(sku), bcN = normBarcode(barcode);
+    return arr.some(n => n.suppId === suppId && (normSku(n.sku) === skN || (bcN && normBarcode(n.barcode) === bcN)));
+  };
+
+  for (const np of newProds) {
+    if (!np.name) continue;
+
+    // Já há alias? Significa que este SKU/EAN do fornecedor já está resolvido.
+    const skN = normSku(np.sku), bcN = normBarcode(np.barcode);
+    const aliasHits = (skN && aliasBySku.get(skN)) || (bcN && aliasByBarcode.get(bcN)) || [];
+    const existingAlias = aliasHits.find(a => a.suppId === np.suppId || !a.suppId);
+    if (existingAlias) { skippedByAlias++; continue; }
+
+    const supplierRow = { name: np.name, sku: np.sku, barcode: np.barcode, finalPrice: np.price, rawPrice: np.price };
+    let bestSp = null, bestV = null, bestScore = 0, bestBreakdown = '';
+    for (const sp of state.shopifyProducts) {
+      const v = sp.variants?.[0]; if (!v) continue;
+      const canonical = canonicalByVariant.get(v.id);
+      if (canonical && isNeg(canonical.id, np.suppId, np.sku, np.barcode)) { skippedByNegative++; continue; }
+      const { score, breakdown } = scoreReplacement(sp, supplierRow);
+      if (score >= 60 && score > bestScore) { bestScore = score; bestSp = sp; bestV = v; bestBreakdown = breakdown; }
     }
-  });
-  save(); toast(`${state.matches.length} sugestão(ões) encontrada(s)`,'success'); render();
+    if (!bestSp) continue;
+    if (state.matches.some(m => m.shopifyId === bestSp.id && m.supplierSku === np.sku)) continue;
+
+    state.matches.push({
+      id: 'match_' + Date.now() + Math.random(),
+      shopifyId: bestSp.id, shopifyTitle: bestSp.title,
+      shopifySku: bestV.sku, shopifyVariantId: bestV.id,
+      shopifyInventoryItemId: bestV.inventoryItemId,
+      supplierName: np.name, supplierSku: np.sku, supplierBarcode: np.barcode,
+      suppId: np.suppId,
+      score: bestScore, breakdown: bestBreakdown,
+      alertId: np.id, dismissed: false
+    });
+  }
+  save();
+  const extras = [];
+  if (skippedByAlias) extras.push(`${skippedByAlias} já com alias`);
+  if (skippedByNegative) extras.push(`${skippedByNegative} rejeições anteriores`);
+  toast(`${state.matches.length} sugestão(ões)${extras.length?' · '+extras.join(' · '):''}`, 'success');
+  render();
 }
 
 async function acceptMatch(id) {
-  const m=state.matches.find(x=>x.id===id); if(!m) return;
-  try{
-    if(m.shopifyInventoryItemId&&m.supplierSku) await updateVariantSKU(m.shopifyInventoryItemId,m.supplierSku);
-    if(m.alertId) dismissAlert(m.alertId);
-    state.matches=state.matches.map(x=>x.id===id?{...x,dismissed:true}:x);
-    save(); document.getElementById('match-'+id)?.remove(); toast('SKU atualizado ✓','success');
-  }catch(e){toast('Erro: '+e.message,'error');}
+  const m = state.matches.find(x => x.id === id); if (!m) return;
+  try {
+    // Modelo B: criar alias persistente em vez de sobrescrever o SKU no Shopify.
+    // Preserva o SKU original (que pode ser usado por outros fornecedores) e faz com
+    // que próximos uploads deste fornecedor reconheçam o produto automaticamente.
+    const canonical = ensureCanonicalForVariant(m.shopifyId, m.shopifyVariantId);
+    if (!canonical) throw new Error('Canónico não encontrado para esta variante');
+    addAlias({
+      canonicalId: canonical.id, suppId: m.suppId,
+      sku: m.supplierSku, barcode: m.supplierBarcode,
+      source: 'matching-aceite', confidence: 100, addedBy: 'user'
+    });
+    if (m.alertId) dismissAlert(m.alertId);
+    state.matches = state.matches.map(x => x.id === id ? { ...x, dismissed: true } : x);
+    save();
+    document.getElementById('match-' + id)?.remove();
+    toast('Alias criado ✓ — futuros uploads reconhecem automaticamente', 'success');
+  } catch(e) { toast('Erro: ' + e.message, 'error'); }
 }
 
-function rejectMatch(id) { state.matches=state.matches.map(m=>m.id===id?{...m,dismissed:true}:m); save(); document.getElementById('match-'+id)?.remove(); }
+function rejectMatch(id) {
+  const m = state.matches.find(x => x.id === id);
+  if (m) {
+    // Aprende com a rejeição: este par fornecedor↔canónico não voltará a ser sugerido.
+    const canonical = ensureCanonicalForVariant(m.shopifyId, m.shopifyVariantId);
+    if (canonical) addNegativeMatch({
+      canonicalId: canonical.id, suppId: m.suppId,
+      sku: m.supplierSku, barcode: m.supplierBarcode
+    });
+  }
+  state.matches = state.matches.map(x => x.id === id ? { ...x, dismissed: true } : x);
+  save();
+  document.getElementById('match-' + id)?.remove();
+}
 
 // ═══════════════════════════════════════════
 // CREATE PRODUCTS (same as v2, preserved)
@@ -3215,12 +3408,272 @@ function kkClearCache() {
 }
 
 // ═══════════════════════════════════════════
+// IDENTIDADE CANÓNICA (F1)
+// ═══════════════════════════════════════════
+// Normaliza SKU/barcode para lookup case-insensitive e sem espaços/traços.
+function normSku(s) { return (s||'').toString().trim().toLowerCase(); }
+function normBarcode(s) { return (s||'').toString().trim().toLowerCase(); }
+// Versão "agressiva" para fallback quando o fornecedor varia o formato (BS-123 vs bs123).
+function normSkuLoose(s) { return normSku(s).replace(/[\s\-_./]/g,''); }
+
+function canonicalIdFromVariant(variantGid) {
+  const num = (variantGid||'').replace('gid://shopify/ProductVariant/','');
+  return num ? `pc_${num}` : `pc_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+}
+
+function findCanonicalByVariantId(variantId) {
+  for (const c of Object.values(state.productCanonicals)) {
+    if (c.shopifyVariantId === variantId) return c;
+  }
+  return null;
+}
+
+// Lookup principal usado pelo upload: tenta SKU exato → SKU loose → barcode.
+// `suppId` filtra aliases para evitar colisões entre fornecedores diferentes.
+function findCanonicalForRow({ suppId, sku, barcode }) {
+  const skuN = normSku(sku);
+  const skuL = normSkuLoose(sku);
+  const bcN = normBarcode(barcode);
+  let exact=null, loose=null, bc=null;
+  for (const a of state.productAliases) {
+    const aSku = normSku(a.sku), aSkuL = normSkuLoose(a.sku), aBc = normBarcode(a.barcode);
+    if (skuN && aSku === skuN && (a.suppId === suppId || !a.suppId)) { exact = a; break; }
+    if (!loose && skuL && aSkuL && aSkuL === skuL && (a.suppId === suppId || !a.suppId)) loose = a;
+    if (!bc && bcN && aBc === bcN) bc = a; // barcode é universal — não filtra por suppId
+  }
+  const hit = exact || loose || bc;
+  if (!hit) return null;
+  const canonical = state.productCanonicals[hit.canonicalId] || null;
+  return canonical ? { canonical, alias: hit, matchedBy: exact?'sku':loose?'sku-loose':'barcode' } : null;
+}
+
+function isNegativeMatch(canonicalId, suppId, sku, barcode) {
+  const skuN = normSku(sku), bcN = normBarcode(barcode);
+  return state.negativeMatches.some(n =>
+    n.canonicalId === canonicalId && n.suppId === suppId &&
+    (normSku(n.sku) === skuN || (bcN && normBarcode(n.barcode) === bcN))
+  );
+}
+
+function addAlias({ canonicalId, suppId, sku, barcode, source='manual', confidence=100, addedBy='user' }) {
+  if (!canonicalId || !state.productCanonicals[canonicalId]) return null;
+  const skuN = normSku(sku), bcN = normBarcode(barcode);
+  // Dedupe: se já existe alias igual para o mesmo canónico+fornecedor, devolve o existente.
+  const existing = state.productAliases.find(a =>
+    a.canonicalId === canonicalId && a.suppId === suppId &&
+    normSku(a.sku) === skuN && normBarcode(a.barcode) === bcN
+  );
+  if (existing) return existing;
+  const alias = {
+    id: 'pa_' + Date.now() + '_' + Math.random().toString(36).slice(2,6),
+    canonicalId, suppId, sku: sku||'', barcode: barcode||'',
+    source, confidence, addedAt: new Date().toISOString(), addedBy
+  };
+  state.productAliases.push(alias);
+  return alias;
+}
+
+function addNegativeMatch({ canonicalId, suppId, sku, barcode }) {
+  state.negativeMatches.push({
+    canonicalId, suppId, sku: sku||'', barcode: barcode||'',
+    rejectedAt: new Date().toISOString()
+  });
+}
+
+// Migração idempotente: para cada variante Shopify cria 1 canónico + 1 alias auto-aprovado.
+// Não toca em canónicos já existentes (preserva manuais). Pode correr múltiplas vezes.
+function migrateToCanonicals() {
+  if (!state.shopifyProducts.length) return { created: 0, skipped: 0, aliases: 0 };
+  let created = 0, skipped = 0, aliases = 0;
+  for (const p of state.shopifyProducts) {
+    for (const v of (p.variants || [])) {
+      const cid = canonicalIdFromVariant(v.id);
+      let canonical = state.productCanonicals[cid];
+      if (!canonical) {
+        canonical = {
+          id: cid,
+          shopifyProductId: p.id,
+          shopifyVariantId: v.id,
+          shopifyInventoryItemId: v.inventoryItemId || null,
+          primarySku: v.sku || '',
+          primaryBarcode: v.barcode || '',
+          title: p.title || '',
+          brand: p.vendor || '',
+          createdAt: new Date().toISOString(),
+          source: 'auto-migration'
+        };
+        state.productCanonicals[cid] = canonical;
+        created++;
+      } else {
+        // Atualiza snapshot — Shopify pode ter mudado título/marca desde a última migração.
+        canonical.shopifyProductId = p.id;
+        canonical.shopifyInventoryItemId = v.inventoryItemId || canonical.shopifyInventoryItemId;
+        canonical.primarySku = v.sku || canonical.primarySku;
+        canonical.primaryBarcode = v.barcode || canonical.primaryBarcode;
+        canonical.title = p.title || canonical.title;
+        canonical.brand = p.vendor || canonical.brand;
+        skipped++;
+      }
+      // Alias "raiz" sem fornecedor — representa o SKU/barcode atual no Shopify.
+      // Permite matching mesmo sem termos identificado o fornecedor original.
+      if (v.sku || v.barcode) {
+        const before = state.productAliases.length;
+        addAlias({
+          canonicalId: cid, suppId: null,
+          sku: v.sku, barcode: v.barcode,
+          source: 'auto-migration', confidence: 100, addedBy: 'system'
+        });
+        if (state.productAliases.length > before) aliases++;
+      }
+    }
+  }
+  return { created, skipped, aliases };
+}
+
+// ═══════════════════════════════════════════
+// DETECÇÃO DE SUBSTITUIÇÃO DE SKU (F4)
+// ═══════════════════════════════════════════
+// Trigramas + Dice: melhor que Jaccard de palavras para matching de títulos PT
+// (apanha abreviaturas, plurais e ordem diferente).
+function trigrams(s) {
+  s = (s||'').toString().toLowerCase().replace(/[^a-z0-9]/g,' ').replace(/\s+/g,' ').trim();
+  if (s.length < 2) return new Set();
+  const padded = `  ${s}  `;
+  const out = new Set();
+  for (let i=0; i < padded.length-2; i++) out.add(padded.slice(i, i+3));
+  return out;
+}
+
+function diceTrigram(a, b) {
+  const ta = trigrams(a), tb = trigrams(b);
+  if (!ta.size || !tb.size) return 0;
+  let inter = 0;
+  ta.forEach(t => { if (tb.has(t)) inter++; });
+  return Math.round((2 * inter / (ta.size + tb.size)) * 100);
+}
+
+// Score 0-100 de quão provável é `newRow` ser substituição de `missingProduct`.
+function scoreReplacement(missingProduct, newRow) {
+  const v = missingProduct.variants?.[0] || {};
+  // EAN/barcode idêntico = certeza quase absoluta.
+  if (v.barcode && newRow.barcode && normBarcode(v.barcode) === normBarcode(newRow.barcode)) {
+    return { score: 100, breakdown: 'EAN idêntico' };
+  }
+  const titleScore = diceTrigram(missingProduct.title || '', newRow.name || '');
+  let score = titleScore;
+  const parts = [`Título ${titleScore}%`];
+  // Bonus marca: se o vendor Shopify aparece no nome do fornecedor.
+  const vendor = (missingProduct.vendor || '').trim().toLowerCase();
+  if (vendor && newRow.name && newRow.name.toLowerCase().includes(vendor)) {
+    score = Math.min(100, score + 10);
+    parts.push('marca ✓');
+  }
+  // Sanity check de preço — desvio grande sugere produto diferente.
+  const oldPrice = parseFloat(v.price) || 0;
+  const newPrice = newRow.finalPrice || newRow.rawPrice || 0;
+  if (oldPrice > 0 && newPrice > 0) {
+    const ratio = Math.abs(oldPrice - newPrice) / oldPrice;
+    if (ratio <= 0.25) { score = Math.min(100, score + 5); parts.push(`preço ±${Math.round(ratio*100)}%`); }
+    else { score = Math.max(0, score - 15); parts.push(`preço ±${Math.round(ratio*100)}% ⚠`); }
+  }
+  return { score, breakdown: parts.join(' · ') };
+}
+
+function findReplacementCandidates(missingProduct, suppId) {
+  const isNew = state.analysisResult?.isNew || [];
+  if (!isNew.length) return [];
+  const variantId = missingProduct.variants?.[0]?.id;
+  const canonical = findCanonicalByVariantId(variantId);
+  const out = [];
+  for (const row of isNew) {
+    if (row.suppId !== suppId) continue;
+    if (canonical && isNegativeMatch(canonical.id, suppId, row.sku, row.barcode)) continue;
+    const { score, breakdown } = scoreReplacement(missingProduct, row);
+    if (score >= 75) out.push({ row, score, breakdown });
+  }
+  out.sort((a,b) => b.score - a.score);
+  return out.slice(0, 1); // v1: só o melhor candidato
+}
+
+// Garante que existe canónico para a variante, criando on-demand se a migração ainda não correu.
+function ensureCanonicalForVariant(productId, variantId) {
+  let c = findCanonicalByVariantId(variantId);
+  if (c) return c;
+  const p = state.shopifyProducts.find(x => x.id === productId);
+  const v = p?.variants?.find(x => x.id === variantId);
+  if (!p || !v) return null;
+  const cid = canonicalIdFromVariant(variantId);
+  state.productCanonicals[cid] = {
+    id: cid, shopifyProductId: productId, shopifyVariantId: variantId,
+    shopifyInventoryItemId: v.inventoryItemId || null,
+    primarySku: v.sku || '', primaryBarcode: v.barcode || '',
+    title: p.title || '', brand: p.vendor || '',
+    createdAt: new Date().toISOString(), source: 'on-demand'
+  };
+  return state.productCanonicals[cid];
+}
+
+// Handler do botão "Aceitar como substituição".
+window.acceptReplacement = function(productId, variantId, newSku, newBarcode, suppId) {
+  const canonical = ensureCanonicalForVariant(productId, variantId);
+  if (!canonical) { toast('Erro: produto não encontrado em cache', 'error'); return; }
+  addAlias({
+    canonicalId: canonical.id, suppId,
+    sku: newSku, barcode: newBarcode,
+    source: 'sku-substituido', confidence: 100, addedBy: 'user'
+  });
+  // Reset do contador de ausência — o produto reaparece com novo SKU.
+  resetSkuHealth(canonical.primarySku, canonical.primaryBarcode);
+  // Remove a linha do isNew para não criar um "produto novo" duplicado.
+  if (state.analysisResult?.isNew) {
+    const skuN = normSku(newSku), bcN = normBarcode(newBarcode);
+    state.analysisResult.isNew = state.analysisResult.isNew.filter(r =>
+      !(normSku(r.sku) === skuN && normBarcode(r.barcode) === bcN)
+    );
+  }
+  // Desmarca a checkbox de zero e remove a sugestão visualmente.
+  const row = document.querySelector(`.zero-product-row[data-pid="${productId}"]`);
+  if (row) {
+    const chk = row.querySelector('.chk-zero');
+    if (chk) { chk.checked = false; chk.disabled = true; }
+    row.querySelector('.replace-suggestion')?.remove();
+    const status = document.createElement('div');
+    status.style.cssText = 'margin-top:6px;font-size:12px;color:var(--green);font-weight:600';
+    status.textContent = `✓ Alias criado: ${newSku || newBarcode} → mantém stock`;
+    row.appendChild(status);
+  }
+  save();
+  toast(`Substituição aceite — alias guardado para futuros uploads`, 'success');
+};
+
+// Handler do botão "É diferente" — regista no negativeMatches.
+window.rejectReplacement = function(productId, variantId, newSku, newBarcode, suppId) {
+  const canonical = ensureCanonicalForVariant(productId, variantId);
+  if (canonical) addNegativeMatch({ canonicalId: canonical.id, suppId, sku: newSku, barcode: newBarcode });
+  save();
+  document.querySelector(`.zero-product-row[data-pid="${productId}"] .replace-suggestion`)?.remove();
+  toast('Sugestão descartada — não voltará a aparecer', 'info');
+};
+
+async function runMigrationIfNeeded() {
+  // Só corre se houver produtos Shopify cacheados E ainda não houver canónicos.
+  if (!state.shopifyProducts.length) return;
+  if (Object.keys(state.productCanonicals).length > 0) return;
+  const r = migrateToCanonicals();
+  if (r.created > 0) {
+    save();
+    toast(`Identidade canónica inicializada: ${r.created} produtos · ${r.aliases} aliases`, 'success');
+  }
+}
+
+// ═══════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════
 (async () => {
   // Carrega dados da cloud antes de renderizar (se Supabase configurado)
   const loaded = await loadFromCloud();
   if (loaded) toast('Dados carregados da cloud ☁','success');
+  await runMigrationIfNeeded();
   navigate('dashboard');
 })();
 </script>
