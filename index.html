@@ -3837,11 +3837,11 @@ async function tkSyncSingleSku(tkSku, shopifyProductId, shopTitle) {
   const firstVariant = shopProd.variants?.[0];
   if (!firstVariant) return;
   try {
-    // Atualiza SKU se necessário
+    // Atualiza SKU se necessário (API 2026-01: sku fica em inventoryItem)
     if (firstVariant.sku !== tkSku) {
       await shopifyGQL(
-        `mutation($productId:ID!,$variants:[ProductVariantsBulkInput!]!){productVariantsBulkUpdate(productId:$productId,variants:$variants){productVariants{id sku}userErrors{message}}}`,
-        { productId: shopifyProductId, variants: [{ id: firstVariant.id, sku: tkSku }] }
+        `mutation($productId:ID!,$variants:[ProductVariantsBulkInput!]!){productVariantsBulkUpdate(productId:$productId,variants:$variants){productVariants{id inventoryItem{sku}}userErrors{message}}}`,
+        { productId: shopifyProductId, variants: [{ id: firstVariant.id, inventoryItem: { sku: tkSku } }] }
       );
       firstVariant.sku = tkSku;
     }
@@ -3981,8 +3981,8 @@ async function tkSyncSkusToShopify() {
     try {
       if (firstVariant.sku !== tkSku) {
         await shopifyGQL(
-          `mutation($productId:ID!,$variants:[ProductVariantsBulkInput!]!){productVariantsBulkUpdate(productId:$productId,variants:$variants){productVariants{id sku}userErrors{message}}}`,
-          { productId: shopifyProductId, variants: [{ id: firstVariant.id, sku: tkSku }] }
+          `mutation($productId:ID!,$variants:[ProductVariantsBulkInput!]!){productVariantsBulkUpdate(productId:$productId,variants:$variants){productVariants{id inventoryItem{sku}}userErrors{message}}}`,
+          { productId: shopifyProductId, variants: [{ id: firstVariant.id, inventoryItem: { sku: tkSku } }] }
         );
         firstVariant.sku = tkSku;
       }
