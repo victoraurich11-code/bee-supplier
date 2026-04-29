@@ -356,15 +356,64 @@ async function cloudUpsert(key, value) {
   if (!res.ok) throw new Error(`cloudUpsert ${key}: ${res.status}`);
 }
 
+// Chaves críticas: nunca devem encolher >50% nem ficar vazias sem confirmação explícita
+const CLOUD_GUARDED_KEYS = ['suppliers','shopifyProducts','productCanonicals','productAliases','matches'];
+let _cloudForceSync = false; // override manual (botão "Forçar sync") por uma única chamada
+
+async function cloudFetchSize(key) {
+  const { supabaseUrl, supabaseKey } = state.settings;
+  try {
+    const res = await fetch(`${supabaseUrl}/rest/v1/bee_data?key=eq.${encodeURIComponent(key)}&select=value`, {
+      headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
+    });
+    if (!res.ok) return null; // erro de rede → conservador (aborta upsert)
+    const rows = await res.json();
+    if (!rows.length) return 0;
+    const v = rows[0].value;
+    if (Array.isArray(v)) return v.length;
+    if (v && typeof v === 'object') return Object.keys(v).length;
+    return 0;
+  } catch { return null; }
+}
+
+function _localSize(v) {
+  if (Array.isArray(v)) return v.length;
+  if (v && typeof v === 'object') return Object.keys(v).length;
+  return 0;
+}
+
 async function saveToCloud() {
   const { supabaseUrl, supabaseKey } = state.settings;
   if (!supabaseUrl || !supabaseKey) return;
   if (_cloudSyncing) return;
   _cloudSyncing = true;
+  const force = _cloudForceSync;
+  _cloudForceSync = false;
   try {
-    const keys = ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','shopifyProducts','productCanonicals','productAliases','negativeMatches'];
+    const allKeys = ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','shopifyProducts','productCanonicals','productAliases','negativeMatches'];
+    // Avalia guards em paralelo para chaves críticas
+    const guardChecks = await Promise.all(CLOUD_GUARDED_KEYS.map(async k => {
+      if (force) return { k, allow: true };
+      const localSize = _localSize(state[k]);
+      const remoteSize = await cloudFetchSize(k);
+      if (remoteSize === null) return { k, allow: false, reason: 'erro de rede ao validar' };
+      if (remoteSize === 0) return { k, allow: true };
+      // Bloqueia se local está vazio enquanto cloud tem dados, ou encolheu >50%
+      if (localSize === 0) return { k, allow: false, reason: `local vazio, cloud tem ${remoteSize}` };
+      if (localSize < remoteSize * 0.5) return { k, allow: false, reason: `${remoteSize}→${localSize} (>50% redução)` };
+      return { k, allow: true };
+    }));
+    const blocked = guardChecks.filter(g => !g.allow);
+    if (blocked.length) {
+      blocked.forEach(b => {
+        console.warn(`[saveToCloud guard] ${b.k} bloqueado: ${b.reason}`);
+        toast(`⚠ Sync de "${b.k}" bloqueado: ${b.reason}. Usa "Forçar sync" se for intencional.`, 'error');
+      });
+    }
+    const blockedSet = new Set(blocked.map(b => b.k));
+    const keysToUpsert = allKeys.filter(k => !blockedSet.has(k));
     await Promise.allSettled([
-      ...keys.map(k => cloudUpsert(k, state[k])),
+      ...keysToUpsert.map(k => cloudUpsert(k, state[k])),
       cloudUpsert('tek4life_mapping', tkState?.mapping || DB.get('tek4life_mapping', {}))
     ]);
     updateCloudStatus(true);
@@ -373,6 +422,17 @@ async function saveToCloud() {
     throw e;
   } finally {
     _cloudSyncing = false;
+  }
+}
+
+async function forceSaveToCloud() {
+  if (!confirm('Forçar sync ignora as proteções contra perda de dados.\n\nIsto vai sobrescrever a cloud com o estado local actual, mesmo que reduza listas críticas.\n\nContinuar?')) return;
+  _cloudForceSync = true;
+  try {
+    await saveToCloud();
+    toast('✓ Sync forçado concluído', 'success');
+  } catch(e) {
+    toast(`✕ Erro: ${e.message}`, 'error');
   }
 }
 
@@ -1492,9 +1552,41 @@ function supplierCard(s, pendingCostAlerts) {
   + '</div>';
 }
 
+function recoverSuppliersFromTags() {
+  if (!Array.isArray(state.shopifyProducts) || !state.shopifyProducts.length) {
+    toast('Sincroniza os produtos Shopify primeiro.', 'error'); return;
+  }
+  const foundIds = new Set();
+  for (const p of state.shopifyProducts) {
+    for (const t of (p.tags || [])) {
+      if (typeof t === 'string' && t.startsWith('sup:')) {
+        const id = t.slice(4).trim();
+        if (id) foundIds.add(id);
+      }
+    }
+  }
+  if (!foundIds.size) { toast('Nenhuma tag sup:* encontrada nos produtos Shopify.', 'info'); return; }
+  const existingIds = new Set((state.suppliers || []).map(s => s.id));
+  const missing = [...foundIds].filter(id => !existingIds.has(id));
+  if (!missing.length) {
+    toast(`✓ Todos os ${foundIds.size} fornecedores referenciados já existem.`, 'success'); return;
+  }
+  if (!confirm(`Foram encontrados ${missing.length} fornecedor(es) referenciado(s) nas tags Shopify mas em falta na lista:\n\n${missing.join(', ')}\n\nReconstruir com defaults (active:true, threshold:3)?`)) return;
+  for (const id of missing) {
+    const niceName = id.charAt(0).toUpperCase() + id.slice(1);
+    state.suppliers.push({ id, name: niceName, active: true, zeroThreshold: 3, lastUpload: null });
+  }
+  save();
+  suppliers();
+  toast(`♻ ${missing.length} fornecedor(es) recuperados das tags Shopify`, 'success');
+}
+
 function suppliers() {
   try {
-    document.getElementById('topbar-actions').innerHTML = '<button class="btn btn-primary" onclick="openSupplierModal()">+ Novo Fornecedor</button>';
+    document.getElementById('topbar-actions').innerHTML =
+      '<button class="btn btn-ghost btn-sm" onclick="recoverSuppliersFromTags()" title="Reconstrói fornecedores em falta a partir das tags sup:* nos produtos Shopify">♻ Recuperar das tags</button>'
+      + '<button class="btn btn-ghost btn-sm" onclick="forceSaveToCloud()" title="Sobrescreve a cloud ignorando proteções (usar com cuidado)">⚡ Forçar sync</button>'
+      + '<button class="btn btn-primary" onclick="openSupplierModal()">+ Novo Fornecedor</button>';
     const suppList = Array.isArray(state.suppliers) ? state.suppliers : [];
     const costAlertsList = Array.isArray(state.costAlerts) ? state.costAlerts : [];
     const pendingCostAlerts = {};
@@ -4283,14 +4375,14 @@ function tkRenderSemOrigem() {
 // INIT
 // ═══════════════════════════════════════════
 (async () => {
-  // Garante que tek4life está registado como fornecedor
-  if (!state.suppliers.find(s => s.id === 'tek4life')) {
-    state.suppliers.push({ id:'tek4life', name:'Tek4life', active:true, zeroThreshold:3, lastUpload:null });
-    save();
-  }
-  // Carrega dados da cloud antes de renderizar (se Supabase configurado)
+  // Carrega dados da cloud ANTES de qualquer bootstrap — a cloud é a fonte da verdade
   const loaded = await loadFromCloud();
   if (loaded) toast('Dados carregados da cloud ☁','success');
+  // Bootstrap tek4life só DEPOIS do load — e apenas em localStorage, nunca disparar saveToCloud aqui
+  if (!state.suppliers.find(s => s.id === 'tek4life')) {
+    state.suppliers.push({ id:'tek4life', name:'Tek4life', active:true, zeroThreshold:3, lastUpload:null });
+    DB.set('suppliers', state.suppliers);
+  }
   await runMigrationIfNeeded();
   navigate('dashboard');
 })();
