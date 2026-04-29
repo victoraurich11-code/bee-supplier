@@ -253,6 +253,7 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--blue); cur
       <div class="nav-item" onclick="navigate('alerts')" id="nav-alerts"><span class="icon">🔔</span> Alertas <span class="nav-badge" id="alert-badge" style="display:none">0</span></div>
       <div class="nav-item" onclick="navigate('mercado')" id="nav-mercado"><span class="icon">📊</span> Mercado <span class="nav-badge yellow" id="badge-mercado" style="display:none">!</span></div>
       <div class="nav-item" onclick="navigate('matching')" id="nav-matching"><span class="icon">🔗</span> Matching</div>
+      <div class="nav-item" onclick="navigate('tek4life')" id="nav-tek4life"><span class="icon">📱</span> Tek4life <span class="nav-badge yellow" id="badge-tek4life" style="display:none">!</span></div>
       <div class="nav-item" onclick="navigate('create')" id="nav-create"><span class="icon">✚</span> Criar Produtos</div>
       <div class="nav-item" onclick="navigate('settings')" id="nav-settings"><span class="icon">⚙</span> Configurações</div>
     </nav>
@@ -977,13 +978,13 @@ function navigate(page) {
   state.page = page;
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   document.getElementById('nav-'+page)?.classList.add('active');
-  const titles = { dashboard:'Dashboard', suppliers:'Fornecedores', upload:'Processar Ficheiro', health:'Saúde do Catálogo', alerts:'Alertas', mercado:'Mercado (KuantoKusta)', matching:'Matching Inteligente', create:'Criar Produtos', settings:'Configurações' };
+  const titles = { dashboard:'Dashboard', suppliers:'Fornecedores', upload:'Processar Ficheiro', health:'Saúde do Catálogo', alerts:'Alertas', mercado:'Mercado (KuantoKusta)', matching:'Matching Inteligente', tek4life:'Tek4life — iPhones Grade A+', create:'Criar Produtos', settings:'Configurações' };
   document.getElementById('page-title').textContent = titles[page]||page;
   render();
 }
 
 function render() {
-  ({ dashboard, suppliers, upload, health, alerts, mercado, matching, create, settings })[state.page]?.();
+  ({ dashboard, suppliers, upload, health, alerts, mercado, matching, tek4life, create, settings })[state.page]?.();
   updateBadges();
 }
 
@@ -3663,6 +3664,314 @@ async function runMigrationIfNeeded() {
   if (r.created > 0) {
     save();
     toast(`Identidade canónica inicializada: ${r.created} produtos · ${r.aliases} aliases`, 'success');
+  }
+}
+
+// ═══════════════════════════════════════════
+// TEK4LIFE — iPhones Grade A+ Matching
+// ═══════════════════════════════════════════
+const TEK_MAPPING_KEY = 'bsm3_tek4life_mapping';
+const TEK_URL = 'https://www.tek4life.pt/collections/recondicionados/products.json';
+const GRADE_TAGS_T = ['grade a+','grade-a+','a+'];
+
+let tkState = {
+  tekProducts: [],
+  matches: [],
+  filter: 'all',
+  mapping: DB.get('tek4life_mapping', {}), // { tkSku: shopifyProductId }
+};
+
+function tek4life() {
+  const hasSynced = tkState.tekProducts.length > 0;
+  document.getElementById('topbar-actions').innerHTML = `
+    <button class="btn btn-ghost btn-sm" onclick="tkExportCSV()" ${!hasSynced?'disabled':''}>⬇ CSV para Upload</button>
+    <button class="btn btn-primary" onclick="tkStartAnalysis()" id="tk-btn-start">▶ Analisar tek4life</button>
+  `;
+
+  if (!state.shopifyProducts.length) {
+    document.getElementById('content').innerHTML = `
+      <div class="card" style="text-align:center;padding:40px">
+        <div style="font-size:40px;margin-bottom:12px">📱</div>
+        <p style="color:var(--text2);margin-bottom:16px">Sincroniza os produtos do Shopify primeiro para poder fazer o matching.</p>
+        <button class="btn btn-primary" onclick="fetchShopifyProducts().then(render)">↻ Sincronizar Shopify</button>
+      </div>`;
+    return;
+  }
+
+  document.getElementById('content').innerHTML = `
+    <div class="card" style="margin-bottom:16px;background:var(--blue-bg);border-color:#BFDBFE">
+      <p style="font-size:13px;color:var(--blue);line-height:1.6">
+        📱 Vai buscar iPhones recondicionados <strong>Grade A+</strong> ao tek4life.pt, compara com os teus produtos no Shopify e sugere correspondências para aprovares.
+        Após aprovares, o CSV fica pronto a importar no <strong>Processar Ficheiro</strong>.
+      </p>
+    </div>
+
+    ${hasSynced ? `
+    <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap">
+      <div class="stat-card" style="border-left:3px solid var(--blue)"><div class="stat-num" style="color:var(--blue)">${tkState.tekProducts.length}</div><div class="stat-lbl">iPhones tek4life A+</div></div>
+      <div class="stat-card" style="border-left:3px solid var(--green)"><div class="stat-num" style="color:var(--green)">${tkState.matches.filter(m=>m.status==='approved').length}</div><div class="stat-lbl">Aprovados</div></div>
+      <div class="stat-card" style="border-left:3px solid var(--orange)"><div class="stat-num" style="color:var(--orange)">${tkState.matches.filter(m=>m.status==='pending').length}</div><div class="stat-lbl">Por decidir</div></div>
+      <div class="stat-card" style="border-left:3px solid var(--red)"><div class="stat-num" style="color:var(--red)">${tkState.matches.filter(m=>m.status==='no-match').length}</div><div class="stat-lbl">Sem correspondência</div></div>
+    </div>
+
+    <div style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap">
+      ${['all','pending','approved','rejected','no-match'].map(f=>`
+        <button onclick="tkFilter('${f}')" style="padding:6px 14px;border-radius:7px;border:1px solid var(--border);background:${tkState.filter===f?'var(--surface)':'transparent'};font-weight:${tkState.filter===f?'600':'400'};cursor:pointer;font-size:13px;color:${tkState.filter===f?'var(--text)':'var(--text2)'};box-shadow:${tkState.filter===f?'var(--shadow)':'none'}">
+          ${{all:'Todos',pending:'Por decidir',approved:'Aprovados',rejected:'Rejeitados','no-match':'Sem match'}[f]}
+          (${f==='all'?tkState.matches.length:tkState.matches.filter(m=>m.status===f).length})
+        </button>`).join('')}
+      <button class="btn btn-success btn-sm" style="margin-left:auto" onclick="tkApproveAll()">✓ Aprovar todas ≥ 80%</button>
+    </div>
+
+    <div id="tk-match-list">${tkRenderList()}</div>
+    ` : `
+    <div class="card" style="text-align:center;padding:48px 20px">
+      <div style="font-size:44px;margin-bottom:12px">📱</div>
+      <p style="color:var(--text2);font-size:14px;line-height:1.6;max-width:400px;margin:0 auto 20px">
+        Clica em <strong>Analisar tek4life</strong> para carregar os iPhones Grade A+ e ver as sugestões de matching com os teus produtos do Shopify.
+      </p>
+      <button class="btn btn-primary" onclick="tkStartAnalysis()">▶ Analisar tek4life</button>
+    </div>
+    `}
+    <div id="tk-progress" style="display:none;margin-top:16px">
+      <div class="card">
+        <div class="progress-bar"><div class="progress-fill" id="tk-prog-fill" style="width:0%"></div></div>
+        <div style="font-size:12px;color:var(--text2);margin-top:6px;font-family:'DM Mono',monospace" id="tk-prog-label">A iniciar...</div>
+      </div>
+    </div>
+  `;
+}
+
+function tkRenderList() {
+  const filtered = tkState.matches.filter(m => {
+    if (tkState.filter === 'all') return true;
+    return m.status === tkState.filter;
+  }).sort((a,b) => {
+    const o = {pending:0,'no-match':1,approved:2,rejected:3};
+    if (o[a.status] !== o[b.status]) return o[a.status]-o[b.status];
+    return b.score - a.score;
+  });
+
+  if (!filtered.length) return `<div class="empty-state"><div class="empty-icon">🔍</div><p>Nenhum resultado neste filtro.</p></div>`;
+
+  return filtered.map(m => {
+    const idx = tkState.matches.indexOf(m);
+    const confBadge = m.score>=80 ? 'badge-green' : m.score>=50 ? 'badge-yellow' : 'badge-orange';
+    const statusIcon = {approved:'<span style="color:var(--green)">✓ Aprovado</span>',rejected:'<span style="color:var(--red)">✕ Rejeitado</span>','no-match':'<span style="color:var(--orange)">— Sem match</span>',pending:''}[m.status];
+    const tekOpts = [m.tek.option1,m.tek.option2,m.tek.option3].filter(o=>o&&o.toLowerCase()!=='default title').map(o=>`<span class="tag-pill tp-gray">${o}</span>`).join('');
+
+    return `
+    <div style="background:var(--surface);border:1px solid ${m.status==='approved'?'#BBF7D0':m.status==='rejected'?'#FECACA':m.status==='no-match'?'#FDE68A':'var(--border)'};border-radius:var(--radius);overflow:hidden;box-shadow:var(--shadow);margin-bottom:10px;${m.status==='rejected'?'opacity:.6':''}">
+      <div style="padding:10px 16px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--border);background:${m.status==='approved'?'var(--green-bg)':m.status==='no-match'?'var(--orange-bg)':'var(--panel)'}">
+        <span class="badge ${confBadge}">${m.score}%</span>
+        <span style="font-size:11px;color:var(--text2);font-family:'DM Mono',monospace">${m.breakdown||''}</span>
+        <span style="margin-left:auto;font-size:12px;font-weight:600">${statusIcon}</span>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 32px 1fr">
+        <div style="padding:12px 16px">
+          <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1.5px;color:var(--text3);margin-bottom:6px;font-family:'DM Mono',monospace">🛒 tek4life</div>
+          <div style="font-weight:600;font-size:13px;margin-bottom:4px">${m.tek.title}</div>
+          <div style="font-family:'DM Mono',monospace;font-size:11px;color:var(--text2);margin-bottom:6px">${m.tek.sku||'(sem SKU)'}</div>
+          <div>${tekOpts} <span class="tag-pill tp-sup">€${m.tek.price.toFixed(2)}</span> ${m.tek.available?'<span class="tag-pill tp-ok">Disponível</span>':'<span class="tag-pill tp-crit">Esgotado</span>'}</div>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:center;color:var(--text3);font-size:18px;background:var(--panel);border-left:1px solid var(--border);border-right:1px solid var(--border)">→</div>
+        <div style="padding:12px 16px;${!m.shop?'opacity:.5':''}">
+          <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1.5px;color:var(--text3);margin-bottom:6px;font-family:'DM Mono',monospace">🏪 BeeStore Shopify</div>
+          ${m.shop
+            ? `<div style="font-weight:600;font-size:13px;margin-bottom:4px">${m.shop.title}</div>
+               <div style="font-family:'DM Mono',monospace;font-size:11px;color:var(--text2)">${m.shop.variants?.[0]?.sku||'(sem SKU)'} · €${parseFloat(m.shop.variants?.[0]?.price||0).toFixed(2)}</div>`
+            : `<div style="color:var(--text3);font-size:13px;margin-top:8px">Produto ainda não existe no Shopify</div>`
+          }
+        </div>
+      </div>
+      <div style="padding:8px 14px;background:var(--panel);border-top:1px solid var(--border);display:flex;gap:6px;align-items:center">
+        ${m.status!=='no-match' && m.shop ? `
+          <button class="btn btn-success btn-sm" onclick="tkApprove(${idx})" ${m.status==='approved'?'disabled':''}>✓ Aprovar</button>
+          <button class="btn btn-danger btn-sm" onclick="tkReject(${idx})" ${m.status==='rejected'?'disabled':''}>✕ Rejeitar</button>
+          <button class="btn btn-ghost btn-sm" onclick="tkManualSearch(${idx})">🔍 Outro</button>
+        ` : m.status==='no-match' ? `<span style="font-size:12px;color:var(--orange)">⚠ Cria este produto no Shopify primeiro, depois volta a analisar.</span>` : ''}
+        <span style="margin-left:auto;font-size:10px;color:var(--text3);font-family:'DM Mono',monospace">TK: ${m.tek.sku}</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function tkFilter(f) {
+  tkState.filter = f;
+  tek4life();
+}
+
+function tkApprove(idx) {
+  const m = tkState.matches[idx];
+  m.status = 'approved';
+  tkState.mapping[m.tek.sku] = m.shop.id;
+  DB.set('tek4life_mapping', tkState.mapping);
+  document.getElementById('tk-match-list').innerHTML = tkRenderList();
+  tek4life(); // re-render para atualizar contadores
+  toast(`✓ Aprovado: ${m.tek.title.substring(0,45)}`, 'success');
+}
+
+function tkReject(idx) {
+  tkState.matches[idx].status = 'rejected';
+  document.getElementById('tk-match-list').innerHTML = tkRenderList();
+  tek4life();
+  toast('Rejeitado.', 'info');
+}
+
+function tkApproveAll() {
+  let count = 0;
+  tkState.matches.forEach((m, idx) => {
+    if (m.status === 'pending' && m.score >= 80 && m.shop) {
+      tkState.matches[idx].status = 'approved';
+      tkState.mapping[m.tek.sku] = m.shop.id;
+      count++;
+    }
+  });
+  DB.set('tek4life_mapping', tkState.mapping);
+  tek4life();
+  count > 0 ? toast(`✓ ${count} sugestão(ões) com ≥ 80% aprovadas`, 'success') : toast('Nenhuma sugestão com ≥ 80% por aprovar.', 'info');
+}
+
+function tkManualSearch(idx) {
+  const m = tkState.matches[idx];
+  const query = prompt(`Pesquisa produto Shopify para:\n"${m.tek.title}"\n\nInsere parte do título:`);
+  if (!query) return;
+  const found = state.shopifyProducts.filter(p => p.title.toLowerCase().includes(query.toLowerCase()));
+  if (!found.length) { toast('Nenhum produto encontrado.', 'error'); return; }
+  if (found.length === 1) {
+    m.shop = found[0]; m.score = 75; m.breakdown = 'escolha manual'; m.status = 'approved';
+    tkState.mapping[m.tek.sku] = found[0].id;
+    DB.set('tek4life_mapping', tkState.mapping);
+    tek4life(); toast('Mapeamento manual guardado!', 'success'); return;
+  }
+  const titles = found.slice(0,8).map((p,i)=>`${i+1}. ${p.title}`).join('\n');
+  const pick = parseInt(prompt(`${found.length} encontrados. Escolhe o número:\n\n${titles}`));
+  if (pick >= 1 && pick <= found.length) {
+    const chosen = found[pick-1];
+    m.shop = chosen; m.score = 75; m.breakdown = 'escolha manual'; m.status = 'approved';
+    tkState.mapping[m.tek.sku] = chosen.id;
+    DB.set('tek4life_mapping', tkState.mapping);
+    tek4life(); toast('Mapeamento manual guardado!', 'success');
+  }
+}
+
+function tkExportCSV() {
+  if (!tkState.tekProducts.length) { toast('Corre a análise primeiro.', 'error'); return; }
+  const rows = [['Title','SKU','Price','Stock','Image','Brand']];
+  tkState.tekProducts.forEach(p => {
+    rows.push([p.title, p.sku, p.price.toFixed(2), p.available ? (p.stock||0) : 0, p.image||'', p.brand||'Apple']);
+  });
+  const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,﻿' + encodeURIComponent(csv);
+  a.download = `tek4life_upload_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+  toast(`CSV exportado com ${tkState.tekProducts.length} iPhones Grade A+`, 'success');
+}
+
+function tkParseIphone(title) {
+  const t = title.toLowerCase();
+  const model = (t.match(/iphone\s+(17|16|15|14|13|12|11|x[rs]?|se)(\s+pro)?(\s+max)?(\s+plus)?(\s+ultra)?/) || [''])[0].trim();
+  const storage = (t.match(/(\d+)\s*(?:gb|tb)/) || [''])[0].replace(/\s/g,'').toLowerCase();
+  const colorMap = {'preto':'blk','black':'blk','midnight':'blk','meia-noite':'blk','branco':'wht','white':'wht','estelar':'wht','starlight':'wht','dourado':'gld','gold':'gld','amarelo':'yel','azul':'blu','blue':'blu','verde':'grn','green':'grn','vermelho':'red','red':'red','cinza':'gry','cinzento':'gry','gray':'gry','silver':'slv','prata':'slv','roxo':'pur','purple':'pur','rosa':'pnk','pink':'pnk','titanio':'tit','titânio':'tit','titanium':'tit','natural':'nat','deserto':'dst','desert':'dst'};
+  let color = '';
+  for (const [w, c] of Object.entries(colorMap)) { if (t.includes(w)) { color = c; break; } }
+  return { model, storage, color };
+}
+
+function tkScore(tek, shop) {
+  const t = tkParseIphone(tek.title + ' ' + (tek.option1||'') + ' ' + (tek.option2||''));
+  const s = tkParseIphone(shop.title);
+  if (!t.model || !s.model) return { score:0, breakdown:'modelo não encontrado' };
+  if (t.model !== s.model && !s.model.includes(t.model) && !t.model.includes(s.model)) return { score:0, breakdown:'modelo diferente' };
+  let score = t.model === s.model ? 50 : 30;
+  const parts = [];
+  t.model === s.model ? parts.push('modelo ✓') : parts.push('modelo ~');
+  if (t.storage && s.storage) { if (t.storage===s.storage){score+=30;parts.push('storage ✓');}else{score-=10;parts.push('storage ✗');} }
+  if (t.color && s.color) { if (t.color===s.color){score+=20;parts.push('cor ✓');}else{score-=5;parts.push('cor ~');} }
+  return { score: Math.max(0, Math.min(100, score)), breakdown: parts.join(', ') };
+}
+
+function tkBuildMatches(tekProducts) {
+  const shopIphones = state.shopifyProducts.filter(p =>
+    (p.title||'').toLowerCase().includes('iphone') || (p.vendor||'').toLowerCase().includes('apple')
+  );
+  return tekProducts.map(tek => {
+    // Mapeamento já guardado?
+    if (tkState.mapping[tek.sku]) {
+      const shop = state.shopifyProducts.find(p=>p.id===tkState.mapping[tek.sku]);
+      if (shop) return { tek, shop, score:100, breakdown:'mapeamento guardado', status:'approved' };
+    }
+    let best=null, bestScore=0, bestBreakdown='';
+    for (const shop of shopIphones) {
+      const { score, breakdown } = tkScore(tek, shop);
+      if (score > bestScore) { bestScore=score; best=shop; bestBreakdown=breakdown; }
+    }
+    if (bestScore >= 30 && best) return { tek, shop:best, score:bestScore, breakdown:bestBreakdown, status:'pending' };
+    return { tek, shop:null, score:0, breakdown:'sem correspondência', status:'no-match' };
+  });
+}
+
+async function tkStartAnalysis() {
+  document.getElementById('tk-btn-start').disabled = true;
+  const progWrap = document.getElementById('tk-progress');
+  if (progWrap) progWrap.style.display = 'block';
+
+  const setP = (pct, label) => {
+    const f = document.getElementById('tk-prog-fill');
+    const l = document.getElementById('tk-prog-label');
+    if (f) f.style.width = pct + '%';
+    if (l) l.textContent = label;
+  };
+
+  try {
+    setP(10, 'A carregar iPhones do tek4life.pt...');
+    const allProds = [];
+    let page = 1;
+    while (true) {
+      const r = await fetch(`${TEK_URL}?limit=250&page=${page}`);
+      if (!r.ok) throw new Error(`tek4life HTTP ${r.status}`);
+      const data = await r.json();
+      const items = data.products || [];
+      if (!items.length) break;
+      allProds.push(...items);
+      if (items.length < 250) break;
+      page++;
+    }
+
+    // Filtra iPhones Grade A+
+    const tekProducts = [];
+    for (const p of allProds) {
+      const titleL = (p.title||'').toLowerCase();
+      const vendorL = (p.vendor||'').toLowerCase();
+      if (!titleL.includes('iphone') && !vendorL.includes('apple')) continue;
+      const tags = (p.tags||[]).map(t=>t.toLowerCase());
+      const prodGradeA = GRADE_TAGS_T.some(g=>tags.includes(g))||GRADE_TAGS_T.some(g=>titleL.includes(g));
+      for (const v of p.variants) {
+        const varParts = [v.title,v.option1,v.option2,v.option3].map(x=>(x||'').toLowerCase()).join(' ');
+        if (!prodGradeA && !GRADE_TAGS_T.some(g=>varParts.includes(g))) continue;
+        tekProducts.push({ title:p.title, sku:v.sku||'', price:parseFloat(v.price||0), available:v.available, stock:v.inventory_quantity||0, option1:v.option1||'', option2:v.option2||'', option3:v.option3||'', image:p.images?.[0]?.src||'', brand:p.vendor||'Apple', handle:p.handle });
+      }
+    }
+
+    setP(70, `${tekProducts.length} iPhones A+ carregados. A calcular sugestões...`);
+    tkState.tekProducts = tekProducts;
+    tkState.matches = tkBuildMatches(tekProducts);
+    tkState.filter = 'all';
+
+    // Badge na sidebar
+    const pending = tkState.matches.filter(m=>m.status==='pending').length;
+    const badge = document.getElementById('badge-tek4life');
+    if (badge) { badge.textContent=pending; badge.style.display=pending>0?'flex':'none'; }
+
+    setP(100, 'Concluído!');
+    await sleep(400);
+    tek4life();
+    toast(`Análise concluída: ${tekProducts.length} iPhones A+ · ${pending} por decidir`, 'success');
+  } catch(e) {
+    toast(`Erro: ${e.message}`, 'error');
+    const btn = document.getElementById('tk-btn-start');
+    if (btn) btn.disabled = false;
   }
 }
 
