@@ -3683,8 +3683,10 @@ let tkState = {
 
 function tek4life() {
   const hasSynced = tkState.tekProducts.length > 0;
+  const pendingSync = Object.keys(tkState.mapping).length;
   document.getElementById('topbar-actions').innerHTML = `
     <button class="btn btn-ghost btn-sm" onclick="tkExportCSV()" ${!hasSynced?'disabled':''}>⬇ CSV para Upload</button>
+    ${pendingSync > 0 ? `<button class="btn btn-blue btn-sm" onclick="tkSyncSkusToShopify()">🔄 Sincronizar ${pendingSync} SKUs no Shopify</button>` : ''}
     <button class="btn btn-primary" onclick="tkStartAnalysis()" id="tk-btn-start">▶ Analisar tek4life</button>
   `;
 
@@ -3711,19 +3713,20 @@ function tek4life() {
       <div class="stat-card" style="border-left:3px solid var(--blue)"><div class="stat-num" style="color:var(--blue)">${tkState.tekProducts.length}</div><div class="stat-lbl">iPhones tek4life A+</div></div>
       <div class="stat-card" style="border-left:3px solid var(--green)"><div class="stat-num" style="color:var(--green)">${tkState.matches.filter(m=>m.status==='approved').length}</div><div class="stat-lbl">Aprovados</div></div>
       <div class="stat-card" style="border-left:3px solid var(--orange)"><div class="stat-num" style="color:var(--orange)">${tkState.matches.filter(m=>m.status==='pending').length}</div><div class="stat-lbl">Por decidir</div></div>
-      <div class="stat-card" style="border-left:3px solid var(--red)"><div class="stat-num" style="color:var(--red)">${tkState.matches.filter(m=>m.status==='no-match').length}</div><div class="stat-lbl">Sem correspondência</div></div>
+      <div class="stat-card" style="border-left:3px solid var(--red)"><div class="stat-num" style="color:var(--red)">${tkState.matches.filter(m=>m.status==='no-match').length}</div><div class="stat-lbl">Sem match tek4life</div></div>
+      <div class="stat-card" style="border-left:3px solid var(--purple);cursor:pointer" onclick="tkFilter('sem-origem')"><div class="stat-num" style="color:var(--purple)">${state.shopifyProducts.filter(p=>((p.title||'').toLowerCase().includes('iphone')||(p.vendor||'').toLowerCase().includes('apple'))&&!(p.tags||[]).includes('sup:tek4life')).length}</div><div class="stat-lbl">Shopify sem fornecedor</div></div>
     </div>
 
     <div style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap">
-      ${['all','pending','approved','rejected','no-match'].map(f=>`
-        <button onclick="tkFilter('${f}')" style="padding:6px 14px;border-radius:7px;border:1px solid var(--border);background:${tkState.filter===f?'var(--surface)':'transparent'};font-weight:${tkState.filter===f?'600':'400'};cursor:pointer;font-size:13px;color:${tkState.filter===f?'var(--text)':'var(--text2)'};box-shadow:${tkState.filter===f?'var(--shadow)':'none'}">
-          ${{all:'Todos',pending:'Por decidir',approved:'Aprovados',rejected:'Rejeitados','no-match':'Sem match'}[f]}
-          (${f==='all'?tkState.matches.length:tkState.matches.filter(m=>m.status===f).length})
+      ${['all','pending','approved','rejected','no-match','sem-origem'].map(f=>`
+        <button onclick="tkFilter('${f}')" style="padding:6px 14px;border-radius:7px;border:1px solid ${f==='sem-origem'&&tkState.filter===f?'var(--orange)':f==='sem-origem'?'var(--orange-bg)':'var(--border)'};background:${tkState.filter===f?(f==='sem-origem'?'var(--orange-bg)':'var(--surface)'):'transparent'};font-weight:${tkState.filter===f?'600':'400'};cursor:pointer;font-size:13px;color:${tkState.filter===f?(f==='sem-origem'?'var(--orange)':'var(--text)'):'var(--text2)'};box-shadow:${tkState.filter===f?'var(--shadow)':'none'}">
+          ${{all:'Todos',pending:'Por decidir',approved:'Aprovados',rejected:'Rejeitados','no-match':'Sem match tek4life','sem-origem':'📦 Shopify sem fornecedor'}[f]}
+          ${f!=='sem-origem'?`(${f==='all'?tkState.matches.length:tkState.matches.filter(m=>m.status===f).length})`:`(${state.shopifyProducts.filter(p=>((p.title||'').toLowerCase().includes('iphone')||(p.vendor||'').toLowerCase().includes('apple'))&&!(p.tags||[]).includes('sup:tek4life')).length})`}
         </button>`).join('')}
       <button class="btn btn-success btn-sm" style="margin-left:auto" onclick="tkApproveAll()">✓ Aprovar todas ≥ 80%</button>
     </div>
 
-    <div id="tk-match-list">${tkRenderList()}</div>
+    <div id="tk-match-list">${tkState.filter==='sem-origem' ? tkRenderSemOrigem() : tkRenderList()}</div>
     ` : `
     <div class="card" style="text-align:center;padding:48px 20px">
       <div style="font-size:44px;margin-bottom:12px">📱</div>
@@ -3798,7 +3801,12 @@ function tkRenderList() {
 
 function tkFilter(f) {
   tkState.filter = f;
-  tek4life();
+  if (f === 'sem-origem') {
+    // Re-render só o painel de matches, sem full re-render
+    tek4life();
+  } else {
+    tek4life();
+  }
 }
 
 function tkApprove(idx) {
@@ -3809,6 +3817,34 @@ function tkApprove(idx) {
   document.getElementById('tk-match-list').innerHTML = tkRenderList();
   tek4life(); // re-render para atualizar contadores
   toast(`✓ Aprovado: ${m.tek.title.substring(0,45)}`, 'success');
+  // Sincroniza SKU no Shopify automaticamente
+  tkSyncSingleSku(m.tek.sku, m.shop.id, m.shop.title);
+}
+
+async function tkSyncSingleSku(tkSku, shopifyProductId, shopTitle) {
+  const shopProd = state.shopifyProducts.find(p => p.id === shopifyProductId);
+  if (!shopProd) return;
+  const firstVariant = shopProd.variants?.[0];
+  if (!firstVariant) return;
+  try {
+    // Atualiza SKU se necessário
+    if (firstVariant.sku !== tkSku) {
+      await shopifyGQL(
+        `mutation($productId:ID!,$variants:[ProductVariantsBulkInput!]!){productVariantsBulkUpdate(productId:$productId,variants:$variants){productVariants{id sku}userErrors{message}}}`,
+        { productId: shopifyProductId, variants: [{ id: firstVariant.id, sku: tkSku }] }
+      );
+      firstVariant.sku = tkSku;
+    }
+    // Aplica tags de saúde: sup:tek4life + cat:atualizado + last-seen:YYYY-MM
+    await applyTagsToProduct(shopifyProductId, shopProd.tags||[], 'tek4life', 'cat:atualizado');
+    shopProd.tags = buildTagUpdate(shopProd.tags||[], ['sup:tek4life', 'cat:atualizado', `last-seen:${YYYYMM()}`]);
+    // Regista lastUpload no fornecedor
+    state.suppliers = state.suppliers.map(s => s.id==='tek4life' ? {...s, lastUpload:new Date().toISOString()} : s);
+    save();
+    toast(`🔗 SKU ${tkSku} + tags aplicados no Shopify`, 'success');
+  } catch(e) {
+    toast(`⚠ Matching aprovado mas sync falhou: ${e.message}`, 'error');
+  }
 }
 
 function tkReject(idx) {
@@ -3912,6 +3948,51 @@ function tkBuildMatches(tekProducts) {
   });
 }
 
+async function tkSyncSkusToShopify() {
+  const mapping = tkState.mapping; // { tkSku: shopifyProductId }
+  const entries = Object.entries(mapping);
+  if (!entries.length) { toast('Nenhum matching aprovado para sincronizar.', 'info'); return; }
+
+  if (!confirm(`Vai atualizar o SKU de ${entries.length} produto(s) no Shopify com os códigos TK do tek4life.\n\nIsto sobrescreve o SKU atual de cada variante.\n\nContinuar?`)) return;
+
+  let updated = 0, errors = 0, skipped = 0;
+  toast(`A sincronizar ${entries.length} SKU(s)...`, 'info');
+
+  for (const [tkSku, shopifyProductId] of entries) {
+    // Encontra o produto no cache local
+    const shopProd = state.shopifyProducts.find(p => p.id === shopifyProductId);
+    if (!shopProd) { skipped++; continue; }
+
+    // Se o SKU já está correto, salta
+    const firstVariant = shopProd.variants?.[0];
+    if (!firstVariant) { skipped++; continue; }
+    if (firstVariant.sku === tkSku) { skipped++; continue; }
+
+    try {
+      if (firstVariant.sku !== tkSku) {
+        await shopifyGQL(
+          `mutation($productId:ID!,$variants:[ProductVariantsBulkInput!]!){productVariantsBulkUpdate(productId:$productId,variants:$variants){productVariants{id sku}userErrors{message}}}`,
+          { productId: shopifyProductId, variants: [{ id: firstVariant.id, sku: tkSku }] }
+        );
+        firstVariant.sku = tkSku;
+      }
+      // Aplica tags de saúde
+      await applyTagsToProduct(shopifyProductId, shopProd.tags||[], 'tek4life', 'cat:atualizado');
+      shopProd.tags = buildTagUpdate(shopProd.tags||[], ['sup:tek4life', 'cat:atualizado', `last-seen:${YYYYMM()}`]);
+      updated++;
+      toast(`✓ Sincronizado: ${shopProd.title.substring(0,40)}`, 'success');
+    } catch(e) {
+      errors++;
+      toast(`✕ Erro em ${shopProd.title.substring(0,30)}: ${e.message}`, 'error');
+    }
+    await sleep(300);
+  }
+
+  save();
+  toast(`Sync concluído: ${updated} atualizados · ${skipped} já corretos · ${errors} erros`, updated > 0 ? 'success' : 'info');
+  tek4life();
+}
+
 async function tkStartAnalysis() {
   document.getElementById('tk-btn-start').disabled = true;
   const progWrap = document.getElementById('tk-progress');
@@ -3964,6 +4045,14 @@ async function tkStartAnalysis() {
     const badge = document.getElementById('badge-tek4life');
     if (badge) { badge.textContent=pending; badge.style.display=pending>0?'flex':'none'; }
 
+    // Health check pós-análise
+    setP(85, 'A verificar saúde do catálogo tek4life...');
+    await tkRunHealthCheck(tekProducts);
+
+    // Atualiza lastUpload do fornecedor
+    state.suppliers = state.suppliers.map(s => s.id==='tek4life' ? {...s, lastUpload:new Date().toISOString()} : s);
+    save();
+
     setP(100, 'Concluído!');
     await sleep(400);
     tek4life();
@@ -3975,10 +4064,99 @@ async function tkStartAnalysis() {
   }
 }
 
+// ─────────────────────────────────────────────────────
+// TEK4LIFE — Health check pós-análise
+// Produtos com sup:tek4life não encontrados no catálogo
+// atual → escalados para em-vigilância / crítico
+// ─────────────────────────────────────────────────────
+async function tkRunHealthCheck(tekProducts) {
+  const suppTag = 'sup:tek4life';
+  const tekSkus = new Set(tekProducts.map(p => (p.sku||'').trim()).filter(Boolean));
+  const taggedProducts = state.shopifyProducts.filter(p => (p.tags||[]).includes(suppTag));
+  if (!taggedProducts.length) return;
+
+  const present = taggedProducts.filter(p => p.variants.some(v => tekSkus.has((v.sku||'').trim())));
+  const missing = taggedProducts.filter(p => !p.variants.some(v => tekSkus.has((v.sku||'').trim())));
+
+  // Produtos presentes → garantir cat:atualizado
+  for (const p of present) {
+    const hasCurrent = (p.tags||[]).includes('cat:atualizado') && (p.tags||[]).some(t => t === `last-seen:${YYYYMM()}`);
+    if (!hasCurrent) {
+      await applyTagsToProduct(p.id, p.tags||[], 'tek4life', 'cat:atualizado');
+      p.tags = buildTagUpdate(p.tags||[], ['sup:tek4life', 'cat:atualizado', `last-seen:${YYYYMM()}`]);
+    }
+    await sleep(120);
+  }
+
+  // Produtos ausentes → escalar
+  const supp = state.suppliers.find(s => s.id === 'tek4life');
+  const threshold = supp?.zeroThreshold || 3;
+  for (const p of missing) {
+    const prevAbsent = (p.tags||[]).find(t => t.startsWith('bsm:ausente-'));
+    const missedCount = prevAbsent ? parseInt(prevAbsent.split('-').pop()) + 1 : 1;
+    const catTag = missedCount >= threshold ? 'cat:critico' : 'cat:em-vigilancia';
+    const removePrev = (p.tags||[]).filter(t => t.startsWith('bsm:ausente-'));
+    const finalTags = buildTagUpdate(p.tags||[], ['sup:tek4life', catTag, `bsm:ausente-${missedCount}`, `last-seen:${YYYYMM()}`], removePrev);
+    await updateProductTags(p.id, finalTags);
+    p.tags = finalTags;
+    await sleep(200);
+  }
+
+  save();
+  if (missing.length) {
+    state.alerts.push({ id:'alert_'+Date.now(), type:'no_update', title:'Tek4life — produtos ausentes do catálogo',
+      desc:`${missing.length} produto(s) com sup:tek4life não encontrados na análise de hoje`, suppId:'tek4life',
+      date:new Date().toISOString(), dismissed:false });
+    save();
+    toast(`⚠ ${missing.length} produto(s) tek4life escalados (ausentes do catálogo)`, 'error');
+  } else if (present.length) {
+    toast(`✓ Saúde tek4life: ${present.length} produto(s) confirmados no catálogo`, 'success');
+  }
+}
+
+// ─────────────────────────────────────────────────────
+// TEK4LIFE — Painel "Sem origem" (Shopify iPhones sem sup:tek4life)
+// ─────────────────────────────────────────────────────
+function tkRenderSemOrigem() {
+  const semOrigem = state.shopifyProducts.filter(p => {
+    const tags = p.tags || [];
+    const isIphone = (p.title||'').toLowerCase().includes('iphone') || (p.vendor||'').toLowerCase().includes('apple');
+    const hasTekTag = tags.includes('sup:tek4life');
+    return isIphone && !hasTekTag;
+  });
+  if (!semOrigem.length) return `<div class="card" style="text-align:center;padding:32px;color:var(--green)">✅ Todos os iPhones Shopify têm fornecedor tek4life associado.</div>`;
+  return `
+    <div class="card" style="margin-bottom:12px;background:var(--orange-bg);border-color:var(--orange)">
+      <p style="font-size:13px;color:var(--orange)">⚠ <strong>${semOrigem.length} iPhones no Shopify sem <code>sup:tek4life</code></strong> — podem ser de outro fornecedor ou ainda não foram associados.</p>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Produto</th><th>SKU variante</th><th>Tags actuais</th><th>Preço</th></tr></thead>
+        <tbody>
+          ${semOrigem.map(p => {
+            const v = p.variants?.[0];
+            const cats = (p.tags||[]).filter(t => CAT_TAGS.includes(t) || t.startsWith('sup:') || t.startsWith('last-seen:'));
+            return `<tr>
+              <td style="font-weight:600">${p.title}</td>
+              <td style="font-family:'DM Mono',monospace;font-size:12px;color:var(--text2)">${v?.sku||'—'}</td>
+              <td>${cats.map(t=>`<span class="tag-pill tp-gray" style="font-size:11px">${t}</span>`).join(' ')||'<span style="color:var(--text3);font-size:12px">nenhuma</span>'}</td>
+              <td>€${parseFloat(v?.price||0).toFixed(2)}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
 // ═══════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════
 (async () => {
+  // Garante que tek4life está registado como fornecedor
+  if (!state.suppliers.find(s => s.id === 'tek4life')) {
+    state.suppliers.push({ id:'tek4life', name:'Tek4life', active:true, zeroThreshold:3, lastUpload:null });
+    save();
+  }
   // Carrega dados da cloud antes de renderizar (se Supabase configurado)
   const loaded = await loadFromCloud();
   if (loaded) toast('Dados carregados da cloud ☁','success');
