@@ -3802,11 +3802,86 @@ function tkRenderList() {
           <button class="btn btn-success btn-sm" onclick="tkApprove(${idx})" ${m.status==='approved'?'disabled':''}>✓ Aprovar</button>
           <button class="btn btn-danger btn-sm" onclick="tkReject(${idx})" ${m.status==='rejected'?'disabled':''}>✕ Rejeitar</button>
           <button class="btn btn-ghost btn-sm" onclick="tkManualSearch(${idx})">🔍 Outro</button>
-        ` : m.status==='no-match' ? `<span style="font-size:12px;color:var(--orange)">⚠ Cria este produto no Shopify primeiro, depois volta a analisar.</span>` : ''}
+        ` : m.status==='no-match' ? `
+          <button class="btn btn-primary btn-sm" onclick="tkCreateDraft(${idx})">＋ Criar rascunho no Shopify</button>
+          <span style="font-size:11px;color:var(--text3);margin-left:4px">Cria como Rascunho e faz o match automaticamente</span>
+        ` : ''}
         <span style="margin-left:auto;font-size:10px;color:var(--text3);font-family:'DM Mono',monospace">TK: ${m.tek.sku}</span>
       </div>
     </div>`;
   }).join('');
+}
+
+async function tkCreateDraft(idx) {
+  const m = tkState.matches[idx];
+  if (!m || m.status !== 'no-match') return;
+  const { settings } = state;
+  if (!settings.shop || !settings.token) { toast('Configura a loja e o token Shopify primeiro.', 'error'); return; }
+
+  const tek = m.tek;
+  const btn = document.querySelector(`button[onclick="tkCreateDraft(${idx})"]`);
+  if (btn) { btn.disabled = true; btn.textContent = 'A criar...'; }
+
+  try {
+    // Calcula preço de venda com margem tek4life
+    const cost = tek.price;
+    const model = tek.title.toLowerCase();
+    const isHighEnd = /iphone\s+1[5-9]|iphone\s+2\d/.test(model);
+    const isPro     = /pro|max|ultra/.test(model);
+    const margin    = isPro ? 95 : isHighEnd ? 80 : 60;
+    const salePrice = (cost + margin).toFixed(2);
+
+    // Cria produto no Shopify como Rascunho
+    const mutation = `mutation($input:ProductInput!){productCreate(input:$input){product{id title variants(first:1){edges{node{id inventoryItem{id}}}}}userErrors{message}}}`;
+    const input = {
+      title: tek.title,
+      vendor: tek.brand || 'Apple',
+      status: 'DRAFT',
+      tags: ['sup:tek4life', 'cat:atualizado', `last-seen:${YYYYMM()}`, 'recondicionado', 'grade-a+'],
+      variants: [{ price: salePrice, sku: tek.sku }]
+    };
+    if (tek.image) input.images = [{ src: tek.image }];
+
+    const res = await shopifyGQL(mutation, { input });
+    const errs = res?.productCreate?.userErrors;
+    if (errs?.length) throw new Error(errs[0].message);
+
+    const product = res.productCreate.product;
+    const variantNode = product.variants.edges[0]?.node;
+    const inventoryItemId = variantNode?.inventoryItem?.id;
+
+    // Garante que o SKU fica via inventoryItem (API 2026-01)
+    if (inventoryItemId && tek.sku) {
+      await updateVariantSKU(inventoryItemId, tek.sku);
+    }
+
+    // Adiciona ao cache local e faz match automático
+    const newShopProd = {
+      id: product.id,
+      title: product.title,
+      vendor: tek.brand || 'Apple',
+      tags: input.tags,
+      variants: [{ id: variantNode?.id, sku: tek.sku, price: salePrice, inventoryItemId }]
+    };
+    state.shopifyProducts.push(newShopProd);
+
+    // Aprova o match automaticamente
+    m.shop = newShopProd;
+    m.score = 100;
+    m.breakdown = 'criado agora';
+    m.status = 'approved';
+    tkState.mapping[tek.sku] = product.id;
+    DB.set('tek4life_mapping', tkState.mapping);
+    state.suppliers = state.suppliers.map(s => s.id==='tek4life' ? {...s, lastUpload:new Date().toISOString()} : s);
+    save();
+    saveToCloud().catch(()=>{});
+
+    tek4life();
+    toast(`✅ Rascunho criado e match aprovado: ${tek.title.substring(0,45)}`, 'success');
+  } catch(e) {
+    if (btn) { btn.disabled = false; btn.textContent = '＋ Criar rascunho no Shopify'; }
+    toast(`✕ Erro ao criar rascunho: ${e.message}`, 'error');
+  }
 }
 
 function tkFilter(f) {
