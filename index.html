@@ -1552,6 +1552,136 @@ function supplierCard(s, pendingCostAlerts) {
   + '</div>';
 }
 
+function _supplierBrandRoot(s) {
+  // Extrai a "marca base" do supplier para detectar duplicados
+  // Ex: "sup_teletech_mnhivma4" → "teletech", "tek4life" → "tek4life"
+  const id = (s.id || '').toLowerCase();
+  const base = id.replace(/^sup_/, '');
+  // Remove sufixo aleatório do tipo _<6+ chars alfanuméricos>
+  const root = base.replace(/_[a-z0-9]{4,}$/, '');
+  return root || base;
+}
+
+function detectDuplicateSuppliers() {
+  const groups = {};
+  for (const s of (state.suppliers || [])) {
+    const root = _supplierBrandRoot(s);
+    if (!root) continue;
+    if (!groups[root]) groups[root] = [];
+    const productCount = state.shopifyProducts.filter(p => (p.tags||[]).includes(`sup:${s.id}`)).length;
+    groups[root].push({ ...s, productCount });
+  }
+  return Object.entries(groups)
+    .filter(([_, list]) => list.length > 1)
+    .map(([root, list]) => ({
+      root,
+      suppliers: list.sort((a, b) => {
+        // Canónico = upload mais recente; empate → mais produtos
+        if (a.lastUpload && b.lastUpload) return new Date(b.lastUpload) - new Date(a.lastUpload);
+        if (a.lastUpload) return -1;
+        if (b.lastUpload) return 1;
+        return b.productCount - a.productCount;
+      })
+    }));
+}
+
+function openMergeSuppliersModal() {
+  const groups = detectDuplicateSuppliers();
+  if (!groups.length) {
+    toast('✓ Nenhum fornecedor duplicado detectado.', 'success');
+    return;
+  }
+  const totalGhostProducts = groups.reduce((sum, g) =>
+    sum + g.suppliers.slice(1).reduce((s, sup) => s + sup.productCount, 0), 0);
+  const html = groups.map((g, gi) => `
+    <div class="card" style="margin-bottom:14px;padding:14px">
+      <div style="font-weight:700;margin-bottom:10px;font-family:'Syne',sans-serif">Marca: ${g.root}</div>
+      <table style="width:100%;font-size:12px;border-collapse:collapse">
+        <thead><tr style="border-bottom:1px solid var(--border)">
+          <th style="text-align:left;padding:6px 4px">Canónico</th>
+          <th style="text-align:left;padding:6px 4px">ID</th>
+          <th style="text-align:left;padding:6px 4px">Nome</th>
+          <th style="text-align:center;padding:6px 4px">Produtos</th>
+          <th style="text-align:left;padding:6px 4px">Último upload</th>
+        </tr></thead>
+        <tbody>
+          ${g.suppliers.map((s, si) => `
+            <tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:6px 4px"><input type="radio" name="canon-${gi}" value="${s.id}" ${si===0?'checked':''}></td>
+              <td style="padding:6px 4px;font-family:'DM Mono',monospace;font-size:11px">${s.id}</td>
+              <td style="padding:6px 4px">${s.name}</td>
+              <td style="padding:6px 4px;text-align:center">${s.productCount}</td>
+              <td style="padding:6px 4px;font-size:11px;color:${s.lastUpload?'var(--text2)':'var(--red)'}">${s.lastUpload?new Date(s.lastUpload).toLocaleDateString('pt-PT'):'Nunca'}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `).join('');
+  document.getElementById('modal-content').innerHTML = `
+    <div class="modal-title">🔀 Consolidar fornecedores duplicados</div>
+    <div class="modal-sub">
+      Detectados <strong>${groups.length} grupo(s)</strong>. Escolhe o canónico em cada grupo — os outros serão fundidos.
+      Aproximadamente <strong>${totalGhostProducts}</strong> produto(s) Shopify serão actualizados (~${Math.ceil(totalGhostProducts*0.2)}s).
+    </div>
+    <div style="max-height:55vh;overflow:auto;margin:14px 0">${html}</div>
+    <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary" onclick="executeMergeSuppliers(${groups.length})">Migrar e consolidar</button>
+    </div>
+  `;
+  openModal();
+}
+
+async function executeMergeSuppliers(groupCount) {
+  const groups = detectDuplicateSuppliers();
+  const decisions = [];
+  for (let gi = 0; gi < groupCount; gi++) {
+    const canonId = document.querySelector(`input[name="canon-${gi}"]:checked`)?.value;
+    if (!canonId || !groups[gi]) continue;
+    const ghostIds = groups[gi].suppliers.filter(s => s.id !== canonId).map(s => s.id);
+    if (ghostIds.length) decisions.push({ canonicalId: canonId, ghostIds });
+  }
+  if (!decisions.length) { closeModal(); return; }
+  const totalGhosts = decisions.reduce((s, d) => s + d.ghostIds.length, 0);
+  const totalProducts = decisions.reduce((sum, d) => sum + d.ghostIds.reduce((s2, gid) =>
+    s2 + state.shopifyProducts.filter(p => (p.tags||[]).includes(`sup:${gid}`)).length, 0), 0);
+  if (!confirm(`Vais consolidar ${totalGhosts} fornecedor(es) fantasma e migrar ${totalProducts} produto(s) Shopify para o canónico de cada grupo.\n\nFaz updates no Shopify e não é reversível.\n\nContinuar?`)) return;
+  closeModal();
+  let totalUpdated = 0, totalErrors = 0, ghostsRemoved = 0;
+  for (const dec of decisions) {
+    for (const ghostId of dec.ghostIds) {
+      const ghostTag = `sup:${ghostId}`;
+      const canonTag = `sup:${dec.canonicalId}`;
+      const products = state.shopifyProducts.filter(p => (p.tags||[]).includes(ghostTag));
+      let groupErrors = 0;
+      for (const p of products) {
+        try {
+          const newTags = [...new Set((p.tags||[]).filter(t => t !== ghostTag).concat(canonTag))];
+          await updateProductTags(p.id, newTags);
+          p.tags = newTags;
+          totalUpdated++;
+        } catch(e) {
+          groupErrors++;
+          totalErrors++;
+          console.warn(`Erro a migrar ${p.id} (${ghostId}→${dec.canonicalId}): ${e.message}`);
+        }
+        await sleep(150);
+      }
+      if (groupErrors === 0) {
+        state.suppliers = state.suppliers.filter(s => s.id !== ghostId);
+        ghostsRemoved++;
+        toast(`✓ ${ghostId} → ${dec.canonicalId} (${products.length} produtos)`, 'success');
+      } else {
+        toast(`⚠ ${ghostId}: ${groupErrors} erro(s) — fantasma mantido para retry`, 'error');
+      }
+    }
+  }
+  save();
+  suppliers();
+  toast(`Consolidação: ${totalUpdated} produtos migrados · ${ghostsRemoved} fantasmas removidos · ${totalErrors} erros`, totalErrors ? 'error' : 'success');
+}
+
 function recoverSuppliersFromTags() {
   if (!Array.isArray(state.shopifyProducts) || !state.shopifyProducts.length) {
     toast('Sincroniza os produtos Shopify primeiro.', 'error'); return;
@@ -1584,7 +1714,8 @@ function recoverSuppliersFromTags() {
 function suppliers() {
   try {
     document.getElementById('topbar-actions').innerHTML =
-      '<button class="btn btn-ghost btn-sm" onclick="recoverSuppliersFromTags()" title="Reconstrói fornecedores em falta a partir das tags sup:* nos produtos Shopify">♻ Recuperar das tags</button>'
+      '<button class="btn btn-ghost btn-sm" onclick="openMergeSuppliersModal()" title="Detecta e funde fornecedores duplicados (ex: várias entradas para o mesmo fornecedor real)">🔀 Consolidar duplicados</button>'
+      + '<button class="btn btn-ghost btn-sm" onclick="recoverSuppliersFromTags()" title="Reconstrói fornecedores em falta a partir das tags sup:* nos produtos Shopify">♻ Recuperar das tags</button>'
       + '<button class="btn btn-ghost btn-sm" onclick="forceSaveToCloud()" title="Sobrescreve a cloud ignorando proteções (usar com cuidado)">⚡ Forçar sync</button>'
       + '<button class="btn btn-primary" onclick="openSupplierModal()">+ Novo Fornecedor</button>';
     const suppList = Array.isArray(state.suppliers) ? state.suppliers : [];
