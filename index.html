@@ -3837,12 +3837,10 @@ async function tkSyncSingleSku(tkSku, shopifyProductId, shopTitle) {
   const firstVariant = shopProd.variants?.[0];
   if (!firstVariant) return;
   try {
-    // Atualiza SKU se necessário (API 2026-01: sku fica em inventoryItem)
+    // Atualiza SKU via inventoryItemUpdate (API 2026-01 — SKU não está em ProductVariantsBulkInput)
     if (firstVariant.sku !== tkSku) {
-      await shopifyGQL(
-        `mutation($productId:ID!,$variants:[ProductVariantsBulkInput!]!){productVariantsBulkUpdate(productId:$productId,variants:$variants){productVariants{id inventoryItem{sku}}userErrors{message}}}`,
-        { productId: shopifyProductId, variants: [{ id: firstVariant.id, inventoryItem: { sku: tkSku } }] }
-      );
+      if (!firstVariant.inventoryItemId) throw new Error('inventoryItemId não disponível — sincroniza os produtos Shopify primeiro');
+      await updateVariantSKU(firstVariant.inventoryItemId, tkSku);
       firstVariant.sku = tkSku;
     }
     // Aplica tags de saúde: sup:tek4life + cat:atualizado + last-seen:YYYY-MM
@@ -3980,10 +3978,8 @@ async function tkSyncSkusToShopify() {
 
     try {
       if (firstVariant.sku !== tkSku) {
-        await shopifyGQL(
-          `mutation($productId:ID!,$variants:[ProductVariantsBulkInput!]!){productVariantsBulkUpdate(productId:$productId,variants:$variants){productVariants{id inventoryItem{sku}}userErrors{message}}}`,
-          { productId: shopifyProductId, variants: [{ id: firstVariant.id, inventoryItem: { sku: tkSku } }] }
-        );
+        if (!firstVariant.inventoryItemId) { skipped++; continue; }
+        await updateVariantSKU(firstVariant.inventoryItemId, tkSku);
         firstVariant.sku = tkSku;
       }
       // Aplica tags de saúde
