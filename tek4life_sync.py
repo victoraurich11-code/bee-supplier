@@ -75,9 +75,13 @@ OUTPUT_CSV_COPY    = DOWNLOADS_DIR / "tek4life_upload.csv"      # cópia best-ef
 OUTPUT_REPORT_COPY = DOWNLOADS_DIR / "tek4life_relatorio.xlsx"  # cópia best-effort
 
 def try_copy_to_downloads(src: Path, dst: Path) -> bool:
-    """Tenta copiar para Downloads. Se falhar (launchd sem permissão), regista warning e continua."""
+    """Tenta copiar para Downloads. Se falhar (launchd sem permissão), regista warning e continua.
+    Apaga o destino primeiro para garantir que a 'Date Created' do Finder reflecte a hora actual
+    (macOS preserva creation date em overwrites; Finder por default mostra creation date)."""
     try:
         import shutil
+        if dst.exists():
+            dst.unlink()
         shutil.copy2(src, dst)
         print(f"   📋 Cópia em Downloads: {dst}")
         return True
