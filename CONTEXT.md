@@ -25,3 +25,4 @@ wrangler deploy
 ## Notas
 - Não guardar o token Shopify no código
 - Suporta GraphQL (POST sem X-Rest-Path) e REST (POST com X-Rest-Path)
+- SKU de variante deve ser atualizado via `inventoryItemUpdate` (não `productVariantsBulkUpdate`) na API 2026-01
