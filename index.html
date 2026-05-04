@@ -255,6 +255,7 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--blue); cur
       <div class="nav-item" onclick="navigate('matching')" id="nav-matching"><span class="icon">🔗</span> Matching</div>
       <div class="nav-item" onclick="navigate('tek4life')" id="nav-tek4life"><span class="icon">📱</span> Tek4life <span class="nav-badge yellow" id="badge-tek4life" style="display:none">!</span></div>
       <div class="nav-item" onclick="navigate('create')" id="nav-create"><span class="icon">✚</span> Criar Produtos</div>
+      <div class="nav-item" onclick="navigate('splitVariants')" id="nav-splitVariants"><span class="icon">🔀</span> Separar Variantes</div>
       <div class="nav-item" onclick="navigate('settings')" id="nav-settings"><span class="icon">⚙</span> Configurações</div>
     </nav>
     <div class="sidebar-footer">
@@ -1046,13 +1047,13 @@ function navigate(page) {
   state.page = page;
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   document.getElementById('nav-'+page)?.classList.add('active');
-  const titles = { dashboard:'Dashboard', suppliers:'Fornecedores', upload:'Processar Ficheiro', health:'Saúde do Catálogo', alerts:'Alertas', mercado:'Mercado (KuantoKusta)', matching:'Matching Inteligente', tek4life:'Tek4life — iPhones Grade A+', create:'Criar Produtos', settings:'Configurações' };
+  const titles = { dashboard:'Dashboard', suppliers:'Fornecedores', upload:'Processar Ficheiro', health:'Saúde do Catálogo', alerts:'Alertas', mercado:'Mercado (KuantoKusta)', matching:'Matching Inteligente', tek4life:'Tek4life — iPhones Grade A+', create:'Criar Produtos', splitVariants:'Separar Variantes — Inspeção', settings:'Configurações' };
   document.getElementById('page-title').textContent = titles[page]||page;
   render();
 }
 
 function render() {
-  ({ dashboard, suppliers, upload, health, alerts, mercado, matching, tek4life, create, settings })[state.page]?.();
+  ({ dashboard, suppliers, upload, health, alerts, mercado, matching, tek4life, create, splitVariants, settings })[state.page]?.();
   updateBadges();
 }
 
@@ -3085,6 +3086,478 @@ async function crCreate() {
   log(`<br>🎉 <strong>Concluído! ${created} produto(s) criado(s) como Rascunho${errors>0?' · '+errors+' erro(s)':''}</strong>`);
   toast(`${created} produto(s) criado(s)`,'success');
   fetchShopifyProducts();
+}
+
+// ═══════════════════════════════════════════
+// SEPARAR VARIANTES — Fase 1: Inspeção
+// ═══════════════════════════════════════════
+// Estado do módulo (em memória, não persistido — operação one-shot)
+let svState = { candidates: [], selectedIds: new Set(), created: [], creating: false, archiving: false };
+
+function splitVariants() {
+  document.getElementById('topbar-actions').innerHTML='';
+  document.getElementById('content').innerHTML=`
+    <div style="max-width:1100px">
+      <div class="card" style="padding:20px;margin-bottom:16px">
+        <div style="font-family:'Syne',sans-serif;font-size:15px;font-weight:700;margin-bottom:8px">Fase 1 — Inspecionar estrutura</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:14px">
+          Confirma como os <code>options</code> estão nomeados antes de avançar. Apenas leitura.
+        </p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-ghost btn-sm" onclick="svInspectSample()">🔍 Inspecionar produto exemplo</button>
+          <button class="btn btn-ghost btn-sm" onclick="svInspectByTitle()">🔎 Inspecionar por título…</button>
+        </div>
+        <div id="sv-result" style="margin-top:14px"></div>
+      </div>
+
+      <div class="card" style="padding:20px;margin-bottom:16px">
+        <div style="font-family:'Syne',sans-serif;font-size:15px;font-weight:700;margin-bottom:8px">Fase 2 — Separar produtos em rascunhos</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:14px">
+          Lista produtos ativos com mais do que 1 variante. Para cada variante selecionada,
+          cria um produto novo em <strong>rascunho</strong> com título <code>&lt;título&gt; – &lt;Capacidade&gt; – &lt;Cor&gt;</code>,
+          mesma descrição, vendor, productType, imagens e tags estruturais (<code>sup:*</code>).
+          Tags de estado (<code>cat:*</code>, <code>last-seen:*</code>, <code>bsm:*</code>) ficam em branco
+          para a próxima análise as reaplicar. <strong>Originais nunca são apagados</strong> — apenas arquivados,
+          e só após confirmação explícita.
+        </p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-primary btn-sm" onclick="svListCandidates()">📋 Listar produtos com &gt;1 variante</button>
+        </div>
+        <div id="sv-list" style="margin-top:14px"></div>
+        <div id="sv-create-log" style="margin-top:14px"></div>
+        <div id="sv-archive" style="margin-top:14px"></div>
+      </div>
+    </div>`;
+}
+
+// ── Helpers ─────────────────────────────────────────────────
+function svOrderedOptionValues(selectedOptions) {
+  const rank = (name) => {
+    const n = (name||'').toLowerCase();
+    if (/capacidade|capacity|armazenamento|storage|memória|memoria|memory|tamanho|size/.test(n)) return 1;
+    if (/cor|color|colour/.test(n)) return 2;
+    return 3;
+  };
+  return [...selectedOptions]
+    .sort((a,b) => rank(a.name) - rank(b.name) || (a.name||'').localeCompare(b.name||''))
+    .map(o => o.value);
+}
+
+function svBuildTitle(baseTitle, selectedOptions) {
+  const ordered = svOrderedOptionValues(selectedOptions);
+  return [baseTitle.replace(/\s+/g,' ').trim(), ...ordered].join(' – ');
+}
+
+function svCleanTags(tags) {
+  return (tags||[]).filter(t =>
+    !t.startsWith('cat:') &&
+    !t.startsWith('last-seen:') &&
+    !t.startsWith('bsm:')
+  );
+}
+
+function svBuildMedia(variantImage, productImages) {
+  const seen = new Set();
+  const out = [];
+  if (variantImage?.url) { out.push({ originalSource: variantImage.url, mediaContentType: 'IMAGE', alt: variantImage.altText || '' }); seen.add(variantImage.url); }
+  for (const img of (productImages||[])) {
+    if (!img?.url || seen.has(img.url)) continue;
+    out.push({ originalSource: img.url, mediaContentType: 'IMAGE', alt: img.altText || '' });
+    seen.add(img.url);
+  }
+  return out;
+}
+
+// ── Listing candidates ──────────────────────────────────────
+async function svListCandidates() {
+  const out = document.getElementById('sv-list');
+  out.innerHTML = `<div style="color:var(--text2);font-size:13px">A carregar produtos ativos…</div>`;
+  try {
+    let cursor=null, hasNext=true, all=[], pages=0;
+    while (hasNext && pages<40) {
+      const q = `query($cursor:String){
+        products(first:100, after:$cursor, query:"status:active") {
+          pageInfo { hasNextPage endCursor }
+          edges { node {
+            id title handle status vendor productType descriptionHtml tags
+            variantsCount { count }
+            options { id name position values }
+            variants(first:100) { edges { node {
+              id title sku barcode price inventoryQuantity
+              inventoryItem { id }
+              selectedOptions { name value }
+              image { url altText }
+            } } }
+            images(first:20) { edges { node { url altText } } }
+          } }
+        }
+      }`;
+      const data = await shopifyGQL(q, { cursor });
+      const page = data.products;
+      for (const e of page.edges) {
+        if ((e.node.variantsCount?.count ?? 0) > 1) all.push(e.node);
+      }
+      hasNext = page.pageInfo.hasNextPage; cursor = page.pageInfo.endCursor; pages++;
+      out.innerHTML = `<div style="color:var(--text2);font-size:13px">A varrer… ${pages*100} produtos verificados, ${all.length} com &gt;1 variante.</div>`;
+    }
+    svState.candidates = all;
+    svState.selectedIds = new Set();
+    svRenderList();
+  } catch (e) {
+    out.innerHTML = `<div style="color:var(--red);font-size:13px">Erro: ${e.message}</div>`;
+  }
+}
+
+function svRenderList() {
+  const out = document.getElementById('sv-list');
+  if (!svState.candidates.length) { out.innerHTML = `<div style="color:var(--text2);font-size:13px">Sem produtos com mais do que 1 variante.</div>`; return; }
+  const rows = svState.candidates.map(p => {
+    const optsLabel = p.options.map(o => `<span style="background:var(--surface-alt,#f1f1f1);padding:2px 6px;border-radius:4px;font-size:11px;margin-right:4px"><strong>${o.name}</strong>: ${(o.values||[]).join(', ')}</span>`).join('');
+    const checked = svState.selectedIds.has(p.id) ? 'checked' : '';
+    const idAttr = p.id.replace(/[^a-zA-Z0-9]/g,'_');
+    return `<tr>
+      <td style="padding:8px;text-align:center"><input type="checkbox" ${checked} onchange="svToggle('${p.id}', this.checked)" id="svchk_${idAttr}"></td>
+      <td style="padding:8px;font-size:13px"><div style="font-weight:600">${p.title}</div><div style="font-size:11px;color:var(--text3)">${p.vendor||''} · ${p.productType||''}</div></td>
+      <td style="padding:8px;text-align:center;font-weight:700">${p.variantsCount.count}</td>
+      <td style="padding:8px">${optsLabel}</td>
+    </tr>`;
+  }).join('');
+  out.innerHTML = `
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+      <button class="btn btn-ghost btn-sm" onclick="svToggleAll(true)">Selecionar todos</button>
+      <button class="btn btn-ghost btn-sm" onclick="svToggleAll(false)">Limpar seleção</button>
+      <span style="color:var(--text3);font-size:12px" id="sv-count">${svState.selectedIds.size} de ${svState.candidates.length} selecionados</span>
+      <div style="margin-left:auto"></div>
+      <button class="btn btn-primary btn-sm" id="sv-create-btn" onclick="svExecuteCreate()" ${svState.selectedIds.size===0?'disabled':''}>🚀 Criar rascunhos das variantes selecionadas</button>
+    </div>
+    <div style="max-height:480px;overflow:auto;border:1px solid var(--border);border-radius:6px">
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead style="position:sticky;top:0;background:var(--surface);z-index:1">
+          <tr style="text-align:left;border-bottom:1px solid var(--border)">
+            <th style="padding:8px;width:40px"></th>
+            <th style="padding:8px">Produto</th>
+            <th style="padding:8px;text-align:center">#var</th>
+            <th style="padding:8px">Options</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+function svToggle(productId, checked) {
+  if (checked) svState.selectedIds.add(productId); else svState.selectedIds.delete(productId);
+  const c = document.getElementById('sv-count'); if (c) c.textContent = `${svState.selectedIds.size} de ${svState.candidates.length} selecionados`;
+  const btn = document.getElementById('sv-create-btn'); if (btn) btn.disabled = svState.selectedIds.size === 0;
+}
+
+function svToggleAll(checked) {
+  svState.selectedIds = checked ? new Set(svState.candidates.map(p=>p.id)) : new Set();
+  svRenderList();
+}
+
+// ── Create draft per variant ────────────────────────────────
+async function svExecuteCreate() {
+  if (svState.creating) return;
+  if (svState.selectedIds.size === 0) { toast('Nada selecionado','warn'); return; }
+  if (!confirm(`Criar rascunhos para todas as variantes de ${svState.selectedIds.size} produto(s)?\n\nNenhum produto original será arquivado nesta fase — apenas após confirmação posterior.`)) return;
+
+  svState.creating = true;
+  svState.created = [];
+  const logEl = document.getElementById('sv-create-log');
+  const archiveEl = document.getElementById('sv-archive');
+  archiveEl.innerHTML = '';
+  logEl.innerHTML = `<div class="card" style="padding:14px"><div style="font-weight:700;font-family:'Syne',sans-serif;margin-bottom:8px">Criação de rascunhos</div><div id="sv-log-body" style="font-family:ui-monospace,Menlo,monospace;font-size:12px;background:#0f1419;color:#e6e6e6;padding:10px;border-radius:6px;max-height:340px;overflow:auto"></div></div>`;
+  const log = (msg, color='') => {
+    const body = document.getElementById('sv-log-body');
+    body.innerHTML += `<div${color?` style="color:${color}"`:''}>${msg}</div>`;
+    body.scrollTop = body.scrollHeight;
+  };
+
+  try {
+    const locationId = await getLocationId();
+    if (!locationId) throw new Error('Não consegui obter Location ID');
+    log(`📍 Location: ${locationId}`);
+
+    const selected = svState.candidates.filter(p => svState.selectedIds.has(p.id));
+    let totalVariants = 0; selected.forEach(p => totalVariants += p.variants.edges.length);
+    log(`🎯 ${selected.length} produto(s) selecionado(s) · ${totalVariants} variante(s) a criar`);
+
+    let done = 0;
+    for (const original of selected) {
+      const cleanTags = svCleanTags(original.tags);
+      const productImages = original.images.edges.map(e=>e.node);
+      log(`<br>━━━ ${original.title} ━━━`);
+
+      for (const vEdge of original.variants.edges) {
+        const v = vEdge.node;
+        const newTitle = svBuildTitle(original.title, v.selectedOptions);
+        const media = svBuildMedia(v.image, productImages);
+
+        try {
+          // 1) productCreate (DRAFT, single-variant)
+          const createRes = await shopifyGQL(
+            `mutation($input:ProductInput!,$media:[CreateMediaInput!]){productCreate(input:$input,media:$media){product{id title variants(first:1){edges{node{id inventoryItem{id}}}}}userErrors{message field}}}`,
+            { input: {
+                title: newTitle,
+                vendor: original.vendor || undefined,
+                productType: original.productType || undefined,
+                descriptionHtml: original.descriptionHtml || undefined,
+                tags: cleanTags,
+                status: 'DRAFT',
+              },
+              media: media.length ? media : undefined
+            }
+          );
+          const newProd = createRes.productCreate.product;
+          const newVariantId = newProd?.variants?.edges?.[0]?.node?.id;
+          const newInvId = newProd?.variants?.edges?.[0]?.node?.inventoryItem?.id;
+          if (!newProd?.id || !newVariantId) throw new Error('productCreate sem variant id');
+
+          // 2) preço + barcode na variante default
+          await shopifyGQL(
+            `mutation($productId:ID!,$variants:[ProductVariantsBulkInput!]!){productVariantsBulkUpdate(productId:$productId,variants:$variants){userErrors{message field}}}`,
+            { productId: newProd.id, variants: [{ id: newVariantId, price: String(v.price), barcode: v.barcode || undefined }] }
+          );
+
+          // 3) SKU via inventoryItemUpdate (apenas se existir)
+          if (newInvId && v.sku) {
+            await updateVariantSKU(newInvId, v.sku);
+          }
+
+          // 4) stock no location BeeStore
+          if (newInvId && typeof v.inventoryQuantity === 'number') {
+            try { await updateVariantStock(newInvId, locationId, v.inventoryQuantity); }
+            catch (stockErr) { log(`  ⚠ stock falhou: ${stockErr.message}`, '#fbbf24'); }
+          }
+
+          svState.created.push({ originalId: original.id, originalTitle: original.title, draftId: newProd.id, draftTitle: newTitle, variantTitle: v.title });
+          done++;
+          log(`  ✅ [${done}/${totalVariants}] ${newTitle} → ${newProd.id}`, '#86efac');
+        } catch (err) {
+          log(`  ❌ ${newTitle}: ${err.message}`, '#fca5a5');
+          log(`<br>🛑 Parado por erro. ${svState.created.length} rascunho(s) criado(s) até agora.`, '#fca5a5');
+          svState.creating = false;
+          svRenderArchiveBlock(/*partial*/ true);
+          return;
+        }
+        await sleep(250);
+      }
+    }
+    log(`<br>🎉 Concluído: ${svState.created.length} rascunho(s) criado(s).`, '#86efac');
+    svState.creating = false;
+    svRenderArchiveBlock(false);
+  } catch (e) {
+    log(`<br>❌ Erro fatal: ${e.message}`, '#fca5a5');
+    svState.creating = false;
+  }
+}
+
+// ── Archive originals (after explicit confirmation) ────────
+function svRenderArchiveBlock(partial) {
+  const el = document.getElementById('sv-archive');
+  if (!svState.created.length) { el.innerHTML = ''; return; }
+  // Agrupa por original
+  const byOrig = new Map();
+  for (const c of svState.created) {
+    if (!byOrig.has(c.originalId)) byOrig.set(c.originalId, { title: c.originalTitle, drafts: [] });
+    byOrig.get(c.originalId).drafts.push(c);
+  }
+  const blocks = [...byOrig.entries()].map(([oid, info]) => `
+    <div style="border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:8px">
+      <div style="font-weight:700;font-size:13px;margin-bottom:6px">${info.title}</div>
+      <div style="font-size:11px;color:var(--text3);margin-bottom:6px">Original: <code>${oid}</code></div>
+      <ul style="margin:0;padding-left:18px;font-size:12px">
+        ${info.drafts.map(d => `<li>${d.draftTitle} <span style="color:var(--text3)">(${d.draftId})</span></li>`).join('')}
+      </ul>
+    </div>`).join('');
+
+  const adminBase = `https://admin.shopify.com/store/${(state.settings.shop||'').replace('.myshopify.com','')}/products`;
+  el.innerHTML = `
+    <div class="card" style="padding:18px;border:2px solid var(--yellow,#F5C400)">
+      <div style="font-family:'Syne',sans-serif;font-size:15px;font-weight:700;margin-bottom:8px">${partial?'⚠ Resumo parcial':'✅ Resumo'} dos rascunhos criados</div>
+      <p style="font-size:13px;color:var(--text2);margin-bottom:12px">
+        Verifica os rascunhos no <a href="${adminBase}?selectedView=all&query=status%3Adraft" target="_blank" style="color:var(--blue)">Shopify Admin → Produtos (rascunhos)</a> antes de confirmar o arquivamento dos originais.
+        <strong>Apenas os ${byOrig.size} produto(s) original(is) listado(s) abaixo</strong> serão arquivados (não eliminados).
+      </p>
+      ${blocks}
+      <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
+        <button class="btn btn-danger btn-sm" onclick="svArchiveOriginals()" ${partial?'':''}>📦 Confirmar e arquivar ${byOrig.size} original(is)</button>
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('sv-archive').innerHTML=''">Adiar</button>
+      </div>
+      ${partial?'<p style="font-size:12px;color:var(--orange);margin-top:10px">⚠ Houve um erro durante a criação. Só os originais cujas variantes foram <strong>todas</strong> criadas é que aparecem acima — os parciais foram excluídos.</p>':''}
+      <div id="sv-archive-log" style="margin-top:10px"></div>
+    </div>`;
+}
+
+async function svArchiveOriginals() {
+  if (svState.archiving) return;
+  // Apenas arquiva originais cujas TODAS as variantes foram convertidas — para não perder dados em casos parciais
+  const expectedByOrig = new Map();
+  svState.candidates.forEach(p => { if (svState.selectedIds.has(p.id)) expectedByOrig.set(p.id, p.variants.edges.length); });
+  const createdByOrig = new Map();
+  svState.created.forEach(c => createdByOrig.set(c.originalId, (createdByOrig.get(c.originalId)||0)+1));
+  const eligible = [...expectedByOrig.entries()].filter(([oid, count]) => createdByOrig.get(oid) === count).map(([oid])=>oid);
+
+  if (!eligible.length) { toast('Sem originais elegíveis para arquivar (criação ficou parcial em todos)','warn'); return; }
+  if (!confirm(`Arquivar ${eligible.length} produto(s) original(is)?\n\nOs produtos serão marcados como ARCHIVED (não publicados, não pesquisáveis na loja). NÃO são eliminados — podem ser reativados.`)) return;
+
+  svState.archiving = true;
+  const logEl = document.getElementById('sv-archive-log');
+  logEl.innerHTML = `<div style="font-family:ui-monospace,Menlo,monospace;font-size:12px;background:#0f1419;color:#e6e6e6;padding:10px;border-radius:6px;max-height:240px;overflow:auto" id="sv-arch-body"></div>`;
+  const log = (msg, color='') => {
+    const body = document.getElementById('sv-arch-body');
+    body.innerHTML += `<div${color?` style="color:${color}"`:''}>${msg}</div>`;
+    body.scrollTop = body.scrollHeight;
+  };
+
+  let ok=0, fail=0;
+  for (const oid of eligible) {
+    try {
+      await shopifyGQL(
+        `mutation($input:ProductUpdateInput!){productUpdate(product:$input){product{id status}userErrors{message field}}}`,
+        { input: { id: oid, status: 'ARCHIVED' } }
+      );
+      ok++;
+      log(`  ✅ Arquivado ${oid}`, '#86efac');
+    } catch (e) {
+      fail++;
+      log(`  ❌ ${oid}: ${e.message}`, '#fca5a5');
+    }
+    await sleep(250);
+  }
+  log(`<br>📦 Concluído: ${ok} arquivado(s)${fail?', '+fail+' falha(s)':''}.`, ok && !fail ? '#86efac' : '#fbbf24');
+  svState.archiving = false;
+  toast(`${ok} produto(s) arquivado(s)`, fail?'warn':'success');
+}
+
+async function svInspectSample() {
+  const out = document.getElementById('sv-result');
+  out.innerHTML = `<div class="card" style="padding:16px;color:var(--text2)">A procurar produto ativo com &gt;1 variante…</div>`;
+  try {
+    // Shopify search syntax NÃO suporta variants_count — filtramos client-side.
+    // Paginamos até encontrar o primeiro com count>1 (limite de segurança: 8 páginas = 2000 produtos).
+    let cursor=null, hasNext=true, scanned=0, pages=0, found=null;
+    while (hasNext && pages<8 && !found) {
+      const q = `query($cursor:String){
+        products(first:250, after:$cursor, query:"status:active") {
+          pageInfo { hasNextPage endCursor }
+          edges { node {
+            id title handle status vendor productType
+            variantsCount { count }
+            options { id name position values }
+            variants(first:50) { edges { node {
+              id title sku barcode price inventoryQuantity
+              inventoryItem { id }
+              selectedOptions { name value }
+              image { url }
+            } } }
+            images(first:5) { edges { node { url altText } } }
+          } }
+        }
+      }`;
+      const data = await shopifyGQL(q, { cursor });
+      const page = data.products;
+      for (const e of page.edges) {
+        scanned++;
+        if ((e.node.variantsCount?.count ?? 0) > 1) { found = e.node; break; }
+      }
+      hasNext = page.pageInfo.hasNextPage; cursor = page.pageInfo.endCursor; pages++;
+      out.innerHTML = `<div class="card" style="padding:16px;color:var(--text2)">A procurar… ${scanned} produto(s) verificados.</div>`;
+    }
+    if (!found) { out.innerHTML = `<div class="card" style="padding:16px">Nenhum produto ativo com mais do que 1 variante encontrado nos primeiros ${scanned}.</div>`; return; }
+    svRenderInspection(found);
+  } catch (e) {
+    out.innerHTML = `<div class="card" style="padding:16px;color:var(--red)">Erro: ${e.message}</div>`;
+  }
+}
+
+async function svInspectByTitle() {
+  const term = prompt('Termo do título a procurar (ex: "Galaxy S26"):');
+  if (!term) return;
+  const out = document.getElementById('sv-result');
+  out.innerHTML = `<div class="card" style="padding:16px;color:var(--text2)">A consultar Shopify…</div>`;
+  try {
+    const safe = term.replace(/"/g,'\\"');
+    const q = `{
+      products(first:1, query:"status:active AND title:*${safe}*") {
+        edges { node {
+          id title handle status vendor productType
+          variantsCount { count }
+          options { id name position values }
+          variants(first:50) { edges { node {
+            id title sku barcode price inventoryQuantity
+            inventoryItem { id }
+            selectedOptions { name value }
+            image { url }
+          } } }
+          images(first:5) { edges { node { url altText } } }
+        } }
+      }
+    }`;
+    const data = await shopifyGQL(q);
+    const node = data.products.edges[0]?.node;
+    if (!node) { out.innerHTML = `<div class="card" style="padding:16px">Sem resultados para "${term}".</div>`; return; }
+    svRenderInspection(node);
+  } catch (e) {
+    out.innerHTML = `<div class="card" style="padding:16px;color:var(--red)">Erro: ${e.message}</div>`;
+  }
+}
+
+function svRenderInspection(p) {
+  const out = document.getElementById('sv-result');
+  const variants = p.variants.edges.map(e=>e.node);
+  const optionsRows = p.options.map(o=>`
+    <tr>
+      <td><strong>${o.position}</strong></td>
+      <td><code style="background:var(--surface-alt,#f5f5f5);padding:2px 6px;border-radius:4px">${o.name}</code></td>
+      <td style="color:var(--text2);font-size:12px">${(o.values||[]).join(' · ')}</td>
+    </tr>`).join('');
+  const variantRows = variants.map(v=>{
+    const opts = v.selectedOptions.map(s=>`<code>${s.name}</code>=${s.value}`).join(' · ');
+    return `<tr>
+      <td style="font-size:12px">${v.title}</td>
+      <td style="font-size:12px">${v.sku||'—'}</td>
+      <td style="font-size:12px">${v.price}</td>
+      <td style="font-size:12px">${v.inventoryQuantity ?? '—'}</td>
+      <td style="font-size:12px">${opts}</td>
+    </tr>`;
+  }).join('');
+
+  out.innerHTML = `
+    <div class="card" style="padding:18px;margin-bottom:14px">
+      <div style="font-family:'Syne',sans-serif;font-size:14px;font-weight:700;margin-bottom:4px">${p.title}</div>
+      <div style="font-size:12px;color:var(--text3);margin-bottom:14px">
+        ${p.id} · vendor: ${p.vendor||'—'} · type: ${p.productType||'—'} · status: ${p.status} · variantes: <strong>${p.variantsCount?.count ?? variants.length}</strong>
+      </div>
+
+      <div style="font-family:'Syne',sans-serif;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--text3);margin:12px 0 6px">Options</div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="text-align:left;border-bottom:1px solid var(--border)">
+          <th style="padding:6px 8px">#</th><th style="padding:6px 8px">Nome</th><th style="padding:6px 8px">Valores</th>
+        </tr></thead>
+        <tbody>${optionsRows}</tbody>
+      </table>
+
+      <div style="font-family:'Syne',sans-serif;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--text3);margin:18px 0 6px">Variantes</div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="text-align:left;border-bottom:1px solid var(--border)">
+          <th style="padding:6px 8px">Título</th><th style="padding:6px 8px">SKU</th><th style="padding:6px 8px">Preço</th><th style="padding:6px 8px">Stock</th><th style="padding:6px 8px">selectedOptions</th>
+        </tr></thead>
+        <tbody>${variantRows}</tbody>
+      </table>
+
+      <div style="margin-top:18px;padding:12px;background:var(--yellow-bg,#FFF8DC);border-left:3px solid #F5C400;font-size:13px;color:var(--text2)">
+        <strong>Confirma:</strong> os nomes em <code>options[].name</code> acima
+        (e em <code>variants[].selectedOptions[].name</code>) são os que vamos usar para construir
+        os títulos dos produtos separados na Fase 2.
+      </div>
+    </div>
+
+    <div class="card" style="padding:16px">
+      <div style="font-family:'Syne',sans-serif;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--text3);margin-bottom:8px">JSON cru (copiar/colar para confirmar)</div>
+      <pre style="font-size:11px;background:#0f1419;color:#e6e6e6;padding:12px;border-radius:6px;overflow:auto;max-height:400px">${JSON.stringify(p, null, 2)}</pre>
+    </div>`;
 }
 
 // ═══════════════════════════════════════════
