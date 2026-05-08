@@ -6,6 +6,7 @@
 <title>BeeStore — Supplier Manager v3</title>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <style>
 :root {
   --bg: #F4F6FA; --surface: #FFFFFF; --panel: #F0F2F7; --border: #E2E6EF; --border2: #CDD3E0;
@@ -235,10 +236,41 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--blue); cur
 .progress-fill.animating { animation: pulse-bar 1.2s ease-in-out infinite; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+/* AUTH OVERLAY */
+.auth-overlay { position: fixed; inset: 0; background: var(--bg); z-index: 100; display: flex; align-items: center; justify-content: center; }
+.auth-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-lg); padding: 32px; width: 360px; }
+.auth-card h1 { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 22px; margin-bottom: 4px; }
+.auth-card .sub { color: var(--text2); font-size: 13px; margin-bottom: 24px; }
+.auth-card label { display: block; font-size: 12px; font-weight: 500; color: var(--text2); margin-bottom: 6px; }
+.auth-card input { width: 100%; padding: 10px 12px; border: 1px solid var(--border2); border-radius: 8px; font-family: inherit; font-size: 14px; margin-bottom: 14px; }
+.auth-card input:focus { outline: none; border-color: var(--blue); }
+.auth-card button { width: 100%; padding: 11px; background: var(--text); color: white; border: none; border-radius: 8px; font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer; }
+.auth-card button:hover { opacity: 0.9; }
+.auth-card button:disabled { opacity: 0.5; cursor: not-allowed; }
+.auth-error { color: var(--red); background: var(--red-bg); padding: 8px 12px; border-radius: 6px; font-size: 12px; margin-bottom: 12px; }
+.auth-user { display: flex; align-items: center; gap: 8px; padding: 8px 12px; font-size: 11px; color: var(--sidebar-text); border-top: 1px solid rgba(255,255,255,0.06); }
+.auth-user .email { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: 'DM Mono', monospace; }
+.auth-user button { background: transparent; color: var(--sidebar-text); border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; padding: 4px 8px; font-size: 11px; cursor: pointer; font-family: inherit; }
+.auth-user button:hover { background: rgba(255,255,255,0.06); }
 </style>
 </head>
 <body>
-<div class="app">
+<div class="auth-overlay" id="auth-overlay">
+  <div class="auth-card">
+    <h1>Bee-Supplier</h1>
+    <div class="sub">Inicia sessão para continuar</div>
+    <div id="auth-error" class="auth-error" style="display:none"></div>
+    <form onsubmit="authLogin(event)">
+      <label for="auth-email">Email</label>
+      <input type="email" id="auth-email" autocomplete="username" required>
+      <label for="auth-password">Password</label>
+      <input type="password" id="auth-password" autocomplete="current-password" required>
+      <button type="submit" id="auth-submit">Entrar</button>
+    </form>
+  </div>
+</div>
+
+<div class="app" id="app-root" style="display:none">
   <aside class="sidebar">
     <div class="logo">
       <div class="logo-text"><span>Bee</span><span>Store</span></div>
@@ -267,6 +299,10 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--blue); cur
         <div class="dot" id="cloud-dot"></div>
         <span id="cloud-text">Cloud —</span>
       </div>
+      <div class="auth-user" id="auth-user" style="display:none">
+        <span class="email" id="auth-user-email">—</span>
+        <button onclick="authLogout()">Sair</button>
+      </div>
     </div>
   </aside>
 
@@ -294,10 +330,65 @@ const DB = {
 };
 
 const DEFAULT_SETTINGS = {
-  shop:'', token:'', apiVersion:'2026-01',
+  shop:'bee-store-loja.myshopify.com', token:'', apiVersion:'2026-01',
   supabaseUrl:'https://zbsuyzeeuychzzcmgsyl.supabase.co',
   supabaseKey:'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inpic3V5emVldXljaHp6Y21nc3lsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2ODg2NzYsImV4cCI6MjA5MTI2NDY3Nn0.IwW9PHuUhklZOkLOH6ktCxBhcQbFUMjQkXHg8o1hAfA'
 };
+
+// ═══════════════════════════════════════════
+// AUTH (Supabase) — gate antes da app carregar
+// ═══════════════════════════════════════════
+const SUPA_URL = DEFAULT_SETTINGS.supabaseUrl;
+const SUPA_ANON = DEFAULT_SETTINGS.supabaseKey;
+const supa = window.supabase.createClient(SUPA_URL, SUPA_ANON, {
+  auth: { persistSession: true, autoRefreshToken: true, storage: localStorage, storageKey: 'bsm3_auth' }
+});
+
+// JWT do utilizador atual — usado em todas as chamadas (Worker + Supabase REST)
+async function getJWT() {
+  const { data } = await supa.auth.getSession();
+  return data?.session?.access_token || null;
+}
+async function getCurrentUser() {
+  const { data } = await supa.auth.getUser();
+  return data?.user || null;
+}
+
+async function authLogin(e) {
+  e.preventDefault();
+  const email = document.getElementById('auth-email').value.trim();
+  const password = document.getElementById('auth-password').value;
+  const errEl = document.getElementById('auth-error');
+  const btn = document.getElementById('auth-submit');
+  errEl.style.display = 'none';
+  btn.disabled = true; btn.textContent = 'A entrar…';
+  const { data, error } = await supa.auth.signInWithPassword({ email, password });
+  btn.disabled = false; btn.textContent = 'Entrar';
+  if (error) {
+    errEl.textContent = error.message; errEl.style.display = 'block';
+    return;
+  }
+  await mountApp(data.user);
+}
+
+async function authLogout() {
+  await supa.auth.signOut();
+  location.reload();
+}
+
+async function mountApp(user) {
+  document.getElementById('auth-overlay').style.display = 'none';
+  document.getElementById('app-root').style.display = 'flex';
+  document.getElementById('auth-user').style.display = 'flex';
+  document.getElementById('auth-user-email').textContent = user.email;
+  if (typeof boot === 'function') await boot();
+}
+
+// On load: se já há sessão válida, pula login
+window.addEventListener('DOMContentLoaded', async () => {
+  const user = await getCurrentUser();
+  if (user) await mountApp(user);
+});
 
 let state = {
   page: 'dashboard',
@@ -348,7 +439,7 @@ async function cloudUpsert(key, value) {
     method: 'POST',
     headers: {
       'apikey': supabaseKey,
-      'Authorization': `Bearer ${supabaseKey}`,
+      'Authorization': `Bearer ${(await getJWT()) || supabaseKey}`,
       'Content-Type': 'application/json',
       'Prefer': 'resolution=merge-duplicates'
     },
@@ -365,7 +456,7 @@ async function cloudFetchSize(key) {
   const { supabaseUrl, supabaseKey } = state.settings;
   try {
     const res = await fetch(`${supabaseUrl}/rest/v1/bee_data?key=eq.${encodeURIComponent(key)}&select=value`, {
-      headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
+      headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${(await getJWT()) || supabaseKey}` }
     });
     if (!res.ok) return null; // erro de rede → conservador (aborta upsert)
     const rows = await res.json();
@@ -442,7 +533,7 @@ async function loadFromCloud() {
   if (!supabaseUrl || !supabaseKey) return false;
   try {
     const res = await fetch(`${supabaseUrl}/rest/v1/bee_data?select=key,value`, {
-      headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
+      headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${(await getJWT()) || supabaseKey}` }
     });
     if (!res.ok) return false;
     const rows = await res.json();
@@ -455,7 +546,7 @@ async function loadFromCloud() {
     objectKeys.forEach(k => { if (map[k] && typeof map[k]==='object' && !Array.isArray(map[k])) state[k] = map[k]; });
     // Restaura settings da cloud mas preserva as credenciais locais (supabase + shopify token)
     if (map.settings && typeof map.settings==='object') {
-      const keep = { supabaseUrl: state.settings.supabaseUrl, supabaseKey: state.settings.supabaseKey, token: state.settings.token };
+      const keep = { supabaseUrl: state.settings.supabaseUrl, supabaseKey: state.settings.supabaseKey };
       state.settings = { ...DEFAULT_SETTINGS, ...map.settings, ...keep };
     }
     // Persiste no localStorage para offline
@@ -482,7 +573,7 @@ async function testCloudConn() {
   if(el) el.textContent = 'A testar...';
   try {
     const res = await fetch(`${supabaseUrl}/rest/v1/bee_data?limit=1`, {
-      headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
+      headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${(await getJWT()) || supabaseKey}` }
     });
     if (res.ok) { if(el) el.innerHTML=`<span style="color:var(--green)">✓ Ligado ao Supabase</span>`; updateCloudStatus(true); }
     else { if(el) el.innerHTML=`<span style="color:var(--red)">✕ Erro ${res.status}</span>`; }
@@ -548,11 +639,11 @@ const KK_PROXY = 'https://zbsuyzeeuychzzcmgsyl.supabase.co/functions/v1/kk-searc
 const KK_BUILD_ID_KEY = 'kk_build_id';
 
 async function shopifyGQL(query, variables={}) {
-  const { shop, token, apiVersion } = state.settings;
-  if (!shop || !token) throw new Error('Configura a loja nas Configurações primeiro.');
+  const jwt = await getJWT();
+  if (!jwt) throw new Error('Sessão expirada. Faz login outra vez.');
   const resp = await fetch(PROXY, {
     method: 'POST',
-    headers: { 'Content-Type':'application/json', 'X-Shopify-Shop':shop, 'X-Shopify-Token':token, 'X-Shopify-Version':apiVersion },
+    headers: { 'Content-Type':'application/json', 'Authorization': `Bearer ${jwt}` },
     body: JSON.stringify({ query, variables }),
   });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -617,12 +708,14 @@ async function updateVariantPrice(productId, variantId, price) {
 }
 
 async function updateVariantStock(inventoryItemId, locationId, newQty) {
-  const { shop, token, apiVersion } = state.settings;
+  const { apiVersion } = state.settings;
+  const jwt = await getJWT();
+  if (!jwt) throw new Error('Sessão expirada. Faz login outra vez.');
   const invItemNumId = inventoryItemId.replace('gid://shopify/InventoryItem/', '');
   const locationNumId = locationId.replace('gid://shopify/Location/', '');
   const resp = await fetch(PROXY, {
     method: 'POST',
-    headers: { 'Content-Type':'application/json', 'X-Shopify-Shop':shop, 'X-Shopify-Token':token, 'X-Shopify-Version':apiVersion, 'X-Rest-Path':`/admin/api/${apiVersion}/inventory_levels/set.json` },
+    headers: { 'Content-Type':'application/json', 'Authorization': `Bearer ${jwt}`, 'X-Rest-Path':`/admin/api/${apiVersion}/inventory_levels/set.json` },
     body: JSON.stringify({ location_id:parseInt(locationNumId), inventory_item_id:parseInt(invItemNumId), available:newQty })
   });
   if(!resp.ok) {
@@ -1067,8 +1160,9 @@ function updateBadges() {
   if(hb){ const n=hc.warn+hc.crit+hc.unknown; hb.textContent=n; hb.style.display=n>0?'flex':'none'; }
 
   const d = document.getElementById('conn-dot'), t = document.getElementById('conn-text');
-  if(state.settings.shop&&state.settings.token){ d.className='dot ok'; t.textContent=state.settings.shop.replace('.myshopify.com',''); }
-  else{ d.className='dot err'; t.textContent='Não ligado'; }
+  // Após auth, a ligação Shopify é gerida pelo Worker — assume OK se há sessão
+  if (state.settings.shop) { d.className='dot ok'; t.textContent=state.settings.shop.replace('.myshopify.com',''); }
+  else { d.className='dot err'; t.textContent='Não ligado'; }
 }
 
 function computeHealthCounts() {
@@ -3055,7 +3149,7 @@ function crReset() { cState={rows:[],colMap:{},products:[],variantGroups:[],step
 async function crCreate() {
   const toCreate=cState.products.filter(p=>p.selected);
   if(!toCreate.length){toast('Nenhum produto selecionado','error');return;}
-  if(!state.settings.shop||!state.settings.token){toast('Configura a ligação Shopify primeiro','error');return;}
+  if(!(await getJWT())){toast('Sessão expirada — faz login outra vez','error');return;}
   document.getElementById('cr-step-review').style.display='none';
   document.getElementById('cr-step-progress').style.display='block';
   const log=(msg)=>{const el=document.getElementById('cr-log');if(el){el.innerHTML+=msg+'<br>';el.scrollTop=el.scrollHeight;}};
@@ -3570,19 +3664,12 @@ function settings() {
       <div style="margin-bottom:24px">
         <div class="settings-label">Ligação Shopify</div>
         <div class="card">
-          <div class="form-grid">
-            <div class="form-group"><label>Shop Domain</label><input type="text" id="cfg-shop" value="${state.settings.shop}" placeholder="beestore.myshopify.com"></div>
-            <div class="form-group"><label>Access Token (shpat_...)</label><input type="password" id="cfg-token" value="${state.settings.token}" placeholder="shpat_xxxxxxxx"></div>
-            <div class="form-group"><label>Versão da API</label>
-              <select id="cfg-version">
-                <option value="2026-01" ${state.settings.apiVersion==='2026-01'?'selected':''}>2026-01 (mais recente)</option>
-                <option value="2025-10" ${state.settings.apiVersion==='2025-10'?'selected':''}>2025-10</option>
-              </select>
-            </div>
-            <div style="display:flex;gap:8px">
-              <button class="btn btn-primary" onclick="saveSettings()">Guardar</button>
-              <button class="btn btn-ghost" onclick="testConn()">Testar Ligação</button>
-            </div>
+          <p style="font-size:13px;color:var(--text2);margin-bottom:12px">
+            O token Shopify está agora <strong>server-side</strong> (Cloudflare Worker).
+            Não há nada para configurares aqui — basta estares autenticado.
+          </p>
+          <div style="display:flex;gap:8px;align-items:center">
+            <button class="btn btn-ghost" onclick="testConn()">Testar Ligação</button>
             <div id="conn-result" style="font-size:13px"></div>
           </div>
         </div>
@@ -3675,7 +3762,7 @@ function settings() {
 }
 
 function saveSettings() {
-  state.settings = { ...state.settings, shop:document.getElementById('cfg-shop')?.value.trim(), token:document.getElementById('cfg-token')?.value.trim(), apiVersion:document.getElementById('cfg-version')?.value };
+  // Shop/token agora server-side; só apiVersion fica do lado do cliente (informativo)
   save(); updateBadges(); toast('Configurações guardadas','success');
 }
 function saveSettingsCloud() {
@@ -3693,7 +3780,7 @@ function saveScraperKey() {
   };
   save(); toast('Configurações KuantoKusta guardadas','success');
 }
-async function testConn() { saveSettings(); document.getElementById('conn-result').textContent='A testar...'; const r=await testConnection(); document.getElementById('conn-result').innerHTML=r.ok?`<span style="color:var(--green)">✓ Ligado a: ${r.name}</span>`:`<span style="color:var(--red)">✕ ${r.error}</span>`; }
+async function testConn() { document.getElementById('conn-result').textContent='A testar...'; const r=await testConnection(); document.getElementById('conn-result').innerHTML=r.ok?`<span style="color:var(--green)">✓ Ligado a: ${r.name}</span>`:`<span style="color:var(--red)">✕ ${r.error}</span>`; }
 
 function exportData() {
   const data={suppliers:state.suppliers,alerts:state.alerts,uploadHistory:state.uploadHistory,skuHealth:state.skuHealth,matches:state.matches};
@@ -4976,9 +5063,9 @@ function tkRenderSemOrigem() {
 }
 
 // ═══════════════════════════════════════════
-// INIT
+// INIT — chamada por mountApp() após login
 // ═══════════════════════════════════════════
-(async () => {
+async function boot() {
   // Carrega dados da cloud ANTES de qualquer bootstrap — a cloud é a fonte da verdade
   const loaded = await loadFromCloud();
   if (loaded) toast('Dados carregados da cloud ☁','success');
@@ -4989,7 +5076,7 @@ function tkRenderSemOrigem() {
   }
   await runMigrationIfNeeded();
   navigate('dashboard');
-})();
+}
 </script>
 </body>
 </html>
