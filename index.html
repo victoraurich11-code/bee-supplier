@@ -573,7 +573,7 @@ async function loadFromCloud() {
     objectKeys.forEach(k => { if (map[k] && typeof map[k]==='object' && !Array.isArray(map[k])) state[k] = map[k]; });
     // Restaura settings da cloud mas preserva as credenciais locais (supabase + shopify token)
     if (map.settings && typeof map.settings==='object') {
-      const keep = { supabaseUrl: state.settings.supabaseUrl, supabaseKey: state.settings.supabaseKey };
+      const keep = { supabaseUrl: state.settings.supabaseUrl, supabaseKey: state.settings.supabaseKey, token: state.settings.token };
       state.settings = { ...DEFAULT_SETTINGS, ...map.settings, ...keep };
     }
     // Persiste no localStorage para offline
@@ -666,11 +666,11 @@ const KK_PROXY = 'https://zbsuyzeeuychzzcmgsyl.supabase.co/functions/v1/kk-searc
 const KK_BUILD_ID_KEY = 'kk_build_id';
 
 async function shopifyGQL(query, variables={}) {
-  const jwt = await getJWT();
-  if (!jwt) throw new Error('Sessão expirada. Faz login outra vez.');
+  const { shop, token, apiVersion } = state.settings;
+  if (!shop || !token) throw new Error('Configura a loja nas Configurações primeiro.');
   const resp = await fetch(PROXY, {
     method: 'POST',
-    headers: { 'Content-Type':'application/json', 'Authorization': `Bearer ${jwt}` },
+    headers: { 'Content-Type':'application/json', 'X-Shopify-Shop':shop, 'X-Shopify-Token':token, 'X-Shopify-Version':apiVersion },
     body: JSON.stringify({ query, variables }),
   });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -735,14 +735,13 @@ async function updateVariantPrice(productId, variantId, price) {
 }
 
 async function updateVariantStock(inventoryItemId, locationId, newQty) {
-  const { apiVersion } = state.settings;
-  const jwt = await getJWT();
-  if (!jwt) throw new Error('Sessão expirada. Faz login outra vez.');
+  const { shop, token, apiVersion } = state.settings;
+  if (!shop || !token) throw new Error('Configura a loja nas Configurações primeiro.');
   const invItemNumId = inventoryItemId.replace('gid://shopify/InventoryItem/', '');
   const locationNumId = locationId.replace('gid://shopify/Location/', '');
   const resp = await fetch(PROXY, {
     method: 'POST',
-    headers: { 'Content-Type':'application/json', 'Authorization': `Bearer ${jwt}`, 'X-Rest-Path':`/admin/api/${apiVersion}/inventory_levels/set.json` },
+    headers: { 'Content-Type':'application/json', 'X-Shopify-Shop':shop, 'X-Shopify-Token':token, 'X-Shopify-Version':apiVersion, 'X-Rest-Path':`/admin/api/${apiVersion}/inventory_levels/set.json` },
     body: JSON.stringify({ location_id:parseInt(locationNumId), inventory_item_id:parseInt(invItemNumId), available:newQty })
   });
   if(!resp.ok) {
