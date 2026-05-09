@@ -3690,13 +3690,16 @@ function settings() {
       <div style="margin-bottom:24px">
         <div class="settings-label">Ligação Shopify</div>
         <div class="card">
-          <p style="font-size:13px;color:var(--text2);margin-bottom:12px">
-            O token Shopify está agora <strong>server-side</strong> (Cloudflare Worker).
-            Não há nada para configurares aqui — basta estares autenticado.
-          </p>
-          <div style="display:flex;gap:8px;align-items:center">
-            <button class="btn btn-ghost" onclick="testConn()">Testar Ligação</button>
-            <div id="conn-result" style="font-size:13px"></div>
+          <div class="form-grid">
+            <div class="form-group"><label>Shop domain</label><input type="text" id="cfg-shop" value="${state.settings.shop||''}" placeholder="bee-store-loja.myshopify.com"></div>
+            <div class="form-group"><label>Admin API token</label><input type="password" id="cfg-token" value="${state.settings.token||''}" placeholder="shpat_..."></div>
+            <div class="form-group"><label>API Version</label><input type="text" id="cfg-version" value="${state.settings.apiVersion||'2026-01'}" placeholder="2026-01"></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+              <button class="btn btn-primary btn-sm" onclick="saveSettings()">Guardar</button>
+              <button class="btn btn-ghost btn-sm" onclick="testConn()">Testar Ligação</button>
+              <div id="conn-result" style="font-size:13px"></div>
+            </div>
+            <p style="font-size:11px;color:var(--text3);margin-top:4px">O token fica só no teu browser e nunca é enviado para o GitHub. (Migração para server-side está planeada.)</p>
           </div>
         </div>
       </div>
@@ -3788,7 +3791,12 @@ function settings() {
 }
 
 function saveSettings() {
-  // Shop/token agora server-side; só apiVersion fica do lado do cliente (informativo)
+  state.settings = {
+    ...state.settings,
+    shop: document.getElementById('cfg-shop')?.value.trim() || state.settings.shop,
+    token: document.getElementById('cfg-token')?.value.trim() || state.settings.token,
+    apiVersion: document.getElementById('cfg-version')?.value.trim() || state.settings.apiVersion || '2026-01',
+  };
   save(); updateBadges(); toast('Configurações guardadas','success');
 }
 function saveSettingsCloud() {
