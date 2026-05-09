@@ -362,13 +362,40 @@ async function authLogin(e) {
   const btn = document.getElementById('auth-submit');
   errEl.style.display = 'none';
   btn.disabled = true; btn.textContent = 'A entrar…';
-  const { data, error } = await supa.auth.signInWithPassword({ email, password });
-  btn.disabled = false; btn.textContent = 'Entrar';
-  if (error) {
-    errEl.textContent = error.message; errEl.style.display = 'block';
-    return;
+  try {
+    let res = await supa.auth.signInWithPassword({ email, password });
+    // Se localStorage estiver cheio, supabase-js falha a gravar a sessão.
+    // Limpa o cache pesado e tenta outra vez.
+    if (res.error && /quota|QuotaExceeded/i.test(res.error.message || '')) {
+      localStorage.removeItem('bsm3_shopifyProducts');
+      res = await supa.auth.signInWithPassword({ email, password });
+    }
+    const { data, error } = res;
+    if (error) {
+      errEl.textContent = error.message; errEl.style.display = 'block';
+      return;
+    }
+    await mountApp(data.user);
+  } catch (err) {
+    // QuotaExceededError vem como exceção (não como res.error). Tenta recuperar.
+    if (err && /quota|QuotaExceeded/i.test(err.name + ' ' + err.message)) {
+      try {
+        localStorage.removeItem('bsm3_shopifyProducts');
+        const { data, error } = await supa.auth.signInWithPassword({ email, password });
+        if (error) { errEl.textContent = error.message; errEl.style.display = 'block'; return; }
+        await mountApp(data.user);
+        return;
+      } catch (err2) {
+        errEl.textContent = 'Armazenamento local cheio. Limpa o cache do navegador e tenta de novo.';
+        errEl.style.display = 'block';
+        return;
+      }
+    }
+    errEl.textContent = (err && err.message) || 'Erro inesperado no login.';
+    errEl.style.display = 'block';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Entrar';
   }
-  await mountApp(data.user);
 }
 
 async function authLogout() {
