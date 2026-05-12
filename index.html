@@ -338,6 +338,14 @@ const DEFAULT_SETTINGS = {
 // ═══════════════════════════════════════════
 // AUTH (Supabase) — gate antes da app carregar
 // ═══════════════════════════════════════════
+// Limpeza única de detritos de versões antigas (bsm_, bsm2_) que entupiam
+// o localStorage (~5MB) e impediam o Supabase Auth de gravar a sessão.
+try {
+  Object.keys(localStorage)
+    .filter(k => /^bsm(2)?_/.test(k))
+    .forEach(k => localStorage.removeItem(k));
+} catch {}
+
 const SUPA_URL = DEFAULT_SETTINGS.supabaseUrl;
 const SUPA_ANON = DEFAULT_SETTINGS.supabaseKey;
 const supa = window.supabase.createClient(SUPA_URL, SUPA_ANON, {
