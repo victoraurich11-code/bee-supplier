@@ -288,6 +288,7 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--blue); cur
       <div class="nav-item" onclick="navigate('tek4life')" id="nav-tek4life"><span class="icon">📱</span> Tek4life <span class="nav-badge yellow" id="badge-tek4life" style="display:none">!</span></div>
       <div class="nav-item" onclick="navigate('create')" id="nav-create"><span class="icon">✚</span> Criar Produtos</div>
       <div class="nav-item" onclick="navigate('splitVariants')" id="nav-splitVariants"><span class="icon">🔀</span> Separar Variantes</div>
+      <div class="nav-item" onclick="navigate('images')" id="nav-images"><span class="icon">🖼</span> Normalizar Imagens</div>
       <div class="nav-item" onclick="navigate('settings')" id="nav-settings"><span class="icon">⚙</span> Configurações</div>
     </nav>
     <div class="sidebar-footer">
@@ -332,7 +333,14 @@ const DB = {
 const DEFAULT_SETTINGS = {
   shop:'bee-store-loja.myshopify.com', token:'', apiVersion:'2026-01',
   supabaseUrl:'https://zbsuyzeeuychzzcmgsyl.supabase.co',
-  supabaseKey:'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inpic3V5emVldXljaHp6Y21nc3lsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2ODg2NzYsImV4cCI6MjA5MTI2NDY3Nn0.IwW9PHuUhklZOkLOH6ktCxBhcQbFUMjQkXHg8o1hAfA'
+  supabaseKey:'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inpic3V5emVldXljaHp6Y21nc3lsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2ODg2NzYsImV4cCI6MjA5MTI2NDY3Nn0.IwW9PHuUhklZOkLOH6ktCxBhcQbFUMjQkXHg8o1hAfA',
+  // Normalização de imagens (módulo "Normalizar Imagens")
+  imgCanvasSize: 2000,        // px (quadrado canvasSize × canvasSize)
+  imgPaddingPct: 10,          // % de margem em volta (produto ocupa 100-2*pad %)
+  imgWhiteThreshold: 245,     // luminância 0-255; pixel acima disto = fundo branco
+  imgAlphaThreshold: 10,      // se imagem já tem alpha, pixel com alpha < isto = transparente
+  imgQuality: 0.9,            // qualidade WebP 0-1
+  imgBatchSize: 5,            // máximo de produtos por batch (rate limit Shopify)
 };
 
 // ═══════════════════════════════════════════
@@ -1174,13 +1182,13 @@ function navigate(page) {
   state.page = page;
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   document.getElementById('nav-'+page)?.classList.add('active');
-  const titles = { dashboard:'Dashboard', suppliers:'Fornecedores', upload:'Processar Ficheiro', health:'Saúde do Catálogo', alerts:'Alertas', mercado:'Mercado (KuantoKusta)', matching:'Matching Inteligente', tek4life:'Tek4life — iPhones Grade A+', create:'Criar Produtos', splitVariants:'Separar Variantes — Inspeção', settings:'Configurações' };
+  const titles = { dashboard:'Dashboard', suppliers:'Fornecedores', upload:'Processar Ficheiro', health:'Saúde do Catálogo', alerts:'Alertas', mercado:'Mercado (KuantoKusta)', matching:'Matching Inteligente', tek4life:'Tek4life — iPhones Grade A+', create:'Criar Produtos', splitVariants:'Separar Variantes — Inspeção', images:'Normalizar Imagens', settings:'Configurações' };
   document.getElementById('page-title').textContent = titles[page]||page;
   render();
 }
 
 function render() {
-  ({ dashboard, suppliers, upload, health, alerts, mercado, matching, tek4life, create, splitVariants, settings })[state.page]?.();
+  ({ dashboard, suppliers, upload, health, alerts, mercado, matching, tek4life, create, splitVariants, images, settings })[state.page]?.();
   updateBadges();
 }
 
@@ -3689,6 +3697,430 @@ function svRenderInspection(p) {
 }
 
 // ═══════════════════════════════════════════
+// NORMALIZAÇÃO DE IMAGENS
+// Trim do fundo branco/transparente → centrar produto em canvas
+// quadrado transparente do tamanho-alvo → exportar WebP.
+// ═══════════════════════════════════════════
+const imgState = {
+  products: [],        // [{ productId, title, image: {id, url, altText, width, height}, preview: dataUrl|null, bbox, status }]
+  loading: false,
+  processing: false,
+  selected: new Set(), // productIds selecionados para batch
+  log: [],             // últimas mensagens
+};
+
+function imgLog(msg, type='info') {
+  imgState.log.unshift({ msg, type, t: Date.now() });
+  imgState.log = imgState.log.slice(0, 50);
+  const el = document.getElementById('img-log');
+  if (el) el.innerHTML = imgState.log.map(l =>
+    `<div style="font-size:11px;color:var(--${l.type==='error'?'red':l.type==='success'?'green':'text2'});margin-bottom:4px"><span style="opacity:0.5">${new Date(l.t).toLocaleTimeString()}</span> ${l.msg}</div>`).join('');
+}
+
+async function loadImageBitmap(url) {
+  // Shopify CDN tem CORS *, dá para fetch direto
+  const resp = await fetch(url, { mode: 'cors' });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status} ao buscar imagem`);
+  const blob = await resp.blob();
+  return await createImageBitmap(blob);
+}
+
+function findBoundingBox(imageData, whiteThreshold, alphaThreshold) {
+  // Devolve {x,y,w,h} do conteúdo "não-fundo" na ImageData.
+  // Fundo = alpha < alphaThreshold OU (alpha alto E luminância > whiteThreshold).
+  const { data, width, height } = imageData;
+  let minX = width, minY = height, maxX = -1, maxY = -1;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      const a = data[i + 3];
+      if (a < alphaThreshold) continue; // transparente → fundo
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      // luminância perceptual
+      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+      if (lum > whiteThreshold) continue; // branco-quase → fundo
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+  }
+  if (maxX < 0) return null; // imagem inteira é fundo
+  return { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
+}
+
+async function normalizeImage(bitmap, opts) {
+  const { canvasSize, paddingPct, whiteThreshold, alphaThreshold, quality } = opts;
+
+  // 1) Lê pixels num canvas auxiliar para análise
+  const ax = new OffscreenCanvas(bitmap.width, bitmap.height);
+  const axctx = ax.getContext('2d', { willReadFrequently: true });
+  axctx.drawImage(bitmap, 0, 0);
+  const imageData = axctx.getImageData(0, 0, bitmap.width, bitmap.height);
+
+  // 2) Bounding box
+  const bbox = findBoundingBox(imageData, whiteThreshold, alphaThreshold);
+  if (!bbox) throw new Error('Imagem só tem fundo — nada para normalizar');
+
+  // 3) Heurística "fundo cheio": se bbox cobre >97% da área, provavelmente
+  //    o fundo não é branco/transparente — não vamos cortar.
+  const coverage = (bbox.w * bbox.h) / (bitmap.width * bitmap.height);
+  const isFullBg = coverage > 0.97;
+
+  // 4) Canvas-alvo quadrado, transparente
+  const out = new OffscreenCanvas(canvasSize, canvasSize);
+  const ctx = out.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+
+  // 5) Calcula escala: o produto ocupa (100 - 2·pad)% do canvas (maior dimensão)
+  const inner = canvasSize * (1 - 2 * paddingPct / 100);
+  const scale = inner / Math.max(bbox.w, bbox.h);
+  const drawW = bbox.w * scale;
+  const drawH = bbox.h * scale;
+  const dx = (canvasSize - drawW) / 2;
+  const dy = (canvasSize - drawH) / 2;
+
+  // 6) Desenha só a região da bbox, centrada
+  ctx.drawImage(bitmap, bbox.x, bbox.y, bbox.w, bbox.h, dx, dy, drawW, drawH);
+
+  // 7) Exporta WebP
+  const blob = await out.convertToBlob({ type: 'image/webp', quality });
+  return { blob, bbox, isFullBg, coverage };
+}
+
+async function previewNormalize(product, opts) {
+  // Versão pequena (400px) para mostrar na lista
+  const bitmap = await loadImageBitmap(product.image.url);
+  const smallOpts = { ...opts, canvasSize: 400 };
+  const { blob, bbox, isFullBg } = await normalizeImage(bitmap, smallOpts);
+  bitmap.close();
+  return { dataUrl: URL.createObjectURL(blob), bbox, isFullBg };
+}
+
+// ── Fetch dos produtos com imagens ─────────────────────
+async function imgFetchProducts() {
+  imgState.loading = true;
+  imgLog('A carregar produtos com imagens da Shopify…');
+  render();
+  try {
+    const products = [];
+    let cursor = null, hasNext = true;
+    while (hasNext) {
+      const q = `query($cursor:String){products(first:100,after:$cursor){pageInfo{hasNextPage endCursor} edges{node{id title vendor media(first:1){edges{node{... on MediaImage{id image{url altText width height}}}}}}}}}`;
+      const data = await shopifyGQL(q, { cursor });
+      const page = data.products;
+      for (const edge of page.edges) {
+        const n = edge.node;
+        const m = n.media?.edges?.[0]?.node;
+        const img = m?.image;
+        if (!img?.url) continue;
+        products.push({
+          productId: n.id,
+          title: n.title,
+          vendor: n.vendor,
+          image: { mediaId: m.id, url: img.url, altText: img.altText || '', width: img.width, height: img.height },
+          preview: null, bbox: null, isFullBg: false, status: 'pending'
+        });
+      }
+      hasNext = page.pageInfo.hasNextPage; cursor = page.pageInfo.endCursor;
+      if (products.length > 8000) break;
+    }
+    imgState.products = products;
+    imgLog(`${products.length} produtos carregados`, 'success');
+  } catch (e) {
+    imgLog(`Erro: ${e.message}`, 'error');
+  } finally {
+    imgState.loading = false;
+    render();
+  }
+}
+
+async function imgComputePreviews(only = null) {
+  // Calcula thumb normalizado para todos os produtos (ou só os do array `only`)
+  const opts = {
+    canvasSize: 400,
+    paddingPct: state.settings.imgPaddingPct,
+    whiteThreshold: state.settings.imgWhiteThreshold,
+    alphaThreshold: state.settings.imgAlphaThreshold,
+    quality: 0.8,
+  };
+  const items = only ? imgState.products.filter(p => only.includes(p.productId)) : imgState.products;
+  let done = 0;
+  for (const p of items) {
+    if (p.preview) { done++; continue; }
+    try {
+      const { dataUrl, bbox, isFullBg } = await previewNormalize(p, opts);
+      p.preview = dataUrl; p.bbox = bbox; p.isFullBg = isFullBg;
+      p.status = isFullBg ? 'warn' : 'ready';
+    } catch (e) {
+      p.status = 'error';
+      p.error = e.message;
+    }
+    done++;
+    if (done % 5 === 0) {
+      imgLog(`Previews: ${done}/${items.length}`);
+      // re-render para mostrar progresso
+      const el = document.getElementById('img-grid');
+      if (el) el.innerHTML = renderImgGrid();
+    }
+  }
+  imgLog(`Previews concluídos (${done})`, 'success');
+  render();
+}
+
+// ── Shopify staged upload + media replace ──────────────
+async function stagedUploadCreate(filename, mimeType, fileSize) {
+  const q = `mutation($input:[StagedUploadInput!]!){stagedUploadsCreate(input:$input){stagedTargets{url resourceUrl parameters{name value}} userErrors{message field}}}`;
+  const input = [{ resource: 'IMAGE', filename, mimeType, fileSize: String(fileSize), httpMethod: 'POST' }];
+  const data = await shopifyGQL(q, { input });
+  const target = data.stagedUploadsCreate.stagedTargets[0];
+  if (!target) throw new Error('stagedUploadsCreate sem target');
+  return target;
+}
+
+async function uploadToStaged(target, blob, filename) {
+  const fd = new FormData();
+  target.parameters.forEach(p => fd.append(p.name, p.value));
+  fd.append('file', blob, filename);
+  const resp = await fetch(target.url, { method: 'POST', body: fd });
+  if (!resp.ok && resp.status !== 201 && resp.status !== 204) {
+    const txt = await resp.text().catch(()=>'');
+    throw new Error(`Upload staged ${resp.status}: ${txt.slice(0,200)}`);
+  }
+  return target.resourceUrl;
+}
+
+async function productCreateMediaFromStaged(productId, resourceUrl, alt) {
+  const q = `mutation($productId:ID!,$media:[CreateMediaInput!]!){productCreateMedia(productId:$productId,media:$media){media{id status ... on MediaImage{image{url}}} mediaUserErrors{message field}}}`;
+  const media = [{ originalSource: resourceUrl, alt: alt || '', mediaContentType: 'IMAGE' }];
+  const data = await shopifyGQL(q, { productId, media });
+  const errs = data.productCreateMedia.mediaUserErrors;
+  if (errs && errs.length) throw new Error('createMedia: ' + errs[0].message);
+  return data.productCreateMedia.media[0];
+}
+
+async function waitForMediaReady(productId, mediaId, timeoutMs = 60000) {
+  // Shopify processa o ficheiro de forma assíncrona; polling até status READY
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const q = `query($id:ID!){node(id:$id){... on MediaImage{id status image{url}}}}`;
+    const data = await shopifyGQL(q, { id: mediaId });
+    const status = data.node?.status;
+    if (status === 'READY') return data.node;
+    if (status === 'FAILED') throw new Error('Shopify falhou a processar o ficheiro');
+    await new Promise(r => setTimeout(r, 1500));
+  }
+  throw new Error('Timeout à espera do processamento da imagem');
+}
+
+async function productReorderMedia(productId, mediaId, newPosition) {
+  const q = `mutation($id:ID!,$moves:[MoveInput!]!){productReorderMedia(id:$id,moves:$moves){job{id} mediaUserErrors{message}}}`;
+  const data = await shopifyGQL(q, { id: productId, moves: [{ id: mediaId, newPosition: String(newPosition) }] });
+  const errs = data.productReorderMedia.mediaUserErrors;
+  if (errs && errs.length) throw new Error('reorder: ' + errs[0].message);
+}
+
+async function productDeleteMedia(productId, mediaIds) {
+  const q = `mutation($id:ID!,$mediaIds:[ID!]!){productDeleteMedia(productId:$id,mediaIds:$mediaIds){deletedMediaIds mediaUserErrors{message}}}`;
+  const data = await shopifyGQL(q, { id: productId, mediaIds });
+  const errs = data.productDeleteMedia.mediaUserErrors;
+  if (errs && errs.length) throw new Error('deleteMedia: ' + errs[0].message);
+}
+
+async function setBackupMetafield(productId, originalUrl) {
+  const q = `mutation($metafields:[MetafieldsSetInput!]!){metafieldsSet(metafields:$metafields){metafields{id} userErrors{message field}}}`;
+  const input = [{
+    ownerId: productId,
+    namespace: 'bsm',
+    key: 'original_image_backup',
+    type: 'url',
+    value: originalUrl,
+  }];
+  const data = await shopifyGQL(q, { metafields: input });
+  const errs = data.metafieldsSet.userErrors;
+  if (errs && errs.length) console.warn('Backup metafield: ' + errs[0].message);
+}
+
+async function applyNormalization(product) {
+  // Pipeline completo para 1 produto
+  const opts = {
+    canvasSize: state.settings.imgCanvasSize,
+    paddingPct: state.settings.imgPaddingPct,
+    whiteThreshold: state.settings.imgWhiteThreshold,
+    alphaThreshold: state.settings.imgAlphaThreshold,
+    quality: state.settings.imgQuality,
+  };
+  imgLog(`▶ ${product.title.slice(0,60)}…`);
+
+  // 1) gera blob full-size
+  const bitmap = await loadImageBitmap(product.image.url);
+  const { blob, isFullBg } = await normalizeImage(bitmap, opts);
+  bitmap.close();
+  if (isFullBg) {
+    imgLog(`⚠ ${product.title.slice(0,40)}: fundo cheio — saltado por segurança`, 'warn');
+    product.status = 'skipped';
+    return;
+  }
+
+  // 2) backup URL original num metafield
+  try { await setBackupMetafield(product.productId, product.image.url); } catch {}
+
+  // 3) staged upload
+  const filename = `normalizado-${Date.now()}.webp`;
+  const target = await stagedUploadCreate(filename, 'image/webp', blob.size);
+  const resourceUrl = await uploadToStaged(target, blob, filename);
+
+  // 4) productCreateMedia
+  const media = await productCreateMediaFromStaged(product.productId, resourceUrl, product.image.altText);
+
+  // 5) espera processamento
+  await waitForMediaReady(product.productId, media.id);
+
+  // 6) reordena nova imagem para posição 1
+  await productReorderMedia(product.productId, media.id, 1);
+
+  // 7) apaga a antiga
+  await productDeleteMedia(product.productId, [product.image.mediaId]);
+
+  product.status = 'done';
+  imgLog(`✓ ${product.title.slice(0,40)}`, 'success');
+}
+
+async function imgApplyBatch() {
+  if (imgState.processing) return;
+  const ids = Array.from(imgState.selected);
+  if (!ids.length) { toast('Seleciona pelo menos 1 produto', 'error'); return; }
+  if (!confirm(`Aplicar normalização a ${ids.length} produtos?\n\nA imagem original vai ser substituída na Shopify (com backup do URL num metafield).`)) return;
+
+  imgState.processing = true; render();
+  const batchSize = state.settings.imgBatchSize || 5;
+  const items = imgState.products.filter(p => ids.includes(p.productId));
+  let ok = 0, fail = 0;
+  for (let i = 0; i < items.length; i += batchSize) {
+    const slice = items.slice(i, i + batchSize);
+    for (const p of slice) {
+      try { await applyNormalization(p); ok++; }
+      catch (e) { p.status = 'error'; p.error = e.message; fail++; imgLog(`✕ ${p.title.slice(0,40)}: ${e.message}`, 'error'); }
+      render();
+    }
+    if (i + batchSize < items.length) {
+      imgLog(`Pausa de 2s entre batches…`);
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+  imgState.processing = false;
+  imgState.selected.clear();
+  imgLog(`Concluído: ${ok} OK, ${fail} erros`, fail ? 'warn' : 'success');
+  render();
+}
+
+function imgToggleSelect(productId) {
+  if (imgState.selected.has(productId)) imgState.selected.delete(productId);
+  else imgState.selected.add(productId);
+  render();
+}
+
+function imgSelectAll() {
+  const eligible = imgState.products.filter(p => p.status === 'ready' || p.status === 'pending');
+  if (imgState.selected.size === eligible.length) imgState.selected.clear();
+  else eligible.forEach(p => imgState.selected.add(p.productId));
+  render();
+}
+
+function renderImgGrid() {
+  return imgState.products.map(p => {
+    const sel = imgState.selected.has(p.productId);
+    const statusColor = { pending:'gray', ready:'green', warn:'yellow', error:'red', done:'blue', skipped:'gray' }[p.status] || 'gray';
+    const statusLabel = { pending:'⏳', ready:'✓ pronto', warn:'⚠ fundo cheio', error:'✕ erro', done:'✓ aplicado', skipped:'saltado' }[p.status] || p.status;
+    const disabled = p.status === 'done' || p.status === 'error' || p.status === 'warn';
+    return `<div class="card" style="padding:10px;display:flex;flex-direction:column;gap:6px;${sel?'outline:2px solid var(--blue)':''}">
+      <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text2);cursor:pointer">
+        <input type="checkbox" ${sel?'checked':''} ${disabled?'disabled':''} onchange="imgToggleSelect('${p.productId}')">
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.title.replace(/"/g,'&quot;')}">${p.title}</span>
+        <span style="color:var(--${statusColor});font-size:10px;font-weight:600">${statusLabel}</span>
+      </label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;align-items:center">
+        <div style="background:#f0f0f0;background-image:linear-gradient(45deg,#ddd 25%,transparent 25%),linear-gradient(-45deg,#ddd 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#ddd 75%),linear-gradient(-45deg,transparent 75%,#ddd 75%);background-size:10px 10px;background-position:0 0,0 5px,5px -5px,-5px 0;border-radius:4px;aspect-ratio:1;display:flex;align-items:center;justify-content:center;overflow:hidden">
+          <img src="${p.image.url}&width=400" style="max-width:100%;max-height:100%;object-fit:contain">
+        </div>
+        <div style="background:#f0f0f0;background-image:linear-gradient(45deg,#ddd 25%,transparent 25%),linear-gradient(-45deg,#ddd 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#ddd 75%),linear-gradient(-45deg,transparent 75%,#ddd 75%);background-size:10px 10px;background-position:0 0,0 5px,5px -5px,-5px 0;border-radius:4px;aspect-ratio:1;display:flex;align-items:center;justify-content:center;overflow:hidden">
+          ${p.preview ? `<img src="${p.preview}" style="max-width:100%;max-height:100%;object-fit:contain">` : '<span style="color:var(--text3);font-size:10px">sem preview</span>'}
+        </div>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text3)">
+        <span>Original</span><span>Normalizado</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function images() {
+  document.getElementById('topbar-actions').innerHTML = `
+    <button class="btn btn-ghost btn-sm" onclick="imgFetchProducts()">↻ Carregar produtos</button>
+    <button class="btn btn-ghost btn-sm" onclick="imgComputePreviews()" ${imgState.products.length===0?'disabled':''}>👁 Calcular previews</button>
+    <button class="btn btn-primary btn-sm" onclick="imgApplyBatch()" ${imgState.processing||imgState.selected.size===0?'disabled':''}>▶ Aplicar (${imgState.selected.size})</button>
+  `;
+
+  if (imgState.products.length === 0) {
+    document.getElementById('content').innerHTML = `
+      <div class="card" style="text-align:center;padding:40px">
+        <div style="font-size:40px;margin-bottom:12px">🖼</div>
+        <h3 style="font-family:'Syne',sans-serif;margin-bottom:8px">Normalizar Imagens</h3>
+        <p style="color:var(--text2);margin-bottom:16px;max-width:520px;margin-left:auto;margin-right:auto">
+          Coloca todas as imagens dos teus produtos no mesmo tamanho de canvas com fundo transparente
+          e o produto centrado — para a grelha da loja ficar visualmente consistente.
+        </p>
+        <button class="btn btn-primary" onclick="imgFetchProducts()" ${imgState.loading?'disabled':''}>
+          ${imgState.loading?'A carregar…':'Carregar produtos da Shopify'}
+        </button>
+        <p style="font-size:11px;color:var(--text3);margin-top:14px">
+          Tamanho canvas: ${state.settings.imgCanvasSize}px · Margem: ${state.settings.imgPaddingPct}%
+          · Threshold branco: ${state.settings.imgWhiteThreshold} · Qualidade WebP: ${state.settings.imgQuality}
+          <br><a onclick="navigate('settings')" style="color:var(--blue);cursor:pointer">Ajustar em Configurações →</a>
+        </p>
+      </div>`;
+    return;
+  }
+
+  const counts = imgState.products.reduce((acc,p)=>{ acc[p.status]=(acc[p.status]||0)+1; return acc; }, {});
+  const total = imgState.products.length;
+  const eligible = (counts.ready||0) + (counts.pending||0);
+
+  document.getElementById('content').innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 280px;gap:16px;align-items:start">
+      <div>
+        <div class="card" style="padding:12px;margin-bottom:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <div style="font-size:13px"><strong>${total}</strong> produtos
+            ${counts.ready?` · <span style="color:var(--green)">${counts.ready} prontos</span>`:''}
+            ${counts.warn?` · <span style="color:var(--yellow)">${counts.warn} fundo cheio</span>`:''}
+            ${counts.done?` · <span style="color:var(--blue)">${counts.done} aplicados</span>`:''}
+            ${counts.error?` · <span style="color:var(--red)">${counts.error} erros</span>`:''}
+          </div>
+          <div style="margin-left:auto;display:flex;gap:6px">
+            <button class="btn btn-ghost btn-sm" onclick="imgSelectAll()">${imgState.selected.size===eligible?'Limpar seleção':'Selecionar todos prontos'}</button>
+          </div>
+        </div>
+        <div id="img-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px">${renderImgGrid()}</div>
+      </div>
+      <div class="card" style="padding:14px;position:sticky;top:16px">
+        <div style="font-family:'Syne',sans-serif;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--text3);margin-bottom:10px">Log</div>
+        <div id="img-log" style="max-height:400px;overflow:auto">${imgState.log.map(l =>
+          `<div style="font-size:11px;color:var(--${l.type==='error'?'red':l.type==='success'?'green':'text2'});margin-bottom:4px"><span style="opacity:0.5">${new Date(l.t).toLocaleTimeString()}</span> ${l.msg}</div>`).join('')}</div>
+        <hr style="margin:14px 0;border:none;border-top:1px solid var(--border)">
+        <div style="font-size:11px;color:var(--text2);line-height:1.5">
+          <strong>Como funciona:</strong><br>
+          1. Carrega imagem principal de cada produto.<br>
+          2. Recorta o fundo branco/transparente em volta (bounding box).<br>
+          3. Redimensiona para caber em ${100 - 2*state.settings.imgPaddingPct}% de ${state.settings.imgCanvasSize}px.<br>
+          4. Cola centrado em canvas quadrado transparente.<br>
+          5. Substitui a original na Shopify (backup do URL num metafield <code>bsm.original_image_backup</code>).
+        </div>
+      </div>
+    </div>`;
+}
+
+// ═══════════════════════════════════════════
 // SETTINGS
 // ═══════════════════════════════════════════
 function settings() {
@@ -3789,6 +4221,33 @@ function settings() {
           </p>
         </div>
       </div>
+      <div style="margin-bottom:24px">
+        <div class="settings-label">Normalização de Imagens</div>
+        <div class="card">
+          <p style="color:var(--text2);font-size:13px;margin-bottom:14px">Parâmetros do módulo "Normalizar Imagens" — usados para centrar produtos em canvas quadrado transparente.</p>
+          <div class="form-grid">
+            <div class="form-group"><label>Tamanho do canvas (px)</label>
+              <input type="number" id="cfg-img-canvas" value="${state.settings.imgCanvasSize||2000}" min="500" max="4096" step="100">
+            </div>
+            <div class="form-group"><label>Margem em volta (%)</label>
+              <input type="number" id="cfg-img-padding" value="${state.settings.imgPaddingPct??10}" min="0" max="40" step="1">
+              <p style="font-size:11px;color:var(--text3);margin-top:4px">Produto ocupará ${100 - 2*(state.settings.imgPaddingPct??10)}% do canvas.</p>
+            </div>
+            <div class="form-group"><label>Threshold de branco (0-255)</label>
+              <input type="number" id="cfg-img-white" value="${state.settings.imgWhiteThreshold??245}" min="200" max="255" step="1">
+              <p style="font-size:11px;color:var(--text3);margin-top:4px">Pixels com luminância acima disto são tratados como fundo. 245 é seguro para a maioria.</p>
+            </div>
+            <div class="form-group"><label>Qualidade WebP (0-1)</label>
+              <input type="number" id="cfg-img-quality" value="${state.settings.imgQuality??0.9}" min="0.5" max="1" step="0.05">
+            </div>
+            <div class="form-group"><label>Produtos por batch</label>
+              <input type="number" id="cfg-img-batch" value="${state.settings.imgBatchSize??5}" min="1" max="20" step="1">
+              <p style="font-size:11px;color:var(--text3);margin-top:4px">Mais alto = mais rápido mas aumenta risco de rate-limit da Shopify.</p>
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="saveImgSettings()">Guardar</button>
+          </div>
+        </div>
+      </div>
       <div>
         <div class="settings-label">Proxy Cloudflare</div>
         <div class="card">
@@ -3811,6 +4270,23 @@ function saveSettingsCloud() {
   state.settings = { ...state.settings, supabaseUrl:document.getElementById('cfg-supa-url')?.value.trim(), supabaseKey:document.getElementById('cfg-supa-key')?.value.trim() };
   save(); toast('Configuração cloud guardada','success');
 }
+function saveImgSettings() {
+  const num = (id, def, min, max) => {
+    const v = parseFloat(document.getElementById(id)?.value);
+    if (isNaN(v)) return def;
+    return Math.max(min, Math.min(max, v));
+  };
+  state.settings = {
+    ...state.settings,
+    imgCanvasSize:     num('cfg-img-canvas',  2000, 500, 4096),
+    imgPaddingPct:     num('cfg-img-padding', 10,   0,   40),
+    imgWhiteThreshold: num('cfg-img-white',   245,  200, 255),
+    imgQuality:        num('cfg-img-quality', 0.9,  0.5, 1),
+    imgBatchSize:      num('cfg-img-batch',   5,    1,   20),
+  };
+  save(); toast('Configurações de imagem guardadas','success');
+}
+
 function saveScraperKey() {
   const markup    = parseFloat(document.getElementById('cfg-kk-markup')?.value ?? 8);
   const margemMin = parseFloat(document.getElementById('cfg-kk-margem')?.value ?? 20);
