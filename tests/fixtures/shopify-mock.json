@@ -1,0 +1,175 @@
+{
+  "_doc": "Fixture sintético que reproduz cenários de bug específicos contra a Stocklist Teletech de 14.05.2026. Cada produto tem uma flag _expect que diz o que o pipeline deveria fazer com ele.",
+  "products": [
+    {
+      "id": "gid://shopify/Product/1001",
+      "title": "Samsung Galaxy S26 Ultra 256GB Black",
+      "vendor": "Samsung",
+      "tags": ["sup:teletech", "cat:atualizado", "last-seen:202604"],
+      "variants": [
+        {
+          "id": "gid://shopify/ProductVariant/10001",
+          "inventoryItemId": "gid://shopify/InventoryItem/100001",
+          "sku": "SAM-S26U-256-BLK",
+          "barcode": "8806097827221",
+          "price": "899.00",
+          "stock": 2
+        }
+      ],
+      "_expect": "Ficheiro tem este EAN (stock 57) + EAN secundario 8806097821250 (stock 1). Deveria actualizar stock=58. Bug SG#2: merge usa items[0].barcode (821250) e perde este (827221), produto vai para isNew ou actualiza so com 1."
+    },
+    {
+      "id": "gid://shopify/Product/1002",
+      "title": "Samsung Galaxy S26 256GB Cobalt Violet",
+      "vendor": "Samsung",
+      "tags": ["sup:teletech"],
+      "variants": [
+        {
+          "id": "gid://shopify/ProductVariant/10002",
+          "inventoryItemId": "gid://shopify/InventoryItem/100002",
+          "sku": "SAM-S26-256-VIO",
+          "barcode": "8806097827337",
+          "price": "649.00",
+          "stock": 5
+        }
+      ],
+      "_expect": "Ficheiro tem 8806097827313 (19) + 8806097827337 (9). Total real=28. Variante tem EAN secundario, bug igual ao 1001."
+    },
+    {
+      "id": "gid://shopify/Product/1003",
+      "title": "Apple iPhone 17 Pro Max 256GB Cosmic Orange",
+      "vendor": "Apple",
+      "tags": ["sup:teletech"],
+      "variants": [
+        {
+          "id": "gid://shopify/ProductVariant/10003",
+          "inventoryItemId": "gid://shopify/InventoryItem/100003",
+          "sku": "APL-IP17PM-256-CO",
+          "barcode": "0195950639025",
+          "price": "1350.00",
+          "stock": 0
+        }
+      ],
+      "_expect": "Ficheiro tem 0195950639025 (9) + 0195950639094 (100). Total real=109. Variante tem EAN primario, deveria match e somar — bug perde o 100."
+    },
+    {
+      "id": "gid://shopify/Product/1010",
+      "title": "Apple iPhone 16 128GB Black",
+      "vendor": "Apple",
+      "tags": ["sup:teletech"],
+      "variants": [
+        {
+          "id": "gid://shopify/ProductVariant/10010",
+          "inventoryItemId": "gid://shopify/InventoryItem/100010",
+          "sku": "APL-IP16-128-BLK",
+          "barcode": "0195949821899",
+          "price": "729.00",
+          "stock": 3
+        }
+      ],
+      "_expect": "Ficheiro tem este EAN com stock 9. Match limpo, deveria actualizar."
+    },
+    {
+      "id": "gid://shopify/Product/1011",
+      "title": "Apple iPhone 16 128GB White",
+      "vendor": "Apple",
+      "tags": ["sup:teletech"],
+      "variants": [
+        {
+          "id": "gid://shopify/ProductVariant/10011",
+          "inventoryItemId": "gid://shopify/InventoryItem/100011",
+          "sku": "APL-IP16-128-WHT",
+          "barcode": "0195949821912",
+          "price": "729.00",
+          "stock": 7
+        }
+      ],
+      "_expect": "iPhone 16 White NAO esta no ficheiro de hoje. Bug SG#5: vai para 'missing' e modal sugere zerar. Mas a Teletech e in-stock list — nao deveria zerar."
+    },
+    {
+      "id": "gid://shopify/Product/1012",
+      "title": "Apple iPhone 16 256GB Black",
+      "vendor": "Apple",
+      "tags": ["sup:teletech"],
+      "variants": [
+        {
+          "id": "gid://shopify/ProductVariant/10012",
+          "inventoryItemId": "gid://shopify/InventoryItem/100012",
+          "sku": "APL-IP16-256-BLK",
+          "barcode": "0195949822018",
+          "price": "829.00",
+          "stock": 4
+        }
+      ],
+      "_expect": "Tambem iPhone 16 que nao vem no ficheiro. Igual ao 1011 — deveria ficar intacto."
+    },
+    {
+      "id": "gid://shopify/Product/1013",
+      "title": "Apple iPhone 16 Pro 128GB Black Titanium",
+      "vendor": "Apple",
+      "tags": ["sup:teletech"],
+      "variants": [
+        {
+          "id": "gid://shopify/ProductVariant/10013",
+          "inventoryItemId": "gid://shopify/InventoryItem/100013",
+          "sku": "APL-IP16P-128-BLK",
+          "barcode": "0195949833210",
+          "price": "1129.00",
+          "stock": 2
+        }
+      ],
+      "_expect": "iPhone 16 Pro 128GB nao esta no ficheiro. Bug SG#5: vai para 'missing'."
+    },
+    {
+      "id": "gid://shopify/Product/1014",
+      "title": "Apple iPhone 16e 128GB Black",
+      "vendor": "Apple",
+      "tags": ["sup:teletech"],
+      "variants": [
+        {
+          "id": "gid://shopify/ProductVariant/10014",
+          "inventoryItemId": "gid://shopify/InventoryItem/100014",
+          "sku": "APL-IP16E-128-BLK",
+          "barcode": "0195950051155",
+          "price": "519.00",
+          "stock": 8
+        }
+      ],
+      "_expect": "iPhone 16e Black esta no ficheiro com stock 100. Match limpo."
+    },
+    {
+      "id": "gid://shopify/Product/2001",
+      "title": "Apple iPhone 15 128GB Black",
+      "vendor": "Apple",
+      "tags": ["sup:outro-fornecedor"],
+      "variants": [
+        {
+          "id": "gid://shopify/ProductVariant/20001",
+          "inventoryItemId": "gid://shopify/InventoryItem/200001",
+          "sku": "APL-IP15-128-BLK",
+          "barcode": "0195949701234",
+          "price": "699.00",
+          "stock": 12
+        }
+      ],
+      "_expect": "iPhone 15 com tag de outro fornecedor (NAO sup:teletech). Nao esta no ficheiro Teletech, mas como nao tem sup:teletech, NAO deveria entrar no health check. Controlo."
+    },
+    {
+      "id": "gid://shopify/Product/3001",
+      "title": "Apple AirPods 4 White",
+      "vendor": "Apple",
+      "tags": ["sup:teletech"],
+      "variants": [
+        {
+          "id": "gid://shopify/ProductVariant/30001",
+          "inventoryItemId": "gid://shopify/InventoryItem/300001",
+          "sku": "APL-AIRPODS4",
+          "barcode": "0195949688522",
+          "price": "129.00",
+          "stock": 0
+        }
+      ],
+      "_expect": "AirPods 4 estao no ficheiro com EAN 0195949688522 (stock 100). Match por barcode unico, controlo positivo simples."
+    }
+  ]
+}

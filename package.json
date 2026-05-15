@@ -1,0 +1,27 @@
+{
+  "name": "bee-supplier",
+  "version": "1.0.0",
+  "description": "",
+  "main": "iphone17_aliases_import.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/victoraurich11-code/bee-supplier.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/victoraurich11-code/bee-supplier/issues"
+  },
+  "homepage": "https://github.com/victoraurich11-code/bee-supplier#readme",
+  "dependencies": {
+    "xlsx": "^0.18.5"
+  }
+}
