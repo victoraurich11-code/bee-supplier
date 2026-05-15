@@ -722,7 +722,9 @@ async function fetchShopifyProducts() {
   toast('A carregar produtos do Shopify...','info');
   let products=[], cursor=null, hasNext=true;
   while(hasNext) {
-    const q=`query($cursor:String){products(first:250,after:$cursor){pageInfo{hasNextPage endCursor}edges{node{id title vendor tags variants(first:5){edges{node{id sku barcode price inventoryQuantity inventoryItem{id}}}}}}}}`;
+    // Filtro `status:active`: exclui drafts e archived. Sem isto, produtos antigos
+    // arquivados continuam a poluir o cache e o matching apanha-os pelo EAN.
+    const q=`query($cursor:String){products(first:250,after:$cursor,query:"status:active"){pageInfo{hasNextPage endCursor}edges{node{id title vendor tags variants(first:5){edges{node{id sku barcode price inventoryQuantity inventoryItem{id}}}}}}}}`;
     const data = await shopifyGQL(q,{cursor});
     const page = data.products;
     products.push(...page.edges.map(e=>({
