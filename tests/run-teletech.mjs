@@ -71,10 +71,15 @@ console.log(`  AUTO_MERGE: ${AUTO_MERGE} (${AUTO_MERGE === '1' ? '"Todos iguais"
 
 const { rows, colMap } = loadXlsx(XLSX_PATH);
 const fixture = loadFixture(FIXTURE_PATH);
-const supplier = { id: 'teletech', name: 'Teletech' };
+// FIX SG#5: Teletech é in-stock list — não zerar ausentes.
+const supplier = { id: 'teletech', name: 'Teletech', isInStockList: true };
+const productAliases = fixture.productAliases || [];
+const productCanonicals = fixture.productCanonicals || {};
 
 console.log(`  Linhas no ficheiro: ${rows.length}`);
 console.log(`  Produtos no fixture: ${fixture.products.length}`);
+console.log(`  Aliases no fixture: ${productAliases.length}`);
+console.log(`  Supplier isInStockList: ${supplier.isInStockList}`);
 
 // 5.1 Duplicados
 section('PASSO 1 — Detecção de duplicados');
@@ -86,6 +91,76 @@ groups.slice(0, 5).forEach((g, gi) => {
 });
 if (groups.length > 5) console.log(DIM(`  …e mais ${groups.length - 5} grupos`));
 
+// Sanity: nenhum grupo deve juntar produtos com gerações de modelo diferentes
+// (regressão reportada: iPhone 13 vs iPhone 14, S26 vs S25, etc.)
+const ROBUST_KEY = (name) => {
+  const s = (name || '').toLowerCase();
+  const tokens = [];
+  (s.match(/\biphone\s*\d+e?\b/g) || []).forEach(x => tokens.push(x.replace(/\s+/g, '')));
+  (s.match(/\b[sa]\d{2,4}e?\b/g) || []).forEach(x => tokens.push(x));
+  return tokens.sort().join('|');
+};
+const crossGen = groups.filter(g => {
+  const keys = new Set(g.items.map(i => ROBUST_KEY(i.name)).filter(Boolean));
+  return keys.size > 1;
+});
+if (crossGen.length) {
+  console.log(`\n  ${FAIL} ${crossGen.length} grupo(s) misturam gerações/modelos diferentes:`);
+  crossGen.forEach(g => g.items.forEach(it => console.log(`    • ${it.name.slice(0, 70)}`)));
+} else {
+  console.log(`  ${PASS} Nenhum grupo mistura gerações/modelos diferentes.`);
+}
+
+// Sanity 2: nenhum grupo deve juntar produtos com cor (sufixo após " - ") diferente.
+const SUFFIX_KEY = (name) => {
+  const m = (name || '').toLowerCase().match(/\s-\s(.+)$/);
+  if (!m) return '';
+  return (m[1].match(/[a-z0-9]+/g) || []).sort().join('|');
+};
+const crossColor = groups.filter(g => {
+  const keys = new Set(g.items.map(i => SUFFIX_KEY(i.name)).filter(Boolean));
+  return keys.size > 1;
+});
+if (crossColor.length) {
+  console.log(`  ${FAIL} ${crossColor.length} grupo(s) misturam cores diferentes (sufixo após " - "):`);
+  crossColor.forEach(g => g.items.forEach(it => console.log(`    • ${it.name.slice(0, 80)}`)));
+} else {
+  console.log(`  ${PASS} Nenhum grupo mistura cores diferentes.`);
+}
+
+// Sanity 3: nenhum grupo deve juntar tiers diferentes (Pro vs Pro+, S26 vs S26+).
+const TIER_KEY = (name) => {
+  const s = (name || '').toLowerCase();
+  const tier = [...s.matchAll(/\b(pro\+?|max\+?|ultra\+?|plus|mini)(?=\s|$|[^a-z0-9+])/g)].map(m => m[1]).sort().join('|');
+  const samsungPlus = [...s.matchAll(/\b([sa]\d{2,4}e?\+?)(?=\s|$|[^a-z0-9+])/g)].map(m => m[1]).sort().join('|');
+  return tier + '::' + samsungPlus;
+};
+const crossTier = groups.filter(g => {
+  const keys = new Set(g.items.map(i => TIER_KEY(i.name)));
+  return keys.size > 1;
+});
+if (crossTier.length) {
+  console.log(`  ${FAIL} ${crossTier.length} grupo(s) misturam tiers diferentes (Pro vs Pro+, S26 vs S26+):`);
+  crossTier.forEach(g => g.items.forEach(it => console.log(`    • ${it.name.slice(0, 90)}`)));
+} else {
+  console.log(`  ${PASS} Nenhum grupo mistura tiers diferentes (Pro/Pro+, S26/S26+).`);
+}
+
+// Sanity 4: nenhum grupo deve juntar conectividades diferentes (4G vs 5G).
+const CONN_KEY = (name) => {
+  return ((name || '').toLowerCase().match(/\b\dg\b/g) || []).sort().join('|');
+};
+const crossConn = groups.filter(g => {
+  const keys = new Set(g.items.map(i => CONN_KEY(i.name)).filter(Boolean));
+  return keys.size > 1;
+});
+if (crossConn.length) {
+  console.log(`  ${FAIL} ${crossConn.length} grupo(s) misturam conectividades diferentes (4G/5G):`);
+  crossConn.forEach(g => g.items.forEach(it => console.log(`    • ${it.name.slice(0, 90)}`)));
+} else {
+  console.log(`  ${PASS} Nenhum grupo mistura conectividades diferentes (4G/5G).`);
+}
+
 // 5.2 Análise
 section('PASSO 2 — Análise (matching contra Shopify)');
 const decisions = buildDecisions(groups, AUTO_MERGE);
@@ -93,6 +168,7 @@ const result = doAnalysis({
   parsedRows: rows, colMap, supplier,
   shopifyProducts: fixture.products,
   decisions,
+  productAliases, productCanonicals,
 });
 console.log(`  Found: ${result.found.length}  ·  isNew: ${result.isNew.length}  ·  notFound: ${result.notFound.length}`);
 console.log(`  knownBarcodes registados: ${result.knownBarcodes.size}`);
@@ -192,12 +268,10 @@ if (suspeitos.length === 0) {
 // 5.5 Health check
 section('PASSO 5 — Health check (vai propor zerar?)');
 const hc = runPostUploadHealthCheck({
-  supplierId: supplier.id,
+  supplier,
   shopifyProducts: fixture.products,
   processedSkus: { skus: result.knownSkus, barcodes: result.knownBarcodes, total: result.uploadTotal },
   uploadHistory: [
-    // Histórico sintético: simula uploads anteriores com tamanhos parecidos para garantir
-    // que avgExpected > 50 e que coveragePct fica próximo de 100 (logo não dispara modal parcial).
     { supplierId: 'teletech', total: 340 },
     { supplierId: 'teletech', total: 330 },
     { supplierId: 'teletech', total: 345 },
