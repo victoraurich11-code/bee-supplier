@@ -17,7 +17,13 @@ const COLOR_WORDS = new Set([
   'navy','ice','icy','beige','cobalt','shadow','rose','peach','mint','sky','space','jet','phantom',
   'graphite','sierra','teal','lavender','coral','almond','olive','sand','clay','onyx','platinum'
 ]);
-function _keyTokens(s) {
+function _suffixAfterDash(origLower) {
+  const m = (origLower || '').match(/\s-\s(.+)$/);
+  if (!m) return '';
+  return (m[1].match(/[a-z0-9]+/g) || []).sort().join('|');
+}
+function _keyTokens(orig, stripped) {
+  const s = stripped;
   const caps = (s.match(/\b\d+\s*(gb|tb)\b/g) || []).map(t => t.replace(/\s+/g, '')).sort().join('|');
   const tier = (s.match(/\b(pro|max|ultra|plus|mini)\b/g) || []).sort().join('|');
   const colors = (s.match(/\b[a-z]{3,}\b/g) || []).filter(w => COLOR_WORDS.has(w)).sort().join('|');
@@ -26,19 +32,23 @@ function _keyTokens(s) {
   (s.match(/\b[sa]\d{2,4}e?\b/g) || []).forEach(x => gen.push(x));
   (s.match(/\bnote\s*\d+\b/g) || []).forEach(x => gen.push(x.replace(/\s+/g, '')));
   const model = gen.sort().join('|');
-  return { caps, tier, colors, model };
+  const suffix = _suffixAfterDash(orig);
+  return { caps, tier, colors, model, suffix };
 }
 export function nameSimilarity(a, b) {
-  a = (a || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
-  b = (b || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
-  if (a === b) return 100;
-  const ka = _keyTokens(a), kb = _keyTokens(b);
+  const ao = (a || '').toLowerCase();
+  const bo = (b || '').toLowerCase();
+  const as = ao.replace(/[^a-z0-9\s]/g, '').trim();
+  const bs = bo.replace(/[^a-z0-9\s]/g, '').trim();
+  if (as === bs) return 100;
+  const ka = _keyTokens(ao, as), kb = _keyTokens(bo, bs);
   if (ka.caps !== kb.caps) return 0;
   if (ka.tier !== kb.tier) return 0;
   if (ka.colors !== kb.colors) return 0;
   if (ka.model !== kb.model) return 0;
-  const wa = new Set(a.split(/\s+/).filter(w => w.length > 2 || /^\d/.test(w)));
-  const wb = new Set(b.split(/\s+/).filter(w => w.length > 2 || /^\d/.test(w)));
+  if (ka.suffix && kb.suffix && ka.suffix !== kb.suffix) return 0;
+  const wa = new Set(as.split(/\s+/).filter(w => w.length > 2 || /^\d/.test(w)));
+  const wb = new Set(bs.split(/\s+/).filter(w => w.length > 2 || /^\d/.test(w)));
   let common = 0; wa.forEach(w => { if (wb.has(w)) common++; });
   return Math.round((common / Math.max(wa.size, wb.size, 1)) * 100);
 }

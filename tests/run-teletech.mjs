@@ -111,6 +111,23 @@ if (crossGen.length) {
   console.log(`  ${PASS} Nenhum grupo mistura gerações/modelos diferentes.`);
 }
 
+// Sanity 2: nenhum grupo deve juntar produtos com cor (sufixo após " - ") diferente.
+const SUFFIX_KEY = (name) => {
+  const m = (name || '').toLowerCase().match(/\s-\s(.+)$/);
+  if (!m) return '';
+  return (m[1].match(/[a-z0-9]+/g) || []).sort().join('|');
+};
+const crossColor = groups.filter(g => {
+  const keys = new Set(g.items.map(i => SUFFIX_KEY(i.name)).filter(Boolean));
+  return keys.size > 1;
+});
+if (crossColor.length) {
+  console.log(`  ${FAIL} ${crossColor.length} grupo(s) misturam cores diferentes (sufixo após " - "):`);
+  crossColor.forEach(g => g.items.forEach(it => console.log(`    • ${it.name.slice(0, 80)}`)));
+} else {
+  console.log(`  ${PASS} Nenhum grupo mistura cores diferentes.`);
+}
+
 // 5.2 Análise
 section('PASSO 2 — Análise (matching contra Shopify)');
 const decisions = buildDecisions(groups, AUTO_MERGE);
