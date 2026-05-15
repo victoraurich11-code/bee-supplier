@@ -33,8 +33,9 @@ function _keyTokens(orig, stripped) {
   [...orig.matchAll(/\b([sa]\d{2,4}e?\+?)(?=\s|$|[^a-z0-9+])/g)].forEach(m => gen.push(m[1]));
   (orig.match(/\bnote\s*\d+\b/g) || []).forEach(x => gen.push(x.replace(/\s+/g, '')));
   const model = gen.sort().join('|');
+  const connectivity = (s.match(/\b\dg\b/g) || []).sort().join('|');
   const suffix = _suffixAfterDash(orig);
-  return { caps, tier, colors, model, suffix };
+  return { caps, tier, colors, model, connectivity, suffix };
 }
 export function nameSimilarity(a, b) {
   const ao = (a || '').toLowerCase();
@@ -47,6 +48,7 @@ export function nameSimilarity(a, b) {
   if (ka.tier !== kb.tier) return 0;
   if (ka.colors !== kb.colors) return 0;
   if (ka.model !== kb.model) return 0;
+  if (ka.connectivity !== kb.connectivity) return 0;
   if (ka.suffix && kb.suffix && ka.suffix !== kb.suffix) return 0;
   if (as === bs) return 100;
   const wa = new Set(as.split(/\s+/).filter(w => w.length > 2 || /^\d/.test(w)));

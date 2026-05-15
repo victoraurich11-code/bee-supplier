@@ -146,6 +146,21 @@ if (crossTier.length) {
   console.log(`  ${PASS} Nenhum grupo mistura tiers diferentes (Pro/Pro+, S26/S26+).`);
 }
 
+// Sanity 4: nenhum grupo deve juntar conectividades diferentes (4G vs 5G).
+const CONN_KEY = (name) => {
+  return ((name || '').toLowerCase().match(/\b\dg\b/g) || []).sort().join('|');
+};
+const crossConn = groups.filter(g => {
+  const keys = new Set(g.items.map(i => CONN_KEY(i.name)).filter(Boolean));
+  return keys.size > 1;
+});
+if (crossConn.length) {
+  console.log(`  ${FAIL} ${crossConn.length} grupo(s) misturam conectividades diferentes (4G/5G):`);
+  crossConn.forEach(g => g.items.forEach(it => console.log(`    • ${it.name.slice(0, 90)}`)));
+} else {
+  console.log(`  ${PASS} Nenhum grupo mistura conectividades diferentes (4G/5G).`);
+}
+
 // 5.2 Análise
 section('PASSO 2 — Análise (matching contra Shopify)');
 const decisions = buildDecisions(groups, AUTO_MERGE);
