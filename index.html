@@ -287,6 +287,7 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--blue); cur
       <div class="nav-item" onclick="navigate('matching')" id="nav-matching"><span class="icon">🔗</span> Matching</div>
       <div class="nav-item" onclick="navigate('tek4life')" id="nav-tek4life"><span class="icon">📱</span> Tek4life <span class="nav-badge yellow" id="badge-tek4life" style="display:none">!</span></div>
       <div class="nav-item" onclick="navigate('create')" id="nav-create"><span class="icon">✚</span> Criar Produtos</div>
+      <div class="nav-item" onclick="navigate('toCreate')" id="nav-toCreate"><span class="icon">💡</span> Para Criar <span class="nav-badge green" id="badge-toCreate" style="display:none">0</span></div>
       <div class="nav-item" onclick="navigate('splitVariants')" id="nav-splitVariants"><span class="icon">🔀</span> Separar Variantes</div>
       <div class="nav-item" onclick="navigate('images')" id="nav-images"><span class="icon">🖼</span> Normalizar Imagens</div>
       <div class="nav-item" onclick="navigate('collections')" id="nav-collections"><span class="icon">📁</span> Categorias</div>
@@ -1193,13 +1194,13 @@ function navigate(page) {
   state.page = page;
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   document.getElementById('nav-'+page)?.classList.add('active');
-  const titles = { dashboard:'Dashboard', suppliers:'Fornecedores', upload:'Processar Ficheiro', health:'Saúde do Catálogo', alerts:'Alertas', mercado:'Mercado (KuantoKusta)', matching:'Matching Inteligente', tek4life:'Tek4life — iPhones Grade A+', create:'Criar Produtos', splitVariants:'Separar Variantes — Inspeção', images:'Normalizar Imagens', collections:'Categorias', settings:'Configurações' };
+  const titles = { dashboard:'Dashboard', suppliers:'Fornecedores', upload:'Processar Ficheiro', health:'Saúde do Catálogo', alerts:'Alertas', mercado:'Mercado (KuantoKusta)', matching:'Matching Inteligente', tek4life:'Tek4life — iPhones Grade A+', create:'Criar Produtos', toCreate:'Para Criar — Sugestões dos Fornecedores', splitVariants:'Separar Variantes — Inspeção', images:'Normalizar Imagens', collections:'Categorias', settings:'Configurações' };
   document.getElementById('page-title').textContent = titles[page]||page;
   render();
 }
 
 function render() {
-  ({ dashboard, suppliers, upload, health, alerts, mercado, matching, tek4life, create, splitVariants, images, collections, settings })[state.page]?.();
+  ({ dashboard, suppliers, upload, health, alerts, mercado, matching, tek4life, create, toCreate, splitVariants, images, collections, settings })[state.page]?.();
   updateBadges();
 }
 
@@ -1207,6 +1208,15 @@ function updateBadges() {
   const ac = state.alerts.filter(a=>!a.dismissed).length;
   const ab = document.getElementById('alert-badge');
   if(ab){ ab.textContent=ac; ab.style.display=ac>0?'flex':'none'; }
+
+  // Badge "Para Criar": número de MODELOS (grupos) novos por criar
+  const tcb = document.getElementById('badge-toCreate');
+  if (tcb) {
+    const active = state.alerts.filter(a => a.type === 'new_product' && !a.dismissed);
+    const groups = new Set(active.map(a => _toCreateGroupKey(a.name)));
+    tcb.textContent = groups.size;
+    tcb.style.display = groups.size > 0 ? 'flex' : 'none';
+  }
 
   const hc = computeHealthCounts();
   const hb = document.getElementById('health-badge');
@@ -2951,10 +2961,51 @@ async function applyChanges() {
     await sleep(320);
   }
 
-  // New product alerts
-  isNew.forEach(p=>{
-    state.alerts.push({ id:'alert_'+Date.now()+Math.random(), type:'new_product', title:'Novo produto detetado', desc:`${p.name}${p.sku?' ('+p.sku+')':''} — ${p.suppName} — €${p.finalPrice.toFixed(2)}`, sku:p.sku, barcode:p.barcode, name:p.name, price:p.finalPrice, stock:p.stockVal, suppId:p.suppId, date:new Date().toISOString(), dismissed:false });
+  // New product alerts — dedup: se já existe alerta (não-dismissed) com o mesmo
+  // SKU/EAN para o mesmo fornecedor, ACTUALIZA-O em vez de criar outro.
+  // Caso contrário, uploads diários acumulam centenas de alertas duplicados.
+  let alertsCreated = 0, alertsUpdated = 0;
+  isNew.forEach(p => {
+    const skuN = (p.sku || '').toLowerCase().trim();
+    const bcN  = (p.barcode || '').toString().trim();
+    const existing = state.alerts.find(a =>
+      a.type === 'new_product' &&
+      !a.dismissed &&
+      a.suppId === p.suppId &&
+      (
+        (skuN && (a.sku || '').toLowerCase().trim() === skuN) ||
+        (bcN  && (a.barcode || '').toString().trim() === bcN)
+      )
+    );
+    const payload = {
+      type: 'new_product',
+      title: 'Novo produto detetado',
+      desc: `${p.name}${p.sku ? ' ('+p.sku+')' : ''} — ${p.suppName} — €${p.finalPrice.toFixed(2)}`,
+      sku: p.sku, barcode: p.barcode, name: p.name,
+      price: p.finalPrice, stock: p.stockVal,
+      suppId: p.suppId,
+    };
+    if (existing) {
+      // Actualiza preço/stock/data do alerta existente; preserva id + dismissed + counter
+      Object.assign(existing, payload);
+      existing.seenCount = (existing.seenCount || 1) + 1;
+      existing.lastSeen = new Date().toISOString();
+      alertsUpdated++;
+    } else {
+      state.alerts.push({
+        ...payload,
+        id: 'alert_' + Date.now() + Math.random(),
+        date: new Date().toISOString(),
+        lastSeen: new Date().toISOString(),
+        seenCount: 1,
+        dismissed: false,
+      });
+      alertsCreated++;
+    }
   });
+  if (alertsUpdated > 0) {
+    console.log(`Alertas: ${alertsCreated} criados, ${alertsUpdated} actualizados (dedup)`);
+  }
 
   // Modo manual: guardar alertas de custo e atualizar histórico de custos
   const costChangesRegistered = [];
@@ -3005,7 +3056,8 @@ async function applyChanges() {
       {n:priceUpdated, lbl:'Preços', color:'var(--blue)'},
       {n:stockUpdated, lbl:'Stocks', color:'var(--blue)'},
       {n:tagsApplied, lbl:'Tags', color:'var(--purple)'},
-      ...(isNew.length>0?[{n:isNew.length, lbl:'Novos alertas', color:'var(--orange)'}]:[]),
+      ...(alertsCreated>0?[{n:alertsCreated, lbl:'Novos alertas', color:'var(--orange)'}]:[]),
+      ...(alertsUpdated>0?[{n:alertsUpdated, lbl:'Alertas refrescados', color:'var(--text2)'}]:[]),
       ...(costChangesRegistered.length>0?[{n:costChangesRegistered.length, lbl:'Alertas custo', color:'var(--purple)'}]:[]),
       ...(errors>0?[{n:errors, lbl:'Erros', color:'var(--red)'}]:[]),
     ].map(x=>`<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px;text-align:center">
@@ -3045,20 +3097,30 @@ const alertIcon = { new_product:'🆕', no_update:'⚠', zero_stock:'🔴', no_o
 
 function renderAlertList(list) {
   if(!list.length) return `<div class="empty-state"><div class="empty-icon">🔔</div><p>Sem alertas ativos</p></div>`;
-  return list.map(a=>`
+  return list.map(a=>{
+    // Badge "visto N×" — mostra quantos uploads consecutivos confirmaram este alerta.
+    // Mais aparições = mais sinal de que vale a pena criar/agir.
+    const seenBadge = (a.seenCount && a.seenCount > 1)
+      ? `<span class="badge" style="background:var(--green-bg);color:var(--green);font-size:10px;margin-left:6px;padding:2px 6px;border-radius:6px;font-weight:600">visto ${a.seenCount}×</span>`
+      : '';
+    const lastSeenStr = a.lastSeen && a.lastSeen !== a.date
+      ? ` · último upload ${new Date(a.lastSeen).toLocaleDateString('pt-PT')}`
+      : '';
+    return `
     <div class="alert-card ${a.type}" id="alert-${a.id}">
       <div class="alert-icon">${alertIcon[a.type]||'ℹ'}</div>
       <div class="alert-body">
-        <div class="alert-title">${a.title}</div>
+        <div class="alert-title">${a.title}${seenBadge}</div>
         <div class="alert-desc">${a.desc}</div>
-        <div class="alert-desc" style="margin-top:3px;color:var(--text3)">${new Date(a.date).toLocaleDateString('pt-PT')}</div>
+        <div class="alert-desc" style="margin-top:3px;color:var(--text3)">criado ${new Date(a.date).toLocaleDateString('pt-PT')}${lastSeenStr}</div>
         <div class="alert-actions">
           ${a.type==='new_product'?`<button class="btn btn-success btn-sm" onclick="suggestCreate('${a.id}')">+ Criar no Shopify</button>`:''}
           ${a.type==='no_origin'?`<button class="btn btn-purple btn-sm" onclick="navigate('health')">Ver no Catálogo</button>`:''}
           <button class="btn btn-ghost btn-sm" onclick="dismissAlert('${a.id}')">Dispensar</button>
         </div>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 function filterAlerts(type, el) {
@@ -3119,11 +3181,259 @@ async function createFromAlert(alertId) {
     // Apply tags immediately
     const a=state.alerts.find(x=>x.id===alertId);
     if(a?.suppId) await updateProductTags(product.id, [`sup:${a.suppId}`, 'cat:atualizado', `last-seen:${YYYYMM()}`]);
+    // Upload imagem anexada (se houver — via "Para Criar" → 🖼 Anexar imagem)
+    if (a?.attachedImage?.dataUrl) {
+      try {
+        // dataUrl → Blob
+        const resp = await fetch(a.attachedImage.dataUrl);
+        const blob = await resp.blob();
+        const filename = `${(title||'product').replace(/[^a-z0-9]+/gi,'-').toLowerCase().slice(0,60)}.webp`;
+        const target = await stagedUploadCreate(filename, blob.type || 'image/webp', blob.size);
+        await uploadToStaged(target, blob, filename);
+        await productCreateMediaFromStaged(product.id, target.resourceUrl, title);
+        toast('🖼 Imagem anexada ao produto', 'success');
+      } catch (e) {
+        console.warn('Falha ao anexar imagem:', e);
+        toast(`Produto criado mas imagem falhou: ${e.message}`, 'error');
+      }
+    }
     dismissAlert(alertId); closeModal();
     toast('Produto criado com tags de fornecedor ✓','success');
     fetchShopifyProducts();
   }catch(e){toast('Erro: '+e.message,'error');}
 }
+
+// ═══════════════════════════════════════════
+// TO-CREATE — vista consolidada dos produtos sugeridos para criar
+// ═══════════════════════════════════════════
+// Agrega alertas new_product por modelo+marca usando a mesma heurística do
+// detector de duplicados (key tokens). Mostra total stock, preço médio,
+// quantas vezes apareceu, fornecedores. Permite priorizar o que criar.
+function _toCreateGroupKey(name) {
+  // Usa _keyTokens (já definido no fluxo de duplicados) + adiciona vendor da string
+  const s = (name || '').toLowerCase();
+  const stripped = s.replace(/[^a-z0-9\s]/g, '').trim();
+  const k = _keyTokens(s, stripped);
+  // Brand: primeira palavra com > 3 chars (Apple, Samsung, Xiaomi, etc.)
+  const brand = (stripped.match(/\b([a-z]{4,})\b/) || [, ''])[1];
+  // Modelo: brand + k.model + k.tier + k.caps (sem cor — agrupar cores)
+  return `${brand}|${k.model}|${k.tier}|${k.caps}`;
+}
+
+function toCreate() {
+  const active = state.alerts.filter(a => a.type === 'new_product' && !a.dismissed);
+  if (!active.length) {
+    document.getElementById('content').innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">💡</div>
+        <p style="font-size:14px;color:var(--text2)">Nenhum produto novo sugerido pelos fornecedores.</p>
+        <p style="font-size:12px;color:var(--text3);margin-top:6px">Os alertas de "Novo produto" aparecerão aqui agregados por modelo.</p>
+      </div>`;
+    return;
+  }
+
+  // Agrupar
+  const groups = new Map();
+  for (const a of active) {
+    const key = _toCreateGroupKey(a.name);
+    if (!groups.has(key)) groups.set(key, { key, items: [], suppliers: new Set(), totalStock: 0, totalSeen: 0, prices: [] });
+    const g = groups.get(key);
+    g.items.push(a);
+    g.suppliers.add(a.suppId);
+    g.totalStock += a.stock || 0;
+    g.totalSeen += a.seenCount || 1;
+    if (a.price) g.prices.push(a.price);
+  }
+  const groupsList = [...groups.values()].sort((a, b) => {
+    // Prioridade: visto mais vezes * stock total
+    const sa = a.totalSeen * Math.log10(a.totalStock + 1);
+    const sb = b.totalSeen * Math.log10(b.totalStock + 1);
+    return sb - sa;
+  });
+
+  // Header do grupo: usa o primeiro item para inferir "modelo base"
+  const groupTitle = (g) => {
+    // Tira a parte da cor / sufixo após " - " para representar o agrupamento
+    const first = g.items[0].name || '';
+    return first.replace(/\s-\s.+$/, '').trim();
+  };
+
+  document.getElementById('content').innerHTML = `
+    <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+      <div class="stat-card" style="border-left:3px solid var(--green)">
+        <div class="stat-num" style="color:var(--green)">${groupsList.length}</div>
+        <div class="stat-lbl">Modelos sugeridos</div>
+      </div>
+      <div class="stat-card" style="border-left:3px solid var(--blue)">
+        <div class="stat-num" style="color:var(--blue)">${active.length}</div>
+        <div class="stat-lbl">Variações totais</div>
+      </div>
+      <div class="stat-card" style="border-left:3px solid var(--purple)">
+        <div class="stat-num" style="color:var(--purple)">${active.reduce((s, a) => s + (a.stock || 0), 0)}</div>
+        <div class="stat-lbl">Stock total disponível</div>
+      </div>
+    </div>
+
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:12px;color:var(--text2)">
+      💡 Ordenado por <strong>relevância</strong> = aparições × log(stock). Quem aparece mais vezes E tem mais stock está no topo.
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:10px">
+      ${groupsList.map((g, gi) => {
+        const avgPrice = g.prices.length ? (g.prices.reduce((a, x) => a + x, 0) / g.prices.length) : 0;
+        const supLabels = [...g.suppliers].map(id => {
+          const s = state.suppliers.find(x => x.id === id);
+          return s?.name || id;
+        }).join(', ');
+        const itemsHtml = g.items.slice(0, 30).map(it => {
+          const seenBadge = (it.seenCount && it.seenCount > 1)
+            ? `<span style="background:var(--green-bg);color:var(--green);padding:1px 5px;border-radius:4px;font-size:10px;font-weight:600">${it.seenCount}×</span>` : '';
+          return `<tr>
+            <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${it.name}">${it.name.replace(/.*\s-\s/, '') || it.name} ${seenBadge}</td>
+            <td class="mono" style="font-size:11px;color:var(--text2)">${it.sku || '—'}</td>
+            <td class="mono" style="font-size:11px;color:var(--text2)">${it.barcode || '—'}</td>
+            <td class="mono" style="text-align:right">€${(it.price || 0).toFixed(2)}</td>
+            <td class="mono" style="text-align:right"><strong>${it.stock || 0}</strong></td>
+          </tr>`;
+        }).join('');
+        return `
+          <details class="card" style="padding:0;overflow:hidden">
+            <summary style="padding:14px 18px;cursor:pointer;display:flex;align-items:center;gap:12px;list-style:none">
+              ${g.items[0]?.attachedImage?.dataUrl
+                ? `<img src="${g.items[0].attachedImage.dataUrl}" style="width:48px;height:48px;object-fit:contain;border-radius:6px;border:1px solid var(--border);background:white" />`
+                : '<span style="font-size:24px">📦</span>'}
+              <div style="flex:1;min-width:0">
+                <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${groupTitle(g)}${g.items[0]?.attachedImage ? ' <span style="font-size:11px;color:var(--green);font-weight:600">🖼 imagem anexada</span>' : ''}</div>
+                <div style="font-size:11px;color:var(--text2);margin-top:3px">
+                  ${g.items.length} variação(ões) · Stock total <strong>${g.totalStock}</strong> · Preço médio €${avgPrice.toFixed(2)} · ${supLabels}
+                </div>
+              </div>
+              <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                ${g.totalSeen >= 3 ? `<span style="background:var(--green);color:white;padding:3px 8px;border-radius:6px;font-size:10px;font-weight:700">🔥 ${g.totalSeen} aparições</span>` : g.totalSeen >= 2 ? `<span style="background:var(--orange-bg);color:var(--orange);padding:3px 8px;border-radius:6px;font-size:11px;font-weight:600">${g.totalSeen}×</span>` : ''}
+              </div>
+            </summary>
+            <div style="border-top:1px solid var(--border);padding:0">
+              <div class="table-wrap" style="max-height:300px;overflow-y:auto">
+                <table style="font-size:12px">
+                  <thead><tr><th>Variação</th><th>SKU</th><th>EAN</th><th style="text-align:right">Preço</th><th style="text-align:right">Stock</th></tr></thead>
+                  <tbody>${itemsHtml}</tbody>
+                </table>
+              </div>
+              <div style="padding:10px 16px;display:flex;gap:6px;flex-wrap:wrap;border-top:1px solid var(--border);background:var(--panel);align-items:center">
+                <button class="btn btn-ghost btn-sm" onclick="toCreateDismissGroup(${gi})">Dispensar grupo</button>
+                <button class="btn btn-ghost btn-sm" onclick="toCreateOpenImageSearch(${gi})" title="Abrir motores de busca para esta marca/modelo">🔍 Procurar imagem</button>
+                <button class="btn btn-primary btn-sm" onclick="toCreateAttachImage(${gi})" title="Colar URL da imagem e processar com Normalizar Imagens">🖼 Anexar imagem</button>
+                <span style="flex:1"></span>
+                <span style="font-size:11px;color:var(--text3)">Criação individual: ir a Alertas → '+Criar no Shopify'.</span>
+              </div>
+            </div>
+          </details>`;
+      }).join('')}
+    </div>`;
+}
+
+// Devolve o grupo pelo índice usando a mesma ordenação que `toCreate()`.
+function _toCreateGetGroup(gi) {
+  const active = state.alerts.filter(a => a.type === 'new_product' && !a.dismissed);
+  const groups = new Map();
+  for (const a of active) {
+    const key = _toCreateGroupKey(a.name);
+    if (!groups.has(key)) groups.set(key, { key, items: [] });
+    groups.get(key).items.push(a);
+  }
+  const groupsList = [...groups.values()].sort((a, b) => {
+    const sa = a.items.reduce((s, x) => s + (x.seenCount || 1) * Math.log10((x.stock || 0) + 1), 0);
+    const sb = b.items.reduce((s, x) => s + (x.seenCount || 1) * Math.log10((x.stock || 0) + 1), 0);
+    return sb - sa;
+  });
+  return groupsList[gi];
+}
+
+// Abre motores de busca de imagens em novas tabs com query pré-montada.
+// Pragmático: evita scraping anti-bot e dá ao user a melhor imagem manualmente.
+window.toCreateOpenImageSearch = function(gi) {
+  const g = _toCreateGetGroup(gi);
+  if (!g) return;
+  // Usa o primeiro item, remove cor para query mais genérica
+  const baseName = (g.items[0].name || '').replace(/\s-\s.+$/, '').trim();
+  const q = encodeURIComponent(baseName + ' product image png white background');
+  const urls = [
+    { label: 'Google Images',      url: `https://www.google.com/search?q=${q}&tbm=isch&tbs=ic:trans` },
+    { label: 'Bing Images',        url: `https://www.bing.com/images/search?q=${q}&qft=+filterui:photo-transparent` },
+    { label: 'Amazon (referência)',url: `https://www.amazon.es/s?k=${q}` },
+    { label: 'KuantoKusta',        url: `https://www.kuantokusta.pt/search?q=${encodeURIComponent(baseName)}` },
+  ];
+  // Abre as 2 primeiras automaticamente (popup-bloqueado fica nas tabs do user)
+  window.open(urls[0].url, '_blank', 'noopener');
+  setTimeout(() => window.open(urls[1].url, '_blank', 'noopener'), 200);
+  toast(`Abertos: ${urls[0].label} + ${urls[1].label}. Clica direito numa imagem → "Copiar endereço da imagem" → volta e clica "Anexar imagem".`, 'info');
+};
+
+// Anexa uma imagem (URL colada) ao grupo: faz fetch, normaliza com o módulo
+// "Normalizar Imagens" e guarda data-URL na propriedade `attachedImage` de
+// cada alerta do grupo. Quando o user criar o produto, essa imagem é usada.
+window.toCreateAttachImage = async function(gi) {
+  const g = _toCreateGetGroup(gi);
+  if (!g) return;
+  const url = prompt('Cola aqui o URL da imagem (clique direito numa imagem → Copiar endereço da imagem):');
+  if (!url) return;
+  const trimmed = url.trim();
+  if (!/^https?:\/\//i.test(trimmed)) { toast('URL inválido (tem de começar por http(s)://)', 'error'); return; }
+
+  toast('A carregar e normalizar imagem...', 'info');
+  try {
+    // Reutiliza loadImageBitmap + normalizeImage que já existem no módulo de imagens
+    const bitmap = await loadImageBitmap(trimmed);
+    const opts = {
+      canvasSize: state.settings?.imgCanvasSize || 2000,
+      paddingPct: state.settings?.imgPaddingPct || 10,
+      whiteThreshold: state.settings?.imgWhiteThreshold || 245,
+      alphaThreshold: state.settings?.imgAlphaThreshold || 10,
+      quality: state.settings?.imgQuality || 0.9,
+    };
+    const blob = await normalizeImage(bitmap, opts);
+    // Converte para data URL (guarda em estado local até o user criar o produto)
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+    // Anexa ao primeiro item do grupo (uma imagem serve para todas as variantes)
+    g.items.forEach(a => {
+      a.attachedImage = { url: trimmed, dataUrl, normalizedAt: new Date().toISOString() };
+    });
+    save();
+    toast(`✓ Imagem normalizada e anexada a ${g.items.length} variante(s) do grupo`, 'success');
+    toCreate();   // re-render
+  } catch (e) {
+    console.error(e);
+    toast(`Erro ao processar imagem: ${e.message}`, 'error');
+  }
+};
+
+window.toCreateDismissGroup = function(gi) {
+  if (!confirm('Dispensar todas as variações deste modelo dos alertas?')) return;
+  const active = state.alerts.filter(a => a.type === 'new_product' && !a.dismissed);
+  const groups = new Map();
+  for (const a of active) {
+    const key = _toCreateGroupKey(a.name);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(a);
+  }
+  const groupsList = [...groups.values()].sort((a, b) => {
+    const sa = a.reduce((s, x) => s + (x.seenCount || 1) * Math.log10((x.stock || 0) + 1), 0);
+    const sb = b.reduce((s, x) => s + (x.seenCount || 1) * Math.log10((x.stock || 0) + 1), 0);
+    return sb - sa;
+  });
+  const target = groupsList[gi];
+  if (!target) return;
+  const ids = new Set(target.map(a => a.id));
+  state.alerts = state.alerts.map(a => ids.has(a.id) ? { ...a, dismissed: true } : a);
+  save();
+  toast(`${target.length} alertas dispensados`, 'success');
+  toCreate();
+};
 
 // ═══════════════════════════════════════════
 // MATCHING
