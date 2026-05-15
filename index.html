@@ -2301,12 +2301,36 @@ function runAnalysis() {
       suppId: supp.id, suppName: supp.name,
     }));
 
+    // Reposições por nome — produtos Shopify esgotados (stock=0) com tag sup:{supId}
+    // que NÃO bateram por SKU/EAN mas têm uma linha em isNew com nome muito similar.
+    // Usa o mesmo `nameSimilarity` (com key tokens) que afinámos no detector de duplicados,
+    // mas exige score ≥ 95 para ser conservador (reposição requer alta confiança).
+    const suppTag = `sup:${supp.id}`;
+    const foundVariantIds = new Set(found.map(p => p.shopifyVariant?.id).filter(Boolean));
+    const restockByName = [];
+    for (const p of state.shopifyProducts) {
+      if (!(p.tags || []).includes(suppTag)) continue;
+      for (const v of (p.variants || [])) {
+        if (foundVariantIds.has(v.id)) continue;
+        if ((v.stock ?? 0) > 0) continue;   // Só esgotados
+        // Procura linha do upload com nome muito similar
+        let best = null;
+        for (const row of isNew) {
+          if (row.stockVal <= 0) continue;
+          const score = nameSimilarity(p.title || '', row.name || '');
+          if (score >= 95 && (!best || score > best.score)) best = { row, score };
+        }
+        if (best) restockByName.push({ product: p, variant: v, candidate: best.row, score: best.score });
+      }
+    }
+
     state.analysisResult = {
       found, isNew,
       knownSkus, knownBarcodes,
       uploadTotal: effectiveRows.filter(r => (r[nc] || '').trim()).length,
       costChanges,
       isManual,
+      restockByName,
     };
     renderAnalysis(found, notFound, isNew, supp);
   }
@@ -2643,6 +2667,13 @@ function renderAnalysis(found, notFound, isNew, supp) {
     ${found.length>0?`
     <div class="review-section rs-found" style="margin-bottom:16px">
       <div class="review-section-title">${isManual ? '📦' : '✅'} ${found.length} Produtos Encontrados
+        ${(() => {
+          const restockCount = found.filter(p => (p.currentStock===0 || p.currentStock==null) && p.stockVal > 0).length;
+          return restockCount > 0
+            ? `<span style="margin-left:10px;background:var(--green-bg);color:var(--green);padding:3px 8px;border-radius:6px;font-size:11px;font-weight:700">🔄 ${restockCount} reposição(ões)</span>
+               <button class="btn btn-ghost btn-sm" style="margin-left:6px" onclick="toggleRestockFilter()" id="btn-restock-filter">Mostrar só reposições</button>`
+            : '';
+        })()}
         ${!isManual ? `
         <div style="margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
           <span style="font-size:11px;color:var(--text2);font-family:'DM Mono',monospace">Aplicar a todos:</span>
@@ -2676,9 +2707,12 @@ function renderAnalysis(found, notFound, isNew, supp) {
               : cc && cc.direcao==='novo' ? `<span style="color:var(--text3);font-size:11px">🆕 €${cc.custoNovo.toFixed(2)} (1.º upload)</span>`
               : `<span style="color:var(--text3);font-size:11px">⚪ €${p.costRaw.toFixed(2)} (igual)</span>`}
             </td>` : '';
-            return `<tr id="found-row-${i}">
+            const isRestock = (p.currentStock===0 || p.currentStock==null) && p.stockVal > 0;
+            return `<tr id="found-row-${i}" class="found-row ${isRestock?'is-restock':''}" data-restock="${isRestock?'1':'0'}">
               <td><input type="checkbox" class="chk-found" data-idx="${i}" checked onchange="updateFoundRow(${i},this.checked)"></td>
-              <td style="font-weight:600;max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.shopifyTitle}">${p.shopifyTitle}</td>
+              <td style="font-weight:600;max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.shopifyTitle}">
+                ${isRestock ? '<span title="Estava esgotado, fornecedor tem stock" style="margin-right:6px">🔄</span>' : ''}${p.shopifyTitle}
+              </td>
               <td class="mono" style="font-size:11px;color:var(--text2)">${p.sku||'—'}</td>
               ${costCell}
               <td style="font-size:12px;white-space:nowrap">
@@ -2700,6 +2734,49 @@ function renderAnalysis(found, notFound, isNew, supp) {
       </div>
     </div>`:''
     }
+
+    ${(() => {
+      const rbn = state.analysisResult?.restockByName || [];
+      if (!rbn.length) return '';
+      return `
+    <div class="review-section" style="margin-bottom:16px;border:1px solid #BBF7D0;background:var(--green-bg);border-radius:10px;padding:14px 16px">
+      <div class="review-section-title" style="color:var(--green);font-weight:700">
+        🔄 ${rbn.length} Possível(eis) reposição(ões) por nome
+        <span style="margin-left:auto;font-size:11px;color:var(--text2);font-weight:400">
+          Produtos esgotados na loja que o fornecedor parece ter (match por nome, não por SKU/EAN). Revê antes de associar.
+        </span>
+      </div>
+      <div class="table-wrap" style="max-height:300px;overflow-y:auto;background:white;border-radius:8px">
+        <table><thead><tr>
+          <th>Produto Shopify (esgotado)</th>
+          <th>Match no upload</th>
+          <th class="mono" style="text-align:right">Stock</th>
+          <th class="mono" style="text-align:right">Score</th>
+          <th style="text-align:right">Acção</th>
+        </tr></thead><tbody>${rbn.map((rb, ri) => `
+          <tr>
+            <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${rb.product.title}">
+              ${rb.product.title}
+              <div class="mono" style="font-size:10px;color:var(--text3)">EAN ${rb.variant.barcode || '—'} · SKU ${rb.variant.sku || '—'}</div>
+            </td>
+            <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${rb.candidate.name}">
+              ${rb.candidate.name}
+              <div class="mono" style="font-size:10px;color:var(--text3)">EAN ${rb.candidate.barcode || '—'} · SKU ${rb.candidate.sku || '—'}</div>
+            </td>
+            <td class="mono" style="text-align:right">
+              <span style="color:var(--text2)">${rb.variant.stock ?? 0}</span>
+              <span style="color:var(--text3)"> → </span>
+              <strong style="color:var(--green)">${rb.candidate.stockVal}</strong>
+            </td>
+            <td class="mono" style="text-align:right;font-weight:700;color:var(--green)">${rb.score}%</td>
+            <td style="text-align:right">
+              <button class="btn btn-sm btn-primary" onclick="acceptRestockByName(${ri})">🔗 Associar e repor</button>
+              <button class="btn btn-sm btn-ghost" onclick="dismissRestockByName(${ri})" title="Não é o mesmo produto">✕</button>
+            </td>
+          </tr>`).join('')}</tbody></table>
+      </div>
+    </div>`;
+    })()}
 
     ${isNew.length>0?`
     <div class="review-section rs-new" style="margin-bottom:16px">
@@ -2748,6 +2825,18 @@ function setAllMode(mode) {
   const chkAll=document.getElementById('chk-all-found'); if(chkAll) chkAll.checked=true;
   if(state.analysisResult) state.analysisResult.found.forEach(p=>{ p._selected=true; p.applyPrice=(mode==='both'||mode==='price'); p.applyStock=(mode==='both'||mode==='stock'); });
   updateApplySummary();
+}
+
+// Filtro "Mostrar só reposições" — produtos esgotados que o fornecedor tem em stock.
+let _restockFilterOn = false;
+function toggleRestockFilter() {
+  _restockFilterOn = !_restockFilterOn;
+  const btn = document.getElementById('btn-restock-filter');
+  if (btn) btn.textContent = _restockFilterOn ? 'Mostrar todos' : 'Mostrar só reposições';
+  document.querySelectorAll('#found-tbody tr.found-row').forEach(tr => {
+    const isR = tr.dataset.restock === '1';
+    tr.style.display = (_restockFilterOn && !isR) ? 'none' : '';
+  });
 }
 
 function editPrice(idx) {
@@ -5404,6 +5493,60 @@ window.openAssociateModal = function(isNewIdx) {
   window._assocRender = renderList;
   openModal();
   setTimeout(() => document.getElementById('assoc-search')?.focus(), 100);
+};
+
+// Aceita uma sugestão de reposição por nome — cria alias, remove do isNew, adiciona a found.
+window.acceptRestockByName = function(restockIdx) {
+  const rbn = state.analysisResult?.restockByName?.[restockIdx];
+  if (!rbn) return;
+  const suppId = state.uploadSuppId;
+  const canonical = ensureCanonicalForVariant(rbn.product.id, rbn.variant.id);
+  if (!canonical) { toast('Erro: variante não encontrada', 'error'); return; }
+  addAlias({
+    canonicalId: canonical.id, suppId,
+    sku: rbn.candidate.sku, barcode: rbn.candidate.barcode,
+    source: 'restock-by-name', confidence: 100, addedBy: 'user',
+  });
+  // Adiciona ao found para ser aplicado neste upload
+  const currentShopifyPrice = parseFloat(rbn.variant.price) || 0;
+  const finalPrice = rbn.candidate.finalPrice || rbn.candidate.rawPrice || currentShopifyPrice;
+  const priceChanged = currentShopifyPrice.toFixed(2) !== finalPrice.toFixed(2);
+  const stockChanged = (rbn.variant.stock ?? 0) !== rbn.candidate.stockVal;
+  state.analysisResult.found.push({
+    ...rbn.candidate,
+    shopifyProduct: rbn.product, shopifyVariant: rbn.variant, shopifyTitle: rbn.product.title,
+    currentPrice: currentShopifyPrice, currentStock: rbn.variant.stock ?? 0,
+    finalPrice, rawPrice: finalPrice,
+    matchedBy: 'ALIAS-restock',
+    applyPrice: priceChanged, applyStock: stockChanged,
+    _selected: true,
+  });
+  // Remove do isNew e do restockByName
+  const rowSku = rbn.candidate.sku, rowBc = rbn.candidate.barcode;
+  state.analysisResult.isNew = state.analysisResult.isNew.filter(r =>
+    !((rowSku && r.sku === rowSku) || (rowBc && r.barcode === rowBc))
+  );
+  state.analysisResult.restockByName.splice(restockIdx, 1);
+  save();
+  toast(`✓ Reposição associada: ${rbn.product.title.slice(0,50)} → stock ${rbn.candidate.stockVal}`, 'success');
+  const supp = state.suppliers.find(s => s.id === suppId);
+  if (supp) renderAnalysis(state.analysisResult.found, [], state.analysisResult.isNew, supp);
+};
+
+// Descarta uma sugestão de reposição — regista negativeMatch para não voltar a aparecer.
+window.dismissRestockByName = function(restockIdx) {
+  const rbn = state.analysisResult?.restockByName?.[restockIdx];
+  if (!rbn) return;
+  const canonical = ensureCanonicalForVariant(rbn.product.id, rbn.variant.id);
+  if (canonical) addNegativeMatch({
+    canonicalId: canonical.id, suppId: state.uploadSuppId,
+    sku: rbn.candidate.sku, barcode: rbn.candidate.barcode,
+  });
+  state.analysisResult.restockByName.splice(restockIdx, 1);
+  save();
+  toast('Sugestão descartada — não voltará a aparecer', 'info');
+  const supp = state.suppliers.find(s => s.id === state.uploadSuppId);
+  if (supp) renderAnalysis(state.analysisResult.found, [], state.analysisResult.isNew, supp);
 };
 
 window.confirmAssociate = function(isNewIdx, productId, variantId) {
