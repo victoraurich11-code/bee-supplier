@@ -27,3 +27,9 @@ venv/
 .env.local
 *.token
 supabase/.temp/
+
+# Node / harness de testes
+node_modules/
+
+# Cloudflare Wrangler
+.wrangler/

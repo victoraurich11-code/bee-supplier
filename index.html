@@ -289,6 +289,7 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--blue); cur
       <div class="nav-item" onclick="navigate('create')" id="nav-create"><span class="icon">✚</span> Criar Produtos</div>
       <div class="nav-item" onclick="navigate('splitVariants')" id="nav-splitVariants"><span class="icon">🔀</span> Separar Variantes</div>
       <div class="nav-item" onclick="navigate('images')" id="nav-images"><span class="icon">🖼</span> Normalizar Imagens</div>
+      <div class="nav-item" onclick="navigate('collections')" id="nav-collections"><span class="icon">📁</span> Categorias</div>
       <div class="nav-item" onclick="navigate('settings')" id="nav-settings"><span class="icon">⚙</span> Configurações</div>
     </nav>
     <div class="sidebar-footer">
@@ -1182,13 +1183,13 @@ function navigate(page) {
   state.page = page;
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   document.getElementById('nav-'+page)?.classList.add('active');
-  const titles = { dashboard:'Dashboard', suppliers:'Fornecedores', upload:'Processar Ficheiro', health:'Saúde do Catálogo', alerts:'Alertas', mercado:'Mercado (KuantoKusta)', matching:'Matching Inteligente', tek4life:'Tek4life — iPhones Grade A+', create:'Criar Produtos', splitVariants:'Separar Variantes — Inspeção', images:'Normalizar Imagens', settings:'Configurações' };
+  const titles = { dashboard:'Dashboard', suppliers:'Fornecedores', upload:'Processar Ficheiro', health:'Saúde do Catálogo', alerts:'Alertas', mercado:'Mercado (KuantoKusta)', matching:'Matching Inteligente', tek4life:'Tek4life — iPhones Grade A+', create:'Criar Produtos', splitVariants:'Separar Variantes — Inspeção', images:'Normalizar Imagens', collections:'Categorias', settings:'Configurações' };
   document.getElementById('page-title').textContent = titles[page]||page;
   render();
 }
 
 function render() {
-  ({ dashboard, suppliers, upload, health, alerts, mercado, matching, tek4life, create, splitVariants, images, settings })[state.page]?.();
+  ({ dashboard, suppliers, upload, health, alerts, mercado, matching, tek4life, create, splitVariants, images, collections, settings })[state.page]?.();
   updateBadges();
 }
 
@@ -4115,6 +4116,258 @@ function images() {
           3. Redimensiona para caber em ${100 - 2*state.settings.imgPaddingPct}% de ${state.settings.imgCanvasSize}px.<br>
           4. Cola centrado em canvas quadrado transparente.<br>
           5. Substitui a original na Shopify (backup do URL num metafield <code>bsm.original_image_backup</code>).
+        </div>
+      </div>
+    </div>`;
+}
+
+// ═══════════════════════════════════════════
+// CATEGORIAS — mover esgotados para o fim
+// ═══════════════════════════════════════════
+const colState = {
+  collections: [],   // [{ id, title, sortOrder, productsCount, handle }]
+  loading: false,
+  processing: false,
+  log: [],
+};
+
+function colLog(msg, type='info') {
+  colState.log.unshift({ msg, type, t: Date.now() });
+  colState.log = colState.log.slice(0, 200);
+  const el = document.getElementById('col-log');
+  if (el) el.innerHTML = colState.log.map(l =>
+    `<div style="font-size:11px;color:var(--${l.type==='error'?'red':l.type==='success'?'green':l.type==='warn'?'yellow':'text2'});margin-bottom:4px"><span style="opacity:0.5">${new Date(l.t).toLocaleTimeString()}</span> ${l.msg}</div>`).join('');
+}
+
+async function colFetchAll() {
+  colState.loading = true;
+  colLog('A carregar collections…');
+  render();
+  try {
+    const all = [];
+    let cursor = null, hasNext = true;
+    while (hasNext) {
+      const q = `query($cursor:String){collections(first:100,after:$cursor){pageInfo{hasNextPage endCursor} edges{node{id title handle sortOrder productsCount{count}}}}}`;
+      const data = await shopifyGQL(q, { cursor });
+      const page = data.collections;
+      for (const e of page.edges) {
+        all.push({
+          id: e.node.id,
+          title: e.node.title,
+          handle: e.node.handle,
+          sortOrder: e.node.sortOrder,
+          productsCount: e.node.productsCount?.count ?? 0,
+        });
+      }
+      hasNext = page.pageInfo.hasNextPage; cursor = page.pageInfo.endCursor;
+    }
+    colState.collections = all.sort((a,b) => a.title.localeCompare(b.title));
+    colLog(`${all.length} collections carregadas`, 'success');
+  } catch (e) {
+    colLog(`Erro: ${e.message}`, 'error');
+  } finally {
+    colState.loading = false;
+    render();
+  }
+}
+
+async function colFetchProducts(collectionId) {
+  // Retorna [{id, totalInventory, tracksInventory, title}] na ordem atual da collection
+  const items = [];
+  let cursor = null, hasNext = true;
+  while (hasNext) {
+    const q = `query($id:ID!,$cursor:String){collection(id:$id){products(first:250,after:$cursor){pageInfo{hasNextPage endCursor} edges{node{id title totalInventory tracksInventory}}}}}`;
+    const data = await shopifyGQL(q, { id: collectionId, cursor });
+    const page = data.collection.products;
+    for (const e of page.edges) {
+      items.push({
+        id: e.node.id,
+        title: e.node.title,
+        totalInventory: e.node.totalInventory ?? 0,
+        tracksInventory: e.node.tracksInventory ?? true,
+      });
+    }
+    hasNext = page.pageInfo.hasNextPage; cursor = page.pageInfo.endCursor;
+    if (items.length > 5000) break;
+  }
+  return items;
+}
+
+function colComputeMoves(products) {
+  // Classifica: esgotado = tracksInventory && totalInventory <= 0
+  const inStock = [];
+  const outStock = [];
+  for (const p of products) {
+    if (p.tracksInventory && p.totalInventory <= 0) outStock.push(p);
+    else inStock.push(p);
+  }
+  const newOrder = [...inStock, ...outStock];
+  // Calcula apenas os produtos cuja posição muda (newPosition é 0-based mas Shopify aceita string)
+  const moves = [];
+  for (let i = 0; i < newOrder.length; i++) {
+    const p = newOrder[i];
+    const oldIdx = products.findIndex(x => x.id === p.id);
+    if (oldIdx !== i) moves.push({ id: p.id, newPosition: String(i) });
+  }
+  return { moves, inStock: inStock.length, outStock: outStock.length };
+}
+
+async function colReorder(collectionId, moves) {
+  // Envia em chunks de 250 para não exceder limites
+  const CHUNK = 250;
+  for (let i = 0; i < moves.length; i += CHUNK) {
+    const slice = moves.slice(i, i + CHUNK);
+    const q = `mutation($id:ID!,$moves:[MoveInput!]!){collectionReorderProducts(id:$id,moves:$moves){job{id} userErrors{message field}}}`;
+    const data = await shopifyGQL(q, { id: collectionId, moves: slice });
+    const errs = data.collectionReorderProducts.userErrors;
+    if (errs && errs.length) throw new Error(errs[0].message);
+  }
+}
+
+async function colReorderOne(col) {
+  if (col.sortOrder !== 'MANUAL') {
+    colLog(`↷ ${col.title}: sortOrder ${col.sortOrder} — saltado (precisa ser MANUAL)`, 'warn');
+    return { skipped: true };
+  }
+  if (col.productsCount === 0) {
+    colLog(`↷ ${col.title}: vazia`, 'warn');
+    return { skipped: true };
+  }
+  const products = await colFetchProducts(col.id);
+  const { moves, inStock, outStock } = colComputeMoves(products);
+  if (moves.length === 0) {
+    colLog(`✓ ${col.title}: já ordenada (${inStock} com stock, ${outStock} esgotados)`, 'success');
+    return { skipped: false, moved: 0 };
+  }
+  await colReorder(col.id, moves);
+  colLog(`✓ ${col.title}: ${moves.length} produtos movidos (${inStock} com stock, ${outStock} esgotados ao fundo)`, 'success');
+  return { skipped: false, moved: moves.length };
+}
+
+async function colReorderAll() {
+  if (colState.processing) return;
+  const manual = colState.collections.filter(c => c.sortOrder === 'MANUAL' && c.productsCount > 0);
+  if (!manual.length) { toast('Nenhuma collection MANUAL com produtos', 'error'); return; }
+  if (!confirm(`Reordenar ${manual.length} collections MANUAL?\n\nDentro de cada uma, produtos esgotados (totalInventory ≤ 0) vão para o fim. Mantém a ordem relativa atual dentro de cada grupo.`)) return;
+
+  colState.processing = true; render();
+  let totalMoved = 0, totalCols = 0, errors = 0;
+  for (const col of manual) {
+    try {
+      const r = await colReorderOne(col);
+      if (!r.skipped) { totalCols++; totalMoved += r.moved; }
+      // Pequena pausa entre collections para não bater rate limit
+      await new Promise(r => setTimeout(r, 600));
+    } catch (e) {
+      errors++;
+      colLog(`✕ ${col.title}: ${e.message}`, 'error');
+    }
+  }
+  colState.processing = false;
+  colLog(`Concluído: ${totalCols} collections reordenadas (${totalMoved} produtos movidos), ${errors} erros`, errors ? 'warn' : 'success');
+  render();
+}
+
+async function colReorderSingle(collectionId) {
+  if (colState.processing) return;
+  const col = colState.collections.find(c => c.id === collectionId);
+  if (!col) return;
+  colState.processing = true; render();
+  try { await colReorderOne(col); }
+  catch (e) { colLog(`✕ ${col.title}: ${e.message}`, 'error'); }
+  colState.processing = false;
+  render();
+}
+
+function collections() {
+  document.getElementById('topbar-actions').innerHTML = `
+    <button class="btn btn-ghost btn-sm" onclick="colFetchAll()" ${colState.loading?'disabled':''}>↻ Carregar</button>
+    <button class="btn btn-primary btn-sm" onclick="colReorderAll()" ${colState.processing||colState.collections.length===0?'disabled':''}>
+      ${colState.processing?'A processar…':'▶ Mover esgotados para o fim (todas)'}
+    </button>
+  `;
+
+  if (colState.collections.length === 0) {
+    document.getElementById('content').innerHTML = `
+      <div class="card" style="text-align:center;padding:40px">
+        <div style="font-size:40px;margin-bottom:12px">📁</div>
+        <h3 style="font-family:'Syne',sans-serif;margin-bottom:8px">Categorias</h3>
+        <p style="color:var(--text2);margin-bottom:16px;max-width:520px;margin-left:auto;margin-right:auto">
+          Reordena todas as categorias (collections) com sort <strong>Manualmente</strong>, empurrando produtos sem stock para o fim. Produtos com stock e sem stock mantêm a ordem relativa atual.
+        </p>
+        <button class="btn btn-primary" onclick="colFetchAll()" ${colState.loading?'disabled':''}>
+          ${colState.loading?'A carregar…':'Carregar collections'}
+        </button>
+      </div>`;
+    return;
+  }
+
+  const manual = colState.collections.filter(c => c.sortOrder === 'MANUAL');
+  const nonManual = colState.collections.filter(c => c.sortOrder !== 'MANUAL');
+
+  const rowsManual = manual.map(c => `
+    <tr>
+      <td style="padding:8px"><a href="https://admin.shopify.com/store/${(state.settings.shop||'').replace('.myshopify.com','')}/collections/${c.id.replace('gid://shopify/Collection/','')}" target="_blank" style="color:var(--text);text-decoration:none">${c.title}</a></td>
+      <td style="padding:8px;text-align:center;color:var(--text2);font-size:12px">${c.productsCount}</td>
+      <td style="padding:8px;text-align:right"><button class="btn btn-ghost btn-sm" onclick="colReorderSingle('${c.id}')" ${colState.processing?'disabled':''}>Reordenar</button></td>
+    </tr>
+  `).join('');
+
+  const rowsNonManual = nonManual.map(c => `
+    <tr>
+      <td style="padding:8px;color:var(--text2)">${c.title}</td>
+      <td style="padding:8px;text-align:center;color:var(--text2);font-size:12px">${c.productsCount}</td>
+      <td style="padding:8px;text-align:right;font-size:11px;color:var(--text3)">${c.sortOrder} — não suporta reorder manual</td>
+    </tr>
+  `).join('');
+
+  document.getElementById('content').innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 300px;gap:16px;align-items:start">
+      <div>
+        <div class="card" style="padding:12px;margin-bottom:12px">
+          <div style="font-size:13px">
+            <strong>${colState.collections.length}</strong> collections total ·
+            <span style="color:var(--green)">${manual.length} manuais</span> ·
+            <span style="color:var(--text2)">${nonManual.length} automáticas</span>
+          </div>
+        </div>
+
+        ${manual.length ? `
+        <div class="card" style="padding:0;margin-bottom:16px;overflow:hidden">
+          <div class="table-header" style="padding:10px 12px;font-family:'Syne',sans-serif;font-weight:700;font-size:13px;border-bottom:1px solid var(--border)">Manuais — podem ser reordenadas</div>
+          <table style="width:100%;border-collapse:collapse">
+            <thead><tr style="background:var(--panel);font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:1px">
+              <th style="padding:8px;text-align:left">Collection</th>
+              <th style="padding:8px;text-align:center;width:80px">Produtos</th>
+              <th style="padding:8px;text-align:right;width:140px"></th>
+            </tr></thead>
+            <tbody>${rowsManual}</tbody>
+          </table>
+        </div>` : ''}
+
+        ${nonManual.length ? `
+        <div class="card" style="padding:0;overflow:hidden">
+          <div class="table-header" style="padding:10px 12px;font-family:'Syne',sans-serif;font-weight:700;font-size:13px;border-bottom:1px solid var(--border);color:var(--text2)">Automáticas — converter para Manual no admin Shopify se quiseres reordenar</div>
+          <table style="width:100%;border-collapse:collapse">
+            <thead><tr style="background:var(--panel);font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:1px">
+              <th style="padding:8px;text-align:left">Collection</th>
+              <th style="padding:8px;text-align:center;width:80px">Produtos</th>
+              <th style="padding:8px;text-align:right;width:240px">Sort</th>
+            </tr></thead>
+            <tbody>${rowsNonManual}</tbody>
+          </table>
+        </div>` : ''}
+      </div>
+
+      <div class="card" style="padding:14px;position:sticky;top:16px">
+        <div style="font-family:'Syne',sans-serif;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--text3);margin-bottom:10px">Log</div>
+        <div id="col-log" style="max-height:500px;overflow:auto">${colState.log.map(l =>
+          `<div style="font-size:11px;color:var(--${l.type==='error'?'red':l.type==='success'?'green':l.type==='warn'?'yellow':'text2'});margin-bottom:4px"><span style="opacity:0.5">${new Date(l.t).toLocaleTimeString()}</span> ${l.msg}</div>`).join('')}</div>
+        <hr style="margin:14px 0;border:none;border-top:1px solid var(--border)">
+        <div style="font-size:11px;color:var(--text2);line-height:1.5">
+          <strong>Regra:</strong> produto sem stock = <code>totalInventory ≤ 0</code> e a tracar inventário.
+          Produtos digitais ou que não tracam stock ficam no grupo "com stock".
+          Ordem relativa preservada dentro de cada grupo.
         </div>
       </div>
     </div>`;
