@@ -91,6 +91,26 @@ groups.slice(0, 5).forEach((g, gi) => {
 });
 if (groups.length > 5) console.log(DIM(`  …e mais ${groups.length - 5} grupos`));
 
+// Sanity: nenhum grupo deve juntar produtos com gerações de modelo diferentes
+// (regressão reportada: iPhone 13 vs iPhone 14, S26 vs S25, etc.)
+const ROBUST_KEY = (name) => {
+  const s = (name || '').toLowerCase();
+  const tokens = [];
+  (s.match(/\biphone\s*\d+e?\b/g) || []).forEach(x => tokens.push(x.replace(/\s+/g, '')));
+  (s.match(/\b[sa]\d{2,4}e?\b/g) || []).forEach(x => tokens.push(x));
+  return tokens.sort().join('|');
+};
+const crossGen = groups.filter(g => {
+  const keys = new Set(g.items.map(i => ROBUST_KEY(i.name)).filter(Boolean));
+  return keys.size > 1;
+});
+if (crossGen.length) {
+  console.log(`\n  ${FAIL} ${crossGen.length} grupo(s) misturam gerações/modelos diferentes:`);
+  crossGen.forEach(g => g.items.forEach(it => console.log(`    • ${it.name.slice(0, 70)}`)));
+} else {
+  console.log(`  ${PASS} Nenhum grupo mistura gerações/modelos diferentes.`);
+}
+
 // 5.2 Análise
 section('PASSO 2 — Análise (matching contra Shopify)');
 const decisions = buildDecisions(groups, AUTO_MERGE);

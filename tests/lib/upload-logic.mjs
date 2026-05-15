@@ -21,7 +21,12 @@ function _keyTokens(s) {
   const caps = (s.match(/\b\d+\s*(gb|tb)\b/g) || []).map(t => t.replace(/\s+/g, '')).sort().join('|');
   const tier = (s.match(/\b(pro|max|ultra|plus|mini)\b/g) || []).sort().join('|');
   const colors = (s.match(/\b[a-z]{3,}\b/g) || []).filter(w => COLOR_WORDS.has(w)).sort().join('|');
-  return { caps, tier, colors };
+  const gen = [];
+  (s.match(/\biphone\s*\d+e?\b/g) || []).forEach(x => gen.push(x.replace(/\s+/g, '')));
+  (s.match(/\b[sa]\d{2,4}e?\b/g) || []).forEach(x => gen.push(x));
+  (s.match(/\bnote\s*\d+\b/g) || []).forEach(x => gen.push(x.replace(/\s+/g, '')));
+  const model = gen.sort().join('|');
+  return { caps, tier, colors, model };
 }
 export function nameSimilarity(a, b) {
   a = (a || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
@@ -31,8 +36,9 @@ export function nameSimilarity(a, b) {
   if (ka.caps !== kb.caps) return 0;
   if (ka.tier !== kb.tier) return 0;
   if (ka.colors !== kb.colors) return 0;
-  const wa = new Set(a.split(/\s+/).filter(w => w.length > 2));
-  const wb = new Set(b.split(/\s+/).filter(w => w.length > 2));
+  if (ka.model !== kb.model) return 0;
+  const wa = new Set(a.split(/\s+/).filter(w => w.length > 2 || /^\d/.test(w)));
+  const wb = new Set(b.split(/\s+/).filter(w => w.length > 2 || /^\d/.test(w)));
   let common = 0; wa.forEach(w => { if (wb.has(w)) common++; });
   return Math.round((common / Math.max(wa.size, wb.size, 1)) * 100);
 }
