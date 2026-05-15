@@ -2343,13 +2343,18 @@ function _suffixAfterDash(origLower) {
 function _keyTokens(orig, stripped) {
   const s = stripped;
   const caps = (s.match(/\b\d+\s*(gb|tb)\b/g) || []).map(t => t.replace(/\s+/g,'')).sort().join('|');
-  const tier = (s.match(/\b(pro|max|ultra|plus|mini)\b/g) || []).sort().join('|');
+  // Tier extraído do ORIGINAL (antes do strip) para preservar "+"
+  // (Note 14 Pro vs Note 14 Pro+, Galaxy S26 vs S26+).
+  // Não usar \b no fim porque "+" não é word boundary.
+  const tier = [...orig.matchAll(/\b(pro\+?|max\+?|ultra\+?|plus|mini)(?=\s|$|[^a-z0-9+])/g)]
+    .map(m => m[1]).sort().join('|');
   const colors = (s.match(/\b[a-z]{3,}\b/g) || []).filter(w => COLOR_WORDS.has(w)).sort().join('|');
-  // Geração do modelo — desqualifica iPhone 13 vs iPhone 14, S26 vs S25, S942 vs S948, etc.
+  // Geração do modelo — desqualifica iPhone 13 vs iPhone 14, S26 vs S25, S26 vs S26+, etc.
+  // Também do original para preservar "+".
   const gen = [];
-  (s.match(/\biphone\s*\d+e?\b/g) || []).forEach(x => gen.push(x.replace(/\s+/g,'')));
-  (s.match(/\b[sa]\d{2,4}e?\b/g) || []).forEach(x => gen.push(x));
-  (s.match(/\bnote\s*\d+\b/g) || []).forEach(x => gen.push(x.replace(/\s+/g,'')));
+  (orig.match(/\biphone\s*\d+e?\b/g) || []).forEach(x => gen.push(x.replace(/\s+/g,'')));
+  [...orig.matchAll(/\b([sa]\d{2,4}e?\+?)(?=\s|$|[^a-z0-9+])/g)].forEach(m => gen.push(m[1]));
+  (orig.match(/\bnote\s*\d+\b/g) || []).forEach(x => gen.push(x.replace(/\s+/g,'')));
   const model = gen.sort().join('|');
   const suffix = _suffixAfterDash(orig);
   return { caps, tier, colors, model, suffix };
@@ -2359,16 +2364,21 @@ function nameSimilarity(a, b) {
   const bo = (b || '').toLowerCase();
   const as = ao.replace(/[^a-z0-9\s]/g,'').trim();
   const bs = bo.replace(/[^a-z0-9\s]/g,'').trim();
-  if (as === bs) return 100;
+  // Identidade total — incluindo caracteres especiais como "+".
+  // NÃO comparar `as === bs` antes das key checks: o strip apaga o "+"
+  // e faria "Pro" e "Pro+" parecerem idênticos, ignorando o tier.
+  if (ao === bo) return 100;
   const ka = _keyTokens(ao, as), kb = _keyTokens(bo, bs);
   if (ka.caps !== kb.caps) return 0;       // 256GB vs 512GB
-  if (ka.tier !== kb.tier) return 0;       // Pro vs Pro Max
+  if (ka.tier !== kb.tier) return 0;       // Pro vs Pro Max, Pro vs Pro+
   if (ka.colors !== kb.colors) return 0;   // Black vs White (lista pré-definida)
-  if (ka.model !== kb.model) return 0;     // iPhone 13 vs 14, S26 vs S25
+  if (ka.model !== kb.model) return 0;     // iPhone 13 vs 14, S26 vs S25, S26 vs S26+
   // Sufixo após " - ": robusto a cores compostas (Titanium Icyblue) e nomes
   // próprios (Frost, Obsidian) que não estão em COLOR_WORDS. Só compara
   // quando ambos os títulos têm o sufixo (formato consistente).
   if (ka.suffix && kb.suffix && ka.suffix !== kb.suffix) return 0;
+  // Depois das key checks: se as strings stripped são iguais, é o mesmo produto.
+  if (as === bs) return 100;
   // Mantém tokens numéricos curtos ("13", "5g") — são distintivos, não ruído.
   const wa = new Set(as.split(/\s+/).filter(w => w.length > 2 || /^\d/.test(w)));
   const wb = new Set(bs.split(/\s+/).filter(w => w.length > 2 || /^\d/.test(w)));

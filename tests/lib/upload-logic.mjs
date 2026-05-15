@@ -25,12 +25,13 @@ function _suffixAfterDash(origLower) {
 function _keyTokens(orig, stripped) {
   const s = stripped;
   const caps = (s.match(/\b\d+\s*(gb|tb)\b/g) || []).map(t => t.replace(/\s+/g, '')).sort().join('|');
-  const tier = (s.match(/\b(pro|max|ultra|plus|mini)\b/g) || []).sort().join('|');
+  const tier = [...orig.matchAll(/\b(pro\+?|max\+?|ultra\+?|plus|mini)(?=\s|$|[^a-z0-9+])/g)]
+    .map(m => m[1]).sort().join('|');
   const colors = (s.match(/\b[a-z]{3,}\b/g) || []).filter(w => COLOR_WORDS.has(w)).sort().join('|');
   const gen = [];
-  (s.match(/\biphone\s*\d+e?\b/g) || []).forEach(x => gen.push(x.replace(/\s+/g, '')));
-  (s.match(/\b[sa]\d{2,4}e?\b/g) || []).forEach(x => gen.push(x));
-  (s.match(/\bnote\s*\d+\b/g) || []).forEach(x => gen.push(x.replace(/\s+/g, '')));
+  (orig.match(/\biphone\s*\d+e?\b/g) || []).forEach(x => gen.push(x.replace(/\s+/g, '')));
+  [...orig.matchAll(/\b([sa]\d{2,4}e?\+?)(?=\s|$|[^a-z0-9+])/g)].forEach(m => gen.push(m[1]));
+  (orig.match(/\bnote\s*\d+\b/g) || []).forEach(x => gen.push(x.replace(/\s+/g, '')));
   const model = gen.sort().join('|');
   const suffix = _suffixAfterDash(orig);
   return { caps, tier, colors, model, suffix };
@@ -40,13 +41,14 @@ export function nameSimilarity(a, b) {
   const bo = (b || '').toLowerCase();
   const as = ao.replace(/[^a-z0-9\s]/g, '').trim();
   const bs = bo.replace(/[^a-z0-9\s]/g, '').trim();
-  if (as === bs) return 100;
+  if (ao === bo) return 100;   // NÃO usar `as === bs` aqui — apagaria o "+"
   const ka = _keyTokens(ao, as), kb = _keyTokens(bo, bs);
   if (ka.caps !== kb.caps) return 0;
   if (ka.tier !== kb.tier) return 0;
   if (ka.colors !== kb.colors) return 0;
   if (ka.model !== kb.model) return 0;
   if (ka.suffix && kb.suffix && ka.suffix !== kb.suffix) return 0;
+  if (as === bs) return 100;
   const wa = new Set(as.split(/\s+/).filter(w => w.length > 2 || /^\d/.test(w)));
   const wb = new Set(bs.split(/\s+/).filter(w => w.length > 2 || /^\d/.test(w)));
   let common = 0; wa.forEach(w => { if (wb.has(w)) common++; });

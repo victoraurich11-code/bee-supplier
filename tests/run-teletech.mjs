@@ -128,6 +128,24 @@ if (crossColor.length) {
   console.log(`  ${PASS} Nenhum grupo mistura cores diferentes.`);
 }
 
+// Sanity 3: nenhum grupo deve juntar tiers diferentes (Pro vs Pro+, S26 vs S26+).
+const TIER_KEY = (name) => {
+  const s = (name || '').toLowerCase();
+  const tier = [...s.matchAll(/\b(pro\+?|max\+?|ultra\+?|plus|mini)(?=\s|$|[^a-z0-9+])/g)].map(m => m[1]).sort().join('|');
+  const samsungPlus = [...s.matchAll(/\b([sa]\d{2,4}e?\+?)(?=\s|$|[^a-z0-9+])/g)].map(m => m[1]).sort().join('|');
+  return tier + '::' + samsungPlus;
+};
+const crossTier = groups.filter(g => {
+  const keys = new Set(g.items.map(i => TIER_KEY(i.name)));
+  return keys.size > 1;
+});
+if (crossTier.length) {
+  console.log(`  ${FAIL} ${crossTier.length} grupo(s) misturam tiers diferentes (Pro vs Pro+, S26 vs S26+):`);
+  crossTier.forEach(g => g.items.forEach(it => console.log(`    • ${it.name.slice(0, 90)}`)));
+} else {
+  console.log(`  ${PASS} Nenhum grupo mistura tiers diferentes (Pro/Pro+, S26/S26+).`);
+}
+
 // 5.2 Análise
 section('PASSO 2 — Análise (matching contra Shopify)');
 const decisions = buildDecisions(groups, AUTO_MERGE);
