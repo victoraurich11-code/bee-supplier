@@ -71,10 +71,15 @@ console.log(`  AUTO_MERGE: ${AUTO_MERGE} (${AUTO_MERGE === '1' ? '"Todos iguais"
 
 const { rows, colMap } = loadXlsx(XLSX_PATH);
 const fixture = loadFixture(FIXTURE_PATH);
-const supplier = { id: 'teletech', name: 'Teletech' };
+// FIX SG#5: Teletech é in-stock list — não zerar ausentes.
+const supplier = { id: 'teletech', name: 'Teletech', isInStockList: true };
+const productAliases = fixture.productAliases || [];
+const productCanonicals = fixture.productCanonicals || {};
 
 console.log(`  Linhas no ficheiro: ${rows.length}`);
 console.log(`  Produtos no fixture: ${fixture.products.length}`);
+console.log(`  Aliases no fixture: ${productAliases.length}`);
+console.log(`  Supplier isInStockList: ${supplier.isInStockList}`);
 
 // 5.1 Duplicados
 section('PASSO 1 — Detecção de duplicados');
@@ -93,6 +98,7 @@ const result = doAnalysis({
   parsedRows: rows, colMap, supplier,
   shopifyProducts: fixture.products,
   decisions,
+  productAliases, productCanonicals,
 });
 console.log(`  Found: ${result.found.length}  ·  isNew: ${result.isNew.length}  ·  notFound: ${result.notFound.length}`);
 console.log(`  knownBarcodes registados: ${result.knownBarcodes.size}`);
@@ -192,12 +198,10 @@ if (suspeitos.length === 0) {
 // 5.5 Health check
 section('PASSO 5 — Health check (vai propor zerar?)');
 const hc = runPostUploadHealthCheck({
-  supplierId: supplier.id,
+  supplier,
   shopifyProducts: fixture.products,
   processedSkus: { skus: result.knownSkus, barcodes: result.knownBarcodes, total: result.uploadTotal },
   uploadHistory: [
-    // Histórico sintético: simula uploads anteriores com tamanhos parecidos para garantir
-    // que avgExpected > 50 e que coveragePct fica próximo de 100 (logo não dispara modal parcial).
     { supplierId: 'teletech', total: 340 },
     { supplierId: 'teletech', total: 330 },
     { supplierId: 'teletech', total: 345 },

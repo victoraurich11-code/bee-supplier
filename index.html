@@ -859,6 +859,14 @@ async function runPostUploadHealthCheck(suppId, processedSkus) {
     return;
   }
 
+  // FIX SG#5: se o fornecedor está marcado como "in-stock list", ausência ≠ descontinuação.
+  // Apenas registamos contadores SEM escalar para crítico/zero, e mostramos info passiva.
+  if (supp.isInStockList) {
+    updateMissedCounters(missing, suppId, false);
+    toast(`${supp.name} (in-stock list): ${missing.length} produto(s) ausentes — preservados`, 'info');
+    return;
+  }
+
   // Coverage check: if upload is suspiciously small, warn but don't auto-escalate
   const avgExpected = computeAvgUploadSize(suppId);
   const uploadSize = processedSkus.total;
@@ -1932,6 +1940,16 @@ function openSupplierModal(id=null) {
         <input type="number" id="s-zerothreshold" value="${s?.zeroThreshold||4}" min="1" max="20" step="1">
         <span style="font-size:11px;color:var(--text2)">Recomendado: 2 para Teletech, 4 para outros. Após N uploads ausente, o produto passa a "crítico" e é proposto para zero de stock.</span>
       </div>
+      <div class="form-group" style="background:var(--orange-bg);border:1px solid #FDE68A;border-radius:8px;padding:10px 12px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="s-instocklist" ${s?.isInStockList?'checked':''} style="width:16px;height:16px;accent-color:var(--orange)">
+          <span style="font-weight:600">Esta listagem é uma <em>in-stock list</em> (só produtos disponíveis no momento)</span>
+        </label>
+        <span style="font-size:11px;color:var(--text2);display:block;margin-top:6px">
+          Quando activo, produtos ausentes deste fornecedor <strong>nunca</strong> são propostos para zerar — apenas marcados como "não listado hoje".
+          Útil para fornecedores que só publicam stock disponível (Teletech, Depau parcial, etc.). Não usar para catálogos completos.
+        </span>
+      </div>
       <div style="border-top:1px solid var(--border);padding-top:14px">
         <div class="card-title">Mapeamento de Colunas</div>
         <div class="col-mapper">
@@ -1975,6 +1993,7 @@ function saveSupplier(id) {
     colPrice: document.getElementById('s-colprice').value.trim(),
     colStatus: document.getElementById('s-colstatus').value.trim(),
     pricingMode: document.getElementById('s-pricingmode')?.value || 'automatico',
+    isInStockList: !!document.getElementById('s-instocklist')?.checked,
     lastUpload: id ? state.suppliers.find(s=>s.id===id)?.lastUpload : null,
   };
   if(id) state.suppliers = state.suppliers.map(s=>s.id===id?data:s);
@@ -2127,6 +2146,9 @@ function runAnalysis() {
     const isManual = supp.pricingMode === 'manual';
 
     // Apply duplicate merge decisions
+    // FIX SG#2: preservar TODOS os barcodes/SKUs do grupo, não só os do primeiro item.
+    // Caso contrário, se a variante Shopify tem um EAN secundário do grupo, o lookup
+    // falha e o produto cai erradamente em "Novo" (e depois em "missing" no health check).
     const skipIdxs = new Set();
     const extraRows = [];
     decisions.forEach(d => {
@@ -2134,7 +2156,17 @@ function runAnalysis() {
         d.items.forEach(x => skipIdxs.add(x.idx));
         const mergedStock = d.items.reduce((a, x) => a + x.stock, 0);
         const minCost = Math.min(...d.items.map(x => x.cost));
-        extraRows.push({ [nc]: d.items[0].name, [sc]: d.items[0].sku, [bc]: d.items[0].barcode, [stc]: String(mergedStock), [pc]: String(minCost) });
+        const altBarcodes = d.items.map(x => (x.barcode || '').toString().trim()).filter(Boolean);
+        const altSkus     = d.items.map(x => (x.sku || '').toString().trim()).filter(Boolean);
+        extraRows.push({
+          [nc]: d.items[0].name,
+          [sc]: d.items[0].sku,
+          [bc]: d.items[0].barcode,
+          [stc]: String(mergedStock),
+          [pc]: String(minCost),
+          _altBarcodes: altBarcodes,
+          _altSkus: altSkus,
+        });
         d.unselectedItems.forEach(x => {
           skipIdxs.add(x.idx);
           extraRows.push({ [nc]: x.name, [sc]: x.sku, [bc]: x.barcode, [stc]: String(x.stock), [pc]: String(x.cost) });
@@ -2167,8 +2199,15 @@ function runAnalysis() {
       const stockVal = parseInt((row[stc] || '0').toString().replace(/[^0-9]/g, '')) || 0;
       const costRaw = parseFloat((row[pc] || '0').toString().replace(',', '.')) || 0;
 
+      // FIX SG#2: linhas merged trazem alternativas — registar tudo em knownSkus/knownBarcodes
+      // para o health check (`runPostUploadHealthCheck`) não marcar como "missing" variantes
+      // Shopify cujo EAN/SKU veio numa das linhas secundárias do grupo.
+      const altBarcodes = Array.isArray(row._altBarcodes) ? row._altBarcodes : [];
+      const altSkus     = Array.isArray(row._altSkus)     ? row._altSkus     : [];
       if (sku) knownSkus.add(sku.toLowerCase());
+      altSkus.forEach(s => { if (s) knownSkus.add(s.toLowerCase()); });
       if (barcode) knownBarcodes.add(barcode);
+      altBarcodes.forEach(b => { if (b) knownBarcodes.add(b); });
 
       const rawPrice = supp.priceType === 'pvp' ? costRaw : costRaw * (1 + (supp.margin || 0) / 100);
       const finalPrice = applyPriceRounding(rawPrice, supp.rounding);
@@ -2176,9 +2215,31 @@ function runAnalysis() {
       // Chave para histórico de custo (modo manual)
       const histKey = sku ? `${supp.id}::${sku.toLowerCase()}` : barcode ? `${supp.id}::bc::${barcode}` : null;
 
+      // FIX SG#2: lookup tenta SKU primário → barcode primário → alt SKUs → alt barcodes.
+      // FIX SG#1: depois disso, se não houver match, consulta `findCanonicalForRow`
+      // (canónicos + aliases acumulados) para resolver SKUs substituídos pelo fornecedor.
       let match = null, matchedBy = null;
-      if (sku && skuMap[sku.toLowerCase()]) { match = skuMap[sku.toLowerCase()]; matchedBy = 'SKU'; }
-      else if (barcode && barcodeMap[barcode]) { match = barcodeMap[barcode]; matchedBy = 'BARCODE'; }
+      const trySku = (s) => {
+        const k = (s || '').toLowerCase();
+        if (k && skuMap[k]) { match = skuMap[k]; matchedBy = 'SKU'; }
+      };
+      const tryBc = (b) => {
+        if (b && barcodeMap[b]) { match = barcodeMap[b]; matchedBy = 'BARCODE'; }
+      };
+      if (sku) trySku(sku);
+      if (!match && barcode) tryBc(barcode);
+      if (!match) { for (const s of altSkus) { trySku(s); if (match) { matchedBy = 'SKU-alt'; break; } } }
+      if (!match) { for (const b of altBarcodes) { tryBc(b); if (match) { matchedBy = 'BARCODE-alt'; break; } } }
+      if (!match) {
+        const canonHit = findCanonicalForRow({ suppId: supp.id, sku, barcode });
+        if (canonHit?.canonical?.shopifyVariantId) {
+          const vid = canonHit.canonical.shopifyVariantId;
+          for (const p of state.shopifyProducts) {
+            const v = p.variants.find(x => x.id === vid);
+            if (v) { match = { product: p, variant: v }; matchedBy = 'ALIAS-' + canonHit.matchedBy; break; }
+          }
+        }
+      }
 
       if (match) {
         const currentShopifyPrice = parseFloat(match.variant.price) || 0;
@@ -2259,13 +2320,34 @@ function runAnalysis() {
 // ═══════════════════════════════════════════
 // STEP 2.5 — DUPLICATE DETECTION & MERGE
 // ═══════════════════════════════════════════
+// FIX SG#6: o detector de duplicados estava a juntar capacidades/tiers/cores diferentes
+// (ex.: S26 Ultra 256GB com S26 Ultra 512GB) porque a similaridade era Jaccard puro
+// sobre palavras — diferenças num só token bastam mas pesam ~10% só.
+// Solução: tokens-chave (capacidade, tier Pro/Max/Ultra/Plus/Mini, cor) são
+// desqualificadores: se diferem, similaridade = 0.
+const COLOR_WORDS = new Set([
+  'black','white','blue','violet','gold','silver','pink','red','green','yellow','orange','purple',
+  'gray','grey','midnight','starlight','charcoal','titanium','natural','desert','cosmic','deep',
+  'navy','ice','icy','beige','cobalt','shadow','rose','peach','mint','sky','space','jet','phantom',
+  'graphite','sierra','teal','lavender','coral','almond','olive','sand','clay','onyx','platinum'
+]);
+function _keyTokens(s) {
+  const caps = (s.match(/\b\d+\s*(gb|tb)\b/g) || []).map(t => t.replace(/\s+/g,'')).sort().join('|');
+  const tier = (s.match(/\b(pro|max|ultra|plus|mini)\b/g) || []).sort().join('|');
+  const colors = (s.match(/\b[a-z]{3,}\b/g) || []).filter(w => COLOR_WORDS.has(w)).sort().join('|');
+  return { caps, tier, colors };
+}
 function nameSimilarity(a, b) {
-  a = a.toLowerCase().replace(/[^a-z0-9\s]/g,'').trim();
-  b = b.toLowerCase().replace(/[^a-z0-9\s]/g,'').trim();
+  a = (a || '').toLowerCase().replace(/[^a-z0-9\s]/g,'').trim();
+  b = (b || '').toLowerCase().replace(/[^a-z0-9\s]/g,'').trim();
   if (a === b) return 100;
-  const wa = new Set(a.split(/\s+/).filter(w=>w.length>2));
-  const wb = new Set(b.split(/\s+/).filter(w=>w.length>2));
-  let common = 0; wa.forEach(w=>{ if(wb.has(w)) common++; });
+  const ka = _keyTokens(a), kb = _keyTokens(b);
+  if (ka.caps !== kb.caps) return 0;       // 256GB vs 512GB → não é o mesmo produto
+  if (ka.tier !== kb.tier) return 0;       // Pro vs Pro Max → não é o mesmo produto
+  if (ka.colors !== kb.colors) return 0;   // Black vs White → não é o mesmo produto
+  const wa = new Set(a.split(/\s+/).filter(w => w.length > 2));
+  const wb = new Set(b.split(/\s+/).filter(w => w.length > 2));
+  let common = 0; wa.forEach(w => { if (wb.has(w)) common++; });
   return Math.round((common / Math.max(wa.size, wb.size, 1)) * 100);
 }
 
@@ -2583,10 +2665,19 @@ function renderAnalysis(found, notFound, isNew, supp) {
 
     ${isNew.length>0?`
     <div class="review-section rs-new" style="margin-bottom:16px">
-      <div class="review-section-title">🆕 ${isNew.length} Produto(s) Novo(s) — serão adicionados aos Alertas</div>
-      <div class="table-wrap" style="max-height:200px;overflow-y:auto">
-        <table><thead><tr><th>Nome</th><th>SKU</th><th>Preço Final</th><th>Stock</th></tr></thead>
-        <tbody>${isNew.map(p=>`<tr><td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.name}</td><td class="mono">${p.sku||'—'}</td><td class="mono">€${p.finalPrice.toFixed(2)}</td><td class="mono">${p.stockVal}</td></tr>`).join('')}</tbody></table>
+      <div class="review-section-title">🆕 ${isNew.length} Produto(s) Novo(s) — serão adicionados aos Alertas
+        <span style="margin-left:auto;font-size:11px;color:var(--text2)">💡 Se algum destes for afinal um produto que já tens, clica em "🔗 Associar"</span>
+      </div>
+      <div class="table-wrap" style="max-height:260px;overflow-y:auto">
+        <table><thead><tr><th>Nome</th><th>SKU</th><th>EAN</th><th>Preço Final</th><th>Stock</th><th style="text-align:right">Acção</th></tr></thead>
+        <tbody id="isnew-tbody">${isNew.map((p,i)=>`<tr id="isnew-row-${i}">
+          <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.name}</td>
+          <td class="mono">${p.sku||'—'}</td>
+          <td class="mono">${p.barcode||'—'}</td>
+          <td class="mono">€${p.finalPrice.toFixed(2)}</td>
+          <td class="mono">${p.stockVal}</td>
+          <td style="text-align:right"><button class="btn btn-ghost btn-sm" onclick="openAssociateModal(${i})">🔗 Associar</button></td>
+        </tr>`).join('')}</tbody></table>
       </div>
     </div>`:''
     }
@@ -5218,14 +5309,118 @@ window.rejectReplacement = function(productId, variantId, newSku, newBarcode, su
   toast('Sugestão descartada — não voltará a aparecer', 'info');
 };
 
+// FIX SG#4 — Associar uma linha "Novo" a uma variante Shopify existente.
+// Resolve o ciclo "aliases pedem sempre" pondo o user a corrigir associações
+// no momento em que vê o problema (antes da modal de zero), e gravando alias.
+window.openAssociateModal = function(isNewIdx) {
+  const row = state.analysisResult?.isNew?.[isNewIdx];
+  if (!row) { toast('Linha não encontrada', 'error'); return; }
+  const suppId = state.uploadSuppId;
+
+  // Pré-pesquisa: variantes Shopify ordenadas por similaridade do título
+  function rank(query) {
+    const q = (query || '').toLowerCase();
+    const candidates = [];
+    for (const p of state.shopifyProducts) {
+      for (const v of (p.variants || [])) {
+        const t = (p.title || '').toLowerCase();
+        const sim = q ? diceTrigram(t, q) : diceTrigram(t, (row.name || '').toLowerCase());
+        candidates.push({ p, v, sim });
+      }
+    }
+    candidates.sort((a, b) => b.sim - a.sim);
+    return candidates.slice(0, 20);
+  }
+
+  function renderList(query) {
+    const list = rank(query);
+    return list.map(({ p, v, sim }) => {
+      const vid = (v.id || '').replace(/'/g, "\\'");
+      return `<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid var(--border)">
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.title}</div>
+          <div style="font-size:11px;color:var(--text2);font-family:'DM Mono',monospace">SKU ${v.sku || '—'} · EAN ${v.barcode || '—'} · €${parseFloat(v.price || 0).toFixed(2)}</div>
+        </div>
+        <span class="badge" style="font-size:10px;background:var(--panel)">${sim}% sim</span>
+        <button class="btn btn-sm btn-primary" onclick="confirmAssociate(${isNewIdx},'${p.id}','${vid}')">Associar</button>
+      </div>`;
+    }).join('') || '<div style="padding:20px;text-align:center;color:var(--text3);font-size:12px">Sem resultados</div>';
+  }
+
+  document.getElementById('modal-content').innerHTML = `
+    <div class="modal-title">🔗 Associar a produto existente</div>
+    <div class="modal-sub">A linha de upload abaixo será ligada a uma variante Shopify. Da próxima vez que aparecer com o mesmo SKU/EAN, vai matchar automaticamente.</div>
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin:10px 0">
+      <div style="font-weight:600;font-size:13px">${row.name}</div>
+      <div style="font-size:11px;color:var(--text2);font-family:'DM Mono',monospace;margin-top:3px">
+        SKU ${row.sku || '—'} · EAN ${row.barcode || '—'} · €${(row.finalPrice || row.rawPrice || 0).toFixed(2)} · stock ${row.stockVal}
+      </div>
+    </div>
+    <input type="text" id="assoc-search" placeholder="Pesquisar produto Shopify (título, parte do nome)..."
+           style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;margin-bottom:8px"
+           oninput="document.getElementById('assoc-list').innerHTML = window._assocRender(this.value)">
+    <div id="assoc-list" style="max-height:380px;overflow-y:auto;border:1px solid var(--border);border-radius:8px">${renderList('')}</div>
+    <div class="modal-footer" style="margin-top:14px">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>
+    </div>`;
+  window._assocRender = renderList;
+  openModal();
+  setTimeout(() => document.getElementById('assoc-search')?.focus(), 100);
+};
+
+window.confirmAssociate = function(isNewIdx, productId, variantId) {
+  const row = state.analysisResult?.isNew?.[isNewIdx];
+  if (!row) { closeModal(); return; }
+  const suppId = state.uploadSuppId;
+  const canonical = ensureCanonicalForVariant(productId, variantId);
+  if (!canonical) { toast('Erro: variante não encontrada', 'error'); return; }
+  addAlias({
+    canonicalId: canonical.id,
+    suppId,
+    sku: row.sku,
+    barcode: row.barcode,
+    source: 'manual-associate',
+    confidence: 100,
+    addedBy: 'user',
+  });
+  // Mover esta linha de isNew → found, para que o user a possa aplicar no mesmo upload.
+  const p = state.shopifyProducts.find(x => x.id === productId);
+  const v = p?.variants?.find(x => x.id === variantId);
+  if (p && v) {
+    const currentShopifyPrice = parseFloat(v.price) || 0;
+    const priceChanged = currentShopifyPrice.toFixed(2) !== (row.finalPrice || 0).toFixed(2);
+    const stockChanged = (v.stock ?? 0) !== row.stockVal;
+    state.analysisResult.found.push({
+      ...row,
+      shopifyProduct: p, shopifyVariant: v, shopifyTitle: p.title,
+      currentPrice: currentShopifyPrice, currentStock: v.stock ?? 0,
+      matchedBy: 'ALIAS-manual',
+      applyPrice: priceChanged, applyStock: stockChanged,
+      _selected: true,
+    });
+  }
+  state.analysisResult.isNew = state.analysisResult.isNew.filter((_, i) => i !== isNewIdx);
+  save();
+  closeModal();
+  toast(`✓ Alias guardado — ${row.sku || row.barcode} ligado a "${p?.title || 'variante'}"`, 'success');
+  // Re-render do step de análise para reflectir
+  const supp = state.suppliers.find(s => s.id === suppId);
+  if (supp) renderAnalysis(state.analysisResult.found, [], state.analysisResult.isNew, supp);
+};
+
 async function runMigrationIfNeeded() {
-  // Só corre se houver produtos Shopify cacheados E ainda não houver canónicos.
+  // FIX SG#3: corre SEMPRE que há produtos Shopify cacheados.
+  // `migrateToCanonicals` é idempotente — não toca em canónicos existentes,
+  // só adiciona canónicos/aliases para variantes novas. Antes só corria
+  // se `productCanonicals` estivesse vazio, pelo que variantes criadas após
+  // a primeira migração ficavam sem canónico e nunca matchavam por alias.
   if (!state.shopifyProducts.length) return;
-  if (Object.keys(state.productCanonicals).length > 0) return;
   const r = migrateToCanonicals();
-  if (r.created > 0) {
+  if (r.created > 0 || r.aliases > 0) {
     save();
-    toast(`Identidade canónica inicializada: ${r.created} produtos · ${r.aliases} aliases`, 'success');
+    if (r.created > 0) {
+      toast(`Identidade canónica actualizada: +${r.created} produtos · +${r.aliases} aliases`, 'success');
+    }
   }
 }
 
