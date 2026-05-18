@@ -5179,6 +5179,10 @@ function seoStudio() {
         <span style="color:var(--text3);font-size:11px">·</span>
         <span style="font-size:12px;color:var(--text2)">Seleccionados: <strong id="seo-selected-count">${seoState.selectedProductIds.size}</strong></span>
         <span style="flex:1"></span>
+        ${(() => {
+          const pending = Object.entries(seoState.results).filter(([id,r]) => !r.appliedAt).length;
+          return pending > 0 ? `<button class="btn btn-success btn-sm" onclick="seoStudioApplyAllPending()" title="Aplica todos os SEOs gerados que ainda não foram enviados à Shopify (sem custo Claude)">✅ Aplicar ${pending} pendente(s)</button>` : '';
+        })()}
         <button class="btn btn-primary btn-sm" onclick="seoStudioGenerateBatch()" ${seoState.selectedProductIds.size===0?'disabled':''}>
           🧠 Gerar SEO ${seoState.selectedProductIds.size>0?`(${seoState.selectedProductIds.size})`:''}
         </button>
@@ -5196,17 +5200,22 @@ function seoStudio() {
             const cat = detectCategory(p);
             const checked = seoState.selectedProductIds.has(p.id);
             const result = seoState.results[p.id];
-            const statusBadge = result
-              ? `<span style="background:var(--green-bg);color:var(--green);padding:2px 6px;border-radius:4px;font-size:10px;font-weight:600">✓ gerado</span>`
-              : `<span style="color:var(--text3);font-size:11px">por gerar</span>`;
+            let statusBadge;
+            if (!result) {
+              statusBadge = `<span style="color:var(--text3);font-size:11px">por gerar</span>`;
+            } else if (result.appliedAt) {
+              const d = new Date(result.appliedAt).toLocaleDateString('pt-PT', {day:'2-digit', month:'2-digit'});
+              statusBadge = `<span style="background:var(--green-bg);color:var(--green);padding:2px 6px;border-radius:4px;font-size:10px;font-weight:600" title="Aplicado em ${new Date(result.appliedAt).toLocaleString('pt-PT')}">✓ aplicado ${d}</span>${result.edited?'<span style="margin-left:4px;color:var(--purple);font-size:10px">✎</span>':''}`;
+            } else {
+              statusBadge = `<span style="background:var(--orange-bg);color:var(--orange);padding:2px 6px;border-radius:4px;font-size:10px;font-weight:600">⚠ gerado · por aplicar</span>${result.edited?'<span style="margin-left:4px;color:var(--purple);font-size:10px">✎</span>':''}`;
+            }
             return `<tr id="seo-row-${p.id.replace(/[^a-z0-9]/gi, '')}">
               <td><input type="checkbox" ${checked?'checked':''} onchange="seoStudioToggle('${p.id}',this.checked)"></td>
               <td style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.title}">${p.title}</td>
               <td><span class="badge" style="font-size:10px;background:var(--panel)">${cat}</span></td>
               <td>${statusBadge}</td>
               <td style="text-align:right">
-                <button class="btn btn-ghost btn-sm" onclick="seoStudioGenerateOne('${p.id}')">🧠 Gerar</button>
-                ${result ? `<button class="btn btn-primary btn-sm" onclick="seoStudioPreview('${p.id}')">👁 Ver</button>` : ''}
+                ${!result ? `<button class="btn btn-ghost btn-sm" onclick="seoStudioGenerateOne('${p.id}')">🧠 Gerar</button>` : `<button class="btn btn-primary btn-sm" onclick="seoStudioPreview('${p.id}')">👁 Ver/Aplicar</button>`}
               </td>
             </tr>`;
           }).join('')}</tbody>
@@ -5308,6 +5317,20 @@ REGRAS DE ESTILO:
 - FAQ Schema: JSON-LD válido para schema.org/FAQPage
 - Não inventes specs: usa apenas o que tens nos dados
 
+REGRA CRÍTICA DO H1 — consistência absoluta entre todos os produtos:
+- H1 = "{Marca} {Modelo completo} {Capacidade} {Cor}"
+  Exemplos válidos:
+    "Samsung Galaxy S26 Ultra 256GB Black"
+    "Apple iPhone 17 Pro Max 512GB Cosmic Orange"
+    "Xiaomi Redmi Note 15 Pro 5G 256GB Midnight Black"
+- NUNCA incluir no H1: "Guia", "Tutorial", "Análise", "Review", "Especificações",
+  "Tudo Sobre", "Comprar", "Em Stock", "Características", emojis, hyperbole
+  ("Topo de Gama", "Sem Limites", "Inovação Pura", etc.)
+- NÃO incluir BeeStore no H1 (só no Title)
+- Mantém o H1 visualmente limpo — é o que aparece em catálogos, pesquisa interna e cards
+- Se houver dúvida sobre cor exacta, usa exactamente como vem nos dados; não inventes
+  variações como "Preto" se os dados dizem "Black"
+
 OUTPUT (JSON puro, sem markdown wrapping):
 {
   "category": "smartphone",
@@ -5320,20 +5343,35 @@ OUTPUT (JSON puro, sem markdown wrapping):
 }`;
 }
 
-window.seoStudioGenerateOne = async function(productId) {
+window.seoStudioGenerateOne = async function(productId, forceRegen = false) {
   const product = state.shopifyProducts.find(p => p.id === productId);
   if (!product) return;
+  // Anti-regen: se já existe e não foi pedido forçar, perguntar
+  const existing = seoState.results[productId];
+  if (existing && !forceRegen) {
+    const ageMin = Math.round((Date.now() - new Date(existing.generatedAt).getTime()) / 60000);
+    const appliedNote = existing.appliedAt ? `\n\nJá foi aplicado à Shopify em ${new Date(existing.appliedAt).toLocaleString('pt-PT')}.` : '\n\nGerado mas ainda não aplicado.';
+    const ok = confirm(`Este produto já tem SEO gerado há ${ageMin} minutos.${appliedNote}\n\nRegenerar custa novo crédito (~1,3¢). Continuar?`);
+    if (!ok) { seoStudioPreview(productId); return; }
+  }
   const rowEl = document.getElementById('seo-row-' + productId.replace(/[^a-z0-9]/gi, ''));
   if (rowEl) rowEl.style.opacity = '0.5';
   toast(`A gerar SEO para "${product.title.slice(0, 40)}..."`, 'info');
   try {
     const prompt = buildSeoPrompt(product);
     const raw = await callClaude(prompt);
-    // Aceita JSON com ou sem fences ```json
     const json = raw.match(/\{[\s\S]*\}/)?.[0];
     if (!json) throw new Error('Resposta sem JSON válido');
     const parsed = JSON.parse(json);
-    seoState.results[productId] = { ...parsed, generatedAt: new Date().toISOString() };
+    // Preserva appliedAt se já existia (regen mantém histórico)
+    const prevApplied = existing?.appliedAt || null;
+    seoState.results[productId] = {
+      ...parsed,
+      generatedAt: new Date().toISOString(),
+      appliedAt: null,            // regen invalida apply anterior — precisa re-aplicar
+      previouslyAppliedAt: prevApplied,
+      edited: false,
+    };
     save();
     toast('✓ SEO gerado', 'success');
     seoStudio();
@@ -5348,18 +5386,58 @@ window.seoStudioGenerateOne = async function(productId) {
 window.seoStudioGenerateBatch = async function() {
   const ids = [...seoState.selectedProductIds];
   if (!ids.length) return;
-  if (!confirm(`Gerar SEO para ${ids.length} produto(s)?\n\nUsa Claude Haiku (~$0.001 por produto). Estimativa de custo: $${(ids.length * 0.001).toFixed(2)}.`)) return;
+  const alreadyGenerated = ids.filter(id => seoState.results[id]);
+  const toGenerate = ids.filter(id => !seoState.results[id]);
+  let forceRegen = false;
+  let finalIds = toGenerate;
+  if (alreadyGenerated.length > 0) {
+    const msg = `Da selecção, ${toGenerate.length} ainda não foram gerados e ${alreadyGenerated.length} já têm SEO.\n\n` +
+                `OK = gerar só os ${toGenerate.length} em falta (custo ~$${(toGenerate.length * 0.013).toFixed(2)})\n` +
+                `Cancelar = parar`;
+    if (toGenerate.length === 0) {
+      const regen = confirm(`Todos os ${alreadyGenerated.length} produtos já foram gerados.\n\nRegenerar tudo? Custa ~$${(alreadyGenerated.length * 0.013).toFixed(2)}.`);
+      if (!regen) return;
+      forceRegen = true;
+      finalIds = ids;
+    } else {
+      if (!confirm(msg)) return;
+    }
+  } else {
+    if (!confirm(`Gerar SEO para ${ids.length} produto(s)?\n\nClaude Haiku ~1,3¢ cada. Custo estimado: $${(ids.length * 0.013).toFixed(2)}.`)) return;
+  }
   seoState.generating = true;
   let ok = 0, fail = 0;
-  for (const id of ids) {
-    try {
-      await window.seoStudioGenerateOne(id);
-      ok++;
-    } catch (e) { fail++; }
-    await new Promise(r => setTimeout(r, 500));   // throttle
+  for (const id of finalIds) {
+    try { await window.seoStudioGenerateOne(id, forceRegen); ok++; }
+    catch (e) { fail++; }
+    await new Promise(r => setTimeout(r, 500));
   }
   seoState.generating = false;
-  toast(`Batch concluído: ${ok} gerados, ${fail} falhas`, fail ? 'warn' : 'success');
+  toast(`Batch concluído: ${ok} gerados, ${fail} falhas. Próximo passo: revê e clica 'Aplicar todos'.`, fail ? 'warn' : 'success');
+  seoStudio();
+};
+
+// Aplica TODOS os resultados gerados que ainda não foram aplicados à Shopify.
+// Sem custo Claude — só chamadas Shopify (rápidas, já temos o conteúdo).
+window.seoStudioApplyAllPending = async function() {
+  const pending = Object.entries(seoState.results).filter(([id, r]) => !r.appliedAt);
+  if (!pending.length) { toast('Nenhum SEO gerado pendente de aplicação', 'info'); return; }
+  if (!confirm(`Aplicar ${pending.length} SEO(s) à Shopify de uma vez?\n\nSem custo Claude (já estão gerados). Só requests Shopify.`)) return;
+  let ok = 0, fail = 0;
+  for (const [id, r] of pending) {
+    try {
+      const seoBody = `${r.bodyHtml || ''}\n<script type="application/ld+json">${JSON.stringify(r.faqSchema || {})}<\/script>`;
+      await shopifyGQL(`mutation($input:ProductInput!){productUpdate(input:$input){product{id}userErrors{message field}}}`, {
+        input: { id, title: r.h1 || undefined, descriptionHtml: seoBody, seo: { title: r.title, description: r.metaDescription } },
+      });
+      r.appliedAt = new Date().toISOString();
+      ok++;
+      if (ok % 10 === 0) toast(`Aplicados ${ok}/${pending.length}...`, 'info');
+    } catch (e) { fail++; console.error(e); }
+    await new Promise(r => setTimeout(r, 350));
+  }
+  save();
+  toast(`Bulk apply: ${ok} aplicados, ${fail} falhas`, fail ? 'warn' : 'success');
   seoStudio();
 };
 
@@ -5367,27 +5445,50 @@ window.seoStudioPreview = function(productId) {
   const product = state.shopifyProducts.find(p => p.id === productId);
   const r = seoState.results[productId];
   if (!product || !r) return;
-  const titleLen = (r.title || '').length;
-  const metaLen = (r.metaDescription || '').length;
+  const statusLine = r.appliedAt
+    ? `<span style="background:var(--green-bg);color:var(--green);padding:3px 8px;border-radius:6px;font-size:11px;font-weight:600">✓ Aplicado ${new Date(r.appliedAt).toLocaleDateString('pt-PT')}</span>`
+    : `<span style="background:var(--orange-bg);color:var(--orange);padding:3px 8px;border-radius:6px;font-size:11px;font-weight:600">⚠ Gerado, por aplicar</span>`;
+  const editedNote = r.edited ? `<span style="margin-left:6px;color:var(--purple);font-size:11px">✎ editado</span>` : '';
   document.getElementById('modal-content').innerHTML = `
-    <div class="modal-title">🚀 SEO Preview — ${product.title.slice(0, 50)}</div>
+    <div class="modal-title">🚀 SEO Preview — <span style="font-weight:400;color:var(--text2)">${product.title.slice(0, 50)}</span></div>
+    <div style="margin-top:4px">${statusLine}${editedNote}</div>
     <div style="display:grid;gap:10px;margin-top:12px">
       <div style="background:var(--panel);padding:10px 12px;border-radius:8px">
-        <div style="font-size:11px;color:var(--text3);margin-bottom:4px">TITLE (${titleLen}/60 chars ${titleLen<=60?'✓':'⚠'})</div>
-        <div style="font-size:14px;font-weight:600">${r.title || ''}</div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:4px;display:flex;justify-content:space-between">
+          <span>TITLE <span id="seo-title-counter">(${(r.title||'').length}/60)</span></span>
+          <span style="color:var(--text3)">editável</span>
+        </div>
+        <input id="seo-edit-title" type="text" value="${(r.title||'').replace(/"/g,'&quot;')}"
+               oninput="document.getElementById('seo-title-counter').textContent='('+this.value.length+'/60'+(this.value.length<=60?' ✓':' ⚠')+')'"
+               style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-size:14px;font-weight:600;font-family:inherit">
       </div>
       <div style="background:var(--panel);padding:10px 12px;border-radius:8px">
-        <div style="font-size:11px;color:var(--text3);margin-bottom:4px">META DESCRIPTION (${metaLen}/155 chars ${metaLen<=155?'✓':'⚠'})</div>
-        <div style="font-size:13px">${r.metaDescription || ''}</div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:4px;display:flex;justify-content:space-between">
+          <span>META DESCRIPTION <span id="seo-meta-counter">(${(r.metaDescription||'').length}/155)</span></span>
+          <span style="color:var(--text3)">editável</span>
+        </div>
+        <textarea id="seo-edit-meta"
+                  oninput="document.getElementById('seo-meta-counter').textContent='('+this.value.length+'/155'+(this.value.length<=155?' ✓':' ⚠')+')'"
+                  style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;font-family:inherit;min-height:60px;resize:vertical">${r.metaDescription||''}</textarea>
       </div>
       <div style="background:var(--panel);padding:10px 12px;border-radius:8px">
-        <div style="font-size:11px;color:var(--text3);margin-bottom:4px">H1</div>
-        <div style="font-size:14px;font-weight:700">${r.h1 || ''}</div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:4px;display:flex;justify-content:space-between">
+          <span>H1 (título visível no site)</span>
+          <span style="color:var(--text3)">editável</span>
+        </div>
+        <input id="seo-edit-h1" type="text" value="${(r.h1||'').replace(/"/g,'&quot;')}"
+               style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-size:14px;font-weight:700;font-family:inherit">
+        <div style="font-size:10px;color:var(--text3);margin-top:4px">Formato: Marca + Modelo + Capacidade + Cor. Sem palavras como "Guia", "Tutorial", "Análise".</div>
       </div>
-      <div style="background:var(--panel);padding:10px 12px;border-radius:8px;max-height:280px;overflow-y:auto">
-        <div style="font-size:11px;color:var(--text3);margin-bottom:4px">BODY HTML</div>
-        <div style="font-size:13px;line-height:1.5" id="seo-preview-body">${r.bodyHtml || ''}</div>
-      </div>
+      <details style="background:var(--panel);padding:10px 12px;border-radius:8px" open>
+        <summary style="cursor:pointer;font-size:11px;color:var(--text3);font-weight:600">BODY HTML (rendered) — clica para ver/editar</summary>
+        <div style="font-size:13px;line-height:1.5;margin-top:8px;max-height:280px;overflow-y:auto;background:white;padding:10px;border-radius:6px;border:1px solid var(--border)" id="seo-preview-body">${r.bodyHtml||''}</div>
+        <details style="margin-top:8px">
+          <summary style="cursor:pointer;font-size:11px;color:var(--text3)">Editar HTML raw</summary>
+          <textarea id="seo-edit-body" oninput="document.getElementById('seo-preview-body').innerHTML=this.value"
+                    style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:11px;font-family:'DM Mono',monospace;min-height:200px;margin-top:6px">${r.bodyHtml||''}</textarea>
+        </details>
+      </details>
       ${r.internalLinkSuggestions?.length ? `
       <div style="background:var(--panel);padding:10px 12px;border-radius:8px">
         <div style="font-size:11px;color:var(--text3);margin-bottom:4px">LINKING SUGERIDO (colecções)</div>
@@ -5400,6 +5501,7 @@ window.seoStudioPreview = function(productId) {
     </div>
     <div class="modal-footer" style="margin-top:14px">
       <button class="btn btn-ghost" onclick="closeModal()">Fechar</button>
+      <button class="btn btn-ghost" onclick="seoStudioGenerateOne('${productId}', false)">🔄 Regenerar</button>
       <button class="btn btn-primary" onclick="seoStudioApply('${productId}')">✓ Aplicar à Shopify</button>
     </div>`;
   openModal();
@@ -5408,9 +5510,20 @@ window.seoStudioPreview = function(productId) {
 window.seoStudioApply = async function(productId) {
   const r = seoState.results[productId];
   if (!r) return;
+  // Lê valores editados do modal (se aberto) — assim respeita edições manuais do user.
+  const editedTitle = document.getElementById('seo-edit-title')?.value;
+  const editedMeta  = document.getElementById('seo-edit-meta')?.value;
+  const editedH1    = document.getElementById('seo-edit-h1')?.value;
+  const editedBody  = document.getElementById('seo-edit-body')?.value;
+  let edited = false;
+  if (editedTitle !== undefined && editedTitle !== r.title) { r.title = editedTitle; edited = true; }
+  if (editedMeta  !== undefined && editedMeta  !== r.metaDescription) { r.metaDescription = editedMeta; edited = true; }
+  if (editedH1    !== undefined && editedH1    !== r.h1) { r.h1 = editedH1; edited = true; }
+  if (editedBody  !== undefined && editedBody  !== r.bodyHtml) { r.bodyHtml = editedBody; edited = true; }
+  if (edited) r.edited = true;
+
   toast('A aplicar SEO à Shopify...', 'info');
   try {
-    // 1) Update título, descrição (com FAQ schema embebido) e SEO fields
     const seoBody = `${r.bodyHtml || ''}\n<script type="application/ld+json">${JSON.stringify(r.faqSchema || {})}<\/script>`;
     await shopifyGQL(`mutation($input:ProductInput!){
       productUpdate(input:$input){
@@ -5425,8 +5538,11 @@ window.seoStudioApply = async function(productId) {
         seo: { title: r.title, description: r.metaDescription },
       },
     });
+    r.appliedAt = new Date().toISOString();
+    save();
     toast('✓ SEO aplicado à Shopify', 'success');
     closeModal();
+    seoStudio();
   } catch (e) {
     toast(`Erro: ${e.message}`, 'error');
   }
@@ -5484,6 +5600,10 @@ function seoStudioRenderCollections(tabsHtml) {
         <span style="color:var(--text3);font-size:11px">·</span>
         <span style="font-size:12px;color:var(--text2)">Seleccionadas: <strong id="seo-coll-selected-count">${seoState.selectedCollectionIds.size}</strong></span>
         <span style="flex:1"></span>
+        ${(() => {
+          const pending = Object.entries(seoState.collectionResults).filter(([id,r]) => !r.appliedAt).length;
+          return pending > 0 ? `<button class="btn btn-success btn-sm" onclick="seoStudioApplyAllPendingCollections()">✅ Aplicar ${pending} pendente(s)</button>` : '';
+        })()}
         <button class="btn btn-primary btn-sm" onclick="seoStudioGenerateBatchCollections()" ${seoState.selectedCollectionIds.size===0?'disabled':''}>
           🧠 Gerar ${seoState.selectedCollectionIds.size>0?`(${seoState.selectedCollectionIds.size})`:''}
         </button>
@@ -5501,9 +5621,12 @@ function seoStudioRenderCollections(tabsHtml) {
           <tbody>${filtered.map(c => {
             const checked = seoState.selectedCollectionIds.has(c.id);
             const result = seoState.collectionResults[c.id];
-            const statusBadge = result
-              ? `<span style="background:var(--green-bg);color:var(--green);padding:2px 6px;border-radius:4px;font-size:10px;font-weight:600">✓ gerado</span>`
-              : `<span style="color:var(--text3);font-size:11px">por gerar</span>`;
+            let statusBadge;
+            if (!result) statusBadge = `<span style="color:var(--text3);font-size:11px">por gerar</span>`;
+            else if (result.appliedAt) {
+              const d = new Date(result.appliedAt).toLocaleDateString('pt-PT', {day:'2-digit', month:'2-digit'});
+              statusBadge = `<span style="background:var(--green-bg);color:var(--green);padding:2px 6px;border-radius:4px;font-size:10px;font-weight:600">✓ aplicado ${d}</span>${result.edited?'<span style="margin-left:4px;color:var(--purple);font-size:10px">✎</span>':''}`;
+            } else statusBadge = `<span style="background:var(--orange-bg);color:var(--orange);padding:2px 6px;border-radius:4px;font-size:10px;font-weight:600">⚠ gerado · por aplicar</span>${result.edited?'<span style="margin-left:4px;color:var(--purple);font-size:10px">✎</span>':''}`;
             const collIdSafe = c.id.replace(/[^a-z0-9]/gi, '');
             return `<tr id="seo-coll-row-${collIdSafe}">
               <td><input type="checkbox" ${checked?'checked':''} onchange="seoStudioToggleCollection('${c.id}',this.checked)"></td>
@@ -5512,8 +5635,7 @@ function seoStudioRenderCollections(tabsHtml) {
               <td><span class="badge" style="font-size:10px;background:var(--panel)">${c.sortOrder}</span></td>
               <td>${statusBadge}</td>
               <td style="text-align:right">
-                <button class="btn btn-ghost btn-sm" onclick="seoStudioGenerateCollectionOne('${c.id}')">🧠 Gerar</button>
-                ${result ? `<button class="btn btn-primary btn-sm" onclick="seoStudioPreviewCollection('${c.id}')">👁 Ver</button>` : ''}
+                ${!result ? `<button class="btn btn-ghost btn-sm" onclick="seoStudioGenerateCollectionOne('${c.id}')">🧠 Gerar</button>` : `<button class="btn btn-primary btn-sm" onclick="seoStudioPreviewCollection('${c.id}')">👁 Ver/Aplicar</button>`}
               </td>
             </tr>`;
           }).join('')}</tbody>
@@ -5612,9 +5734,18 @@ OUTPUT (JSON puro):
 }`;
 }
 
-window.seoStudioGenerateCollectionOne = async function(collectionId) {
+window.seoStudioGenerateCollectionOne = async function(collectionId, forceRegen = false) {
   const collection = colState.collections.find(c => c.id === collectionId);
   if (!collection) return;
+  const existing = seoState.collectionResults[collectionId];
+  if (existing && !forceRegen) {
+    const appliedNote = existing.appliedAt
+      ? `\n\nJá foi aplicado em ${new Date(existing.appliedAt).toLocaleString('pt-PT')}.`
+      : '\n\nGerado mas ainda não aplicado.';
+    if (!confirm(`Esta coleção já tem SEO gerado.${appliedNote}\n\nRegenerar custa novo crédito (~1,7¢). Continuar?`)) {
+      seoStudioPreviewCollection(collectionId); return;
+    }
+  }
   toast(`A gerar SEO para "${collection.title}"...`, 'info');
   try {
     const topProducts = await fetchTopProductsForCollection(collectionId, 8);
@@ -5623,10 +5754,14 @@ window.seoStudioGenerateCollectionOne = async function(collectionId) {
     const json = raw.match(/\{[\s\S]*\}/)?.[0];
     if (!json) throw new Error('Resposta sem JSON válido');
     const parsed = JSON.parse(json);
+    const prevApplied = existing?.appliedAt || null;
     seoState.collectionResults[collectionId] = {
       ...parsed,
       topProducts,
       generatedAt: new Date().toISOString(),
+      appliedAt: null,
+      previouslyAppliedAt: prevApplied,
+      edited: false,
     };
     save();
     toast('✓ SEO de coleção gerado', 'success');
@@ -5641,41 +5776,98 @@ window.seoStudioGenerateCollectionOne = async function(collectionId) {
 window.seoStudioGenerateBatchCollections = async function() {
   const ids = [...seoState.selectedCollectionIds];
   if (!ids.length) return;
-  if (!confirm(`Gerar SEO para ${ids.length} coleção(ões)?\n\nCusto estimado (Haiku): ~$${(ids.length * 0.002).toFixed(2)}.`)) return;
+  const alreadyGenerated = ids.filter(id => seoState.collectionResults[id]);
+  const toGenerate = ids.filter(id => !seoState.collectionResults[id]);
+  let forceRegen = false, finalIds = toGenerate;
+  if (alreadyGenerated.length > 0) {
+    if (toGenerate.length === 0) {
+      if (!confirm(`Todas as ${alreadyGenerated.length} coleções já foram geradas.\n\nRegenerar tudo? Custa ~$${(alreadyGenerated.length * 0.017).toFixed(2)}.`)) return;
+      forceRegen = true; finalIds = ids;
+    } else {
+      if (!confirm(`${toGenerate.length} ainda não gerados, ${alreadyGenerated.length} já têm SEO.\n\nOK = gerar só os ${toGenerate.length} em falta (~$${(toGenerate.length * 0.017).toFixed(2)})`)) return;
+    }
+  } else {
+    if (!confirm(`Gerar SEO para ${ids.length} coleção(ões)?\n\nCusto estimado: $${(ids.length * 0.017).toFixed(2)}.`)) return;
+  }
   let ok = 0, fail = 0;
-  for (const id of ids) {
-    try { await window.seoStudioGenerateCollectionOne(id); ok++; }
+  for (const id of finalIds) {
+    try { await window.seoStudioGenerateCollectionOne(id, forceRegen); ok++; }
     catch (e) { fail++; }
     await new Promise(r => setTimeout(r, 600));
   }
-  toast(`Batch concluído: ${ok} gerados, ${fail} falhas`, fail ? 'warn' : 'success');
+  toast(`Batch concluído: ${ok} gerados, ${fail} falhas. Revê e aplica.`, fail ? 'warn' : 'success');
+  seoStudio();
+};
+
+// Bulk apply coleções pendentes
+window.seoStudioApplyAllPendingCollections = async function() {
+  const pending = Object.entries(seoState.collectionResults).filter(([id, r]) => !r.appliedAt);
+  if (!pending.length) { toast('Nenhuma coleção pendente', 'info'); return; }
+  if (!confirm(`Aplicar ${pending.length} coleção(ões) à Shopify de uma vez?\n\nSem custo Claude.`)) return;
+  let ok = 0, fail = 0;
+  for (const [id, r] of pending) {
+    try {
+      const seoBody = `${r.bodyHtml || ''}\n<script type="application/ld+json">${JSON.stringify(r.faqSchema || {})}<\/script>`;
+      await shopifyGQL(`mutation($input:CollectionInput!){collectionUpdate(input:$input){collection{id}userErrors{message field}}}`, {
+        input: { id, descriptionHtml: seoBody, seo: { title: r.title, description: r.metaDescription } },
+      });
+      r.appliedAt = new Date().toISOString();
+      ok++;
+    } catch (e) { fail++; console.error(e); }
+    await new Promise(r => setTimeout(r, 400));
+  }
+  save();
+  toast(`Bulk apply: ${ok} aplicadas, ${fail} falhas`, fail ? 'warn' : 'success');
+  seoStudio();
 };
 
 window.seoStudioPreviewCollection = function(collectionId) {
   const collection = colState.collections.find(c => c.id === collectionId);
   const r = seoState.collectionResults[collectionId];
   if (!collection || !r) return;
-  const titleLen = (r.title || '').length;
-  const metaLen = (r.metaDescription || '').length;
+  const statusLine = r.appliedAt
+    ? `<span style="background:var(--green-bg);color:var(--green);padding:3px 8px;border-radius:6px;font-size:11px;font-weight:600">✓ Aplicado ${new Date(r.appliedAt).toLocaleDateString('pt-PT')}</span>`
+    : `<span style="background:var(--orange-bg);color:var(--orange);padding:3px 8px;border-radius:6px;font-size:11px;font-weight:600">⚠ Gerado, por aplicar</span>`;
+  const editedNote = r.edited ? `<span style="margin-left:6px;color:var(--purple);font-size:11px">✎ editado</span>` : '';
   document.getElementById('modal-content').innerHTML = `
-    <div class="modal-title">🏛 SEO Preview — Coleção: ${collection.title}</div>
+    <div class="modal-title">🏛 SEO Coleção — <span style="font-weight:400;color:var(--text2)">${collection.title}</span></div>
+    <div style="margin-top:4px">${statusLine}${editedNote}</div>
     <div style="display:grid;gap:10px;margin-top:12px">
       <div style="background:var(--panel);padding:10px 12px;border-radius:8px">
-        <div style="font-size:11px;color:var(--text3);margin-bottom:4px">TITLE (${titleLen}/60 ${titleLen<=60?'✓':'⚠'})</div>
-        <div style="font-size:14px;font-weight:600">${r.title || ''}</div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:4px;display:flex;justify-content:space-between">
+          <span>TITLE <span id="seo-coll-title-counter">(${(r.title||'').length}/60)</span></span>
+          <span style="color:var(--text3)">editável</span>
+        </div>
+        <input id="seo-coll-edit-title" type="text" value="${(r.title||'').replace(/"/g,'&quot;')}"
+               oninput="document.getElementById('seo-coll-title-counter').textContent='('+this.value.length+'/60'+(this.value.length<=60?' ✓':' ⚠')+')'"
+               style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-size:14px;font-weight:600;font-family:inherit">
       </div>
       <div style="background:var(--panel);padding:10px 12px;border-radius:8px">
-        <div style="font-size:11px;color:var(--text3);margin-bottom:4px">META DESCRIPTION (${metaLen}/155 ${metaLen<=155?'✓':'⚠'})</div>
-        <div style="font-size:13px">${r.metaDescription || ''}</div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:4px;display:flex;justify-content:space-between">
+          <span>META DESCRIPTION <span id="seo-coll-meta-counter">(${(r.metaDescription||'').length}/155)</span></span>
+          <span style="color:var(--text3)">editável</span>
+        </div>
+        <textarea id="seo-coll-edit-meta"
+                  oninput="document.getElementById('seo-coll-meta-counter').textContent='('+this.value.length+'/155'+(this.value.length<=155?' ✓':' ⚠')+')'"
+                  style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;font-family:inherit;min-height:60px;resize:vertical">${r.metaDescription||''}</textarea>
       </div>
       <div style="background:var(--panel);padding:10px 12px;border-radius:8px">
-        <div style="font-size:11px;color:var(--text3);margin-bottom:4px">H1</div>
-        <div style="font-size:14px;font-weight:700">${r.h1 || ''}</div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:4px;display:flex;justify-content:space-between">
+          <span>H1 (título visível da página de categoria)</span>
+          <span style="color:var(--text3)">editável</span>
+        </div>
+        <input id="seo-coll-edit-h1" type="text" value="${(r.h1||'').replace(/"/g,'&quot;')}"
+               style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-size:14px;font-weight:700;font-family:inherit">
       </div>
-      <div style="background:var(--panel);padding:10px 12px;border-radius:8px;max-height:300px;overflow-y:auto">
-        <div style="font-size:11px;color:var(--text3);margin-bottom:4px">BODY HTML (com links hub-spoke)</div>
-        <div style="font-size:13px;line-height:1.5">${r.bodyHtml || ''}</div>
-      </div>
+      <details style="background:var(--panel);padding:10px 12px;border-radius:8px" open>
+        <summary style="cursor:pointer;font-size:11px;color:var(--text3);font-weight:600">BODY HTML (com links hub-spoke) — clica para ver/editar</summary>
+        <div id="seo-coll-preview-body" style="font-size:13px;line-height:1.5;margin-top:8px;max-height:280px;overflow-y:auto;background:white;padding:10px;border-radius:6px;border:1px solid var(--border)">${r.bodyHtml||''}</div>
+        <details style="margin-top:8px">
+          <summary style="cursor:pointer;font-size:11px;color:var(--text3)">Editar HTML raw</summary>
+          <textarea id="seo-coll-edit-body" oninput="document.getElementById('seo-coll-preview-body').innerHTML=this.value"
+                    style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:11px;font-family:'DM Mono',monospace;min-height:220px;margin-top:6px">${r.bodyHtml||''}</textarea>
+        </details>
+      </details>
       ${r.productLinks?.length ? `
       <div style="background:var(--green-bg);padding:10px 12px;border-radius:8px;border:1px solid #BBF7D0">
         <div style="font-size:11px;color:var(--green);margin-bottom:4px;font-weight:600">🔗 ${r.productLinks.length} produtos linkados (hub-spoke)</div>
@@ -5688,6 +5880,7 @@ window.seoStudioPreviewCollection = function(collectionId) {
     </div>
     <div class="modal-footer" style="margin-top:14px">
       <button class="btn btn-ghost" onclick="closeModal()">Fechar</button>
+      <button class="btn btn-ghost" onclick="seoStudioGenerateCollectionOne('${collectionId}', false)">🔄 Regenerar</button>
       <button class="btn btn-primary" onclick="seoStudioApplyCollection('${collectionId}')">✓ Aplicar à Shopify</button>
     </div>`;
   openModal();
@@ -5696,6 +5889,17 @@ window.seoStudioPreviewCollection = function(collectionId) {
 window.seoStudioApplyCollection = async function(collectionId) {
   const r = seoState.collectionResults[collectionId];
   if (!r) return;
+  const editedTitle = document.getElementById('seo-coll-edit-title')?.value;
+  const editedMeta  = document.getElementById('seo-coll-edit-meta')?.value;
+  const editedH1    = document.getElementById('seo-coll-edit-h1')?.value;
+  const editedBody  = document.getElementById('seo-coll-edit-body')?.value;
+  let edited = false;
+  if (editedTitle !== undefined && editedTitle !== r.title) { r.title = editedTitle; edited = true; }
+  if (editedMeta  !== undefined && editedMeta  !== r.metaDescription) { r.metaDescription = editedMeta; edited = true; }
+  if (editedH1    !== undefined && editedH1    !== r.h1) { r.h1 = editedH1; edited = true; }
+  if (editedBody  !== undefined && editedBody  !== r.bodyHtml) { r.bodyHtml = editedBody; edited = true; }
+  if (edited) r.edited = true;
+
   toast('A aplicar SEO da coleção à Shopify...', 'info');
   try {
     const seoBody = `${r.bodyHtml || ''}\n<script type="application/ld+json">${JSON.stringify(r.faqSchema || {})}<\/script>`;
@@ -5711,8 +5915,11 @@ window.seoStudioApplyCollection = async function(collectionId) {
         seo: { title: r.title, description: r.metaDescription },
       },
     });
+    r.appliedAt = new Date().toISOString();
+    save();
     toast('✓ SEO da coleção aplicado', 'success');
     closeModal();
+    seoStudio();
   } catch (e) {
     toast(`Erro: ${e.message}`, 'error');
   }
