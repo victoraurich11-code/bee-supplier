@@ -5013,20 +5013,114 @@ function detectCategory(product) {
 
 // Estado da página
 let seoState = {
+  tab: 'products',                  // 'products' | 'collections'
   selectedProductIds: new Set(),
-  results: {},    // productId → { title, meta, h1, body, faq, generatedAt }
+  selectedCollectionIds: new Set(),
+  results: {},                      // productId → { title, meta, h1, body, faq, ... }
+  collectionResults: {},            // collectionId → { title, meta, h1, body, faq, productLinks, ... }
   generating: false,
   filterText: '',
   category: 'all',
 };
+
+// Perguntas-base para SEO de páginas de COLEÇÃO (intent comercial e guia de compra).
+// Diferente das perguntas de produto: mais focado em decisão de compra de categoria.
+const SEO_QUESTIONS_COLLECTION = {
+  generic: [
+    "Quais são os melhores {categoria} para comprar em Portugal?",
+    "Onde comprar {categoria} com entrega rápida em Portugal?",
+    "Como escolher o {categoria} certo para mim?",
+    "Quanto custa um bom {categoria}?",
+    "Quais marcas vale a pena considerar?",
+    "Garantia em Portugal para {categoria}?",
+    "Há opções com bom custo-benefício?",
+    "O que considerar antes de comprar?",
+  ],
+  smartphones: [
+    "Qual o melhor smartphone para comprar em 2026?",
+    "Vale a pena Samsung, Apple ou Xiaomi?",
+    "Quanto custa um smartphone bom?",
+    "Como escolher entre 128GB, 256GB e 512GB?",
+    "5G é mesmo necessário?",
+    "Garantia oficial em Portugal — como funciona?",
+    "Posso parcelar a compra?",
+    "Recondicionado ou novo: o que recomendam?",
+  ],
+  tablets: [
+    "Qual o melhor tablet para estudar?",
+    "iPad ou Galaxy Tab — qual escolher?",
+    "Tablet com 5G vale a pena?",
+    "Quanto custa um bom tablet em Portugal?",
+    "Funciona com teclado e caneta?",
+  ],
+  laptops: [
+    "Qual o melhor portátil para trabalho remoto?",
+    "Portátil gaming vs portátil produtividade?",
+    "Quanta RAM e SSD preciso?",
+    "Vale a pena MacBook ou Windows?",
+    "Garantia e suporte em Portugal?",
+  ],
+  audio: [
+    "Quais os melhores auriculares para chamadas?",
+    "Cancelamento de ruído ativo vale a pena?",
+    "AirPods, Galaxy Buds ou outra marca?",
+    "Auriculares para desporto — quais aguentam?",
+  ],
+  smartwatches: [
+    "Qual o melhor smartwatch para fitness?",
+    "Apple Watch vs Galaxy Watch — diferenças?",
+    "Smartwatch atende chamadas sem o telemóvel?",
+    "Quanto dura a bateria?",
+  ],
+  gaming: [
+    "Comprar consola ou PC gaming?",
+    "Que setup gaming compensa para começar?",
+    "Quanto custa um PC gaming decente?",
+  ],
+  casa: [
+    "Que electrodomésticos valem mesmo a pena?",
+    "Aspiradores robôs — o que escolher?",
+    "Garantia em Portugal para electrodomésticos?",
+  ],
+};
+
+function detectCollectionCategory(collTitle) {
+  const t = (collTitle || '').toLowerCase();
+  if (/smartphone|telem[óo]vel/.test(t)) return 'smartphones';
+  if (/tablet/.test(t)) return 'tablets';
+  if (/laptop|port[áa]til|notebook/.test(t)) return 'laptops';
+  if (/áudio|audio|auricular|fones|buds|colunas|headset/.test(t)) return 'audio';
+  if (/smartwatch|watch/.test(t)) return 'smartwatches';
+  if (/gaming|consola/.test(t)) return 'gaming';
+  if (/casa|eletrodomést|cozinha|aspirador|iluminação/.test(t)) return 'casa';
+  return 'generic';
+}
 
 function seoStudio() {
   document.getElementById('topbar-actions').innerHTML = `
     <button class="btn btn-ghost btn-sm" onclick="seoStudioReset()">Limpar selecção</button>
   `;
 
+  // Header com tabs Produtos / Coleções
+  const tabsHtml = `
+    <div class="card" style="padding:0;margin-bottom:14px;overflow:hidden">
+      <div style="display:flex;border-bottom:1px solid var(--border)">
+        <button onclick="seoState.tab='products'; seoStudio()" style="flex:1;padding:14px;background:${seoState.tab==='products'?'var(--blue-bg)':'transparent'};border:none;cursor:pointer;font-weight:${seoState.tab==='products'?'700':'500'};font-size:13px;color:${seoState.tab==='products'?'#1E40AF':'var(--text2)'};border-bottom:2px solid ${seoState.tab==='products'?'var(--blue)':'transparent'}">
+          📦 Produtos (${state.shopifyProducts.length})
+        </button>
+        <button onclick="seoStudioOpenCollectionsTab()" style="flex:1;padding:14px;background:${seoState.tab==='collections'?'var(--blue-bg)':'transparent'};border:none;cursor:pointer;font-weight:${seoState.tab==='collections'?'700':'500'};font-size:13px;color:${seoState.tab==='collections'?'#1E40AF':'var(--text2)'};border-bottom:2px solid ${seoState.tab==='collections'?'var(--blue)':'transparent'}">
+          📁 Coleções ${colState.collections.length ? `(${colState.collections.length})` : '<span style="font-size:10px;color:var(--text3);font-weight:400">— clica p/ carregar</span>'}
+        </button>
+      </div>
+    </div>
+  `;
+
+  if (seoState.tab === 'collections') {
+    return seoStudioRenderCollections(tabsHtml);
+  }
+
   if (!state.shopifyProducts.length) {
-    document.getElementById('content').innerHTML = `
+    document.getElementById('content').innerHTML = tabsHtml + `
       <div class="empty-state">
         <div class="empty-icon">🚀</div>
         <p style="color:var(--text2)">Sincroniza primeiro os produtos da Shopify.</p>
@@ -5044,7 +5138,7 @@ function seoStudio() {
     return true;
   });
 
-  document.getElementById('content').innerHTML = `
+  document.getElementById('content').innerHTML = tabsHtml + `
     <div class="card" style="background:var(--blue-bg);border-color:#BFDBFE;padding:14px 18px;margin-bottom:14px">
       <div style="display:flex;align-items:center;gap:12px">
         <span style="font-size:24px">🧠</span>
@@ -5332,6 +5426,292 @@ window.seoStudioApply = async function(productId) {
       },
     });
     toast('✓ SEO aplicado à Shopify', 'success');
+    closeModal();
+  } catch (e) {
+    toast(`Erro: ${e.message}`, 'error');
+  }
+};
+
+// ─── SEO Studio: separador COLEÇÕES (hub) ─────────────────────────────────────
+
+window.seoStudioOpenCollectionsTab = async function() {
+  seoState.tab = 'collections';
+  if (!colState.collections.length) await colFetchAll();
+  seoStudio();
+};
+
+function seoStudioRenderCollections(tabsHtml) {
+  if (!colState.collections.length) {
+    document.getElementById('content').innerHTML = tabsHtml + `
+      <div class="empty-state">
+        <div class="empty-icon">📁</div>
+        <p style="color:var(--text2)">A carregar colecções da Shopify...</p>
+      </div>`;
+    return;
+  }
+  const filter = (seoState.filterText || '').toLowerCase();
+  const filtered = colState.collections.filter(c => {
+    if (filter && !c.title.toLowerCase().includes(filter)) return false;
+    if (c.productsCount === 0) return false;   // só com produtos
+    return true;
+  });
+
+  document.getElementById('content').innerHTML = tabsHtml + `
+    <div class="card" style="background:var(--purple-bg);border-color:#C4B5FD;padding:14px 18px;margin-bottom:14px">
+      <div style="display:flex;align-items:center;gap:12px">
+        <span style="font-size:24px">🏛</span>
+        <div style="flex:1">
+          <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:14px;color:var(--purple)">SEO de Coleções (páginas hub)</div>
+          <div style="font-size:12px;color:var(--text2);margin-top:3px">
+            Cada coleção é uma página de categoria com intent comercial alta (ex: "comprar smartphone Samsung Portugal").
+            Gera title, meta, body com guia de compra, FAQ Schema e <strong>links automáticos para os top produtos</strong> dela (hub-spoke).
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="padding:14px 16px;margin-bottom:14px">
+      <input type="text" placeholder="Procurar coleção..." value="${seoState.filterText}"
+             oninput="seoState.filterText=this.value; seoStudio()"
+             style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:13px">
+      <div style="margin-top:8px;font-size:12px;color:var(--text2)">${filtered.length} coleção(ões) com produtos</div>
+    </div>
+
+    <div class="card" style="padding:0;overflow:hidden;margin-bottom:14px">
+      <div style="padding:10px 14px;background:var(--panel);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <input type="checkbox" id="seo-coll-chk-all" onchange="seoStudioToggleAllCollections(this.checked)">
+        <label for="seo-coll-chk-all" style="font-size:13px;font-weight:600;cursor:pointer">Seleccionar todas as ${filtered.length}</label>
+        <span style="color:var(--text3);font-size:11px">·</span>
+        <span style="font-size:12px;color:var(--text2)">Seleccionadas: <strong id="seo-coll-selected-count">${seoState.selectedCollectionIds.size}</strong></span>
+        <span style="flex:1"></span>
+        <button class="btn btn-primary btn-sm" onclick="seoStudioGenerateBatchCollections()" ${seoState.selectedCollectionIds.size===0?'disabled':''}>
+          🧠 Gerar ${seoState.selectedCollectionIds.size>0?`(${seoState.selectedCollectionIds.size})`:''}
+        </button>
+      </div>
+      <div style="max-height:520px;overflow-y:auto">
+        <table style="font-size:12px">
+          <thead><tr>
+            <th style="width:36px"></th>
+            <th>Coleção</th>
+            <th style="text-align:right">Produtos</th>
+            <th>SortOrder</th>
+            <th>Estado</th>
+            <th style="text-align:right">Acção</th>
+          </tr></thead>
+          <tbody>${filtered.map(c => {
+            const checked = seoState.selectedCollectionIds.has(c.id);
+            const result = seoState.collectionResults[c.id];
+            const statusBadge = result
+              ? `<span style="background:var(--green-bg);color:var(--green);padding:2px 6px;border-radius:4px;font-size:10px;font-weight:600">✓ gerado</span>`
+              : `<span style="color:var(--text3);font-size:11px">por gerar</span>`;
+            const collIdSafe = c.id.replace(/[^a-z0-9]/gi, '');
+            return `<tr id="seo-coll-row-${collIdSafe}">
+              <td><input type="checkbox" ${checked?'checked':''} onchange="seoStudioToggleCollection('${c.id}',this.checked)"></td>
+              <td style="font-weight:600">${c.title}</td>
+              <td style="text-align:right" class="mono">${c.productsCount}</td>
+              <td><span class="badge" style="font-size:10px;background:var(--panel)">${c.sortOrder}</span></td>
+              <td>${statusBadge}</td>
+              <td style="text-align:right">
+                <button class="btn btn-ghost btn-sm" onclick="seoStudioGenerateCollectionOne('${c.id}')">🧠 Gerar</button>
+                ${result ? `<button class="btn btn-primary btn-sm" onclick="seoStudioPreviewCollection('${c.id}')">👁 Ver</button>` : ''}
+              </td>
+            </tr>`;
+          }).join('')}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card" style="padding:12px 16px;font-size:12px;color:var(--text2)">
+      <strong>Hub-spoke automático:</strong> ao gerar SEO de uma coleção, o sistema busca os <strong>top 8 produtos</strong> dela (por stock) e adiciona links internos no body.
+      Os clientes que cheguem à página da coleção têm caminho directo para os produtos populares — e o Google percebe a estrutura de autoridade.
+    </div>`;
+}
+
+window.seoStudioToggleCollection = function(id, checked) {
+  if (checked) seoState.selectedCollectionIds.add(id);
+  else seoState.selectedCollectionIds.delete(id);
+  document.getElementById('seo-coll-selected-count').textContent = seoState.selectedCollectionIds.size;
+};
+window.seoStudioToggleAllCollections = function(checked) {
+  const filter = (seoState.filterText || '').toLowerCase();
+  const filtered = colState.collections.filter(c => {
+    if (filter && !c.title.toLowerCase().includes(filter)) return false;
+    if (c.productsCount === 0) return false;
+    return true;
+  });
+  if (checked) filtered.forEach(c => seoState.selectedCollectionIds.add(c.id));
+  else filtered.forEach(c => seoState.selectedCollectionIds.delete(c.id));
+  seoStudio();
+};
+
+// Busca top N produtos da coleção (com stock) para hub-spoke linking
+async function fetchTopProductsForCollection(collectionId, n = 8) {
+  const data = await shopifyGQL(`query($id:ID!){
+    collection(id:$id){
+      products(first:50, sortKey:BEST_SELLING){
+        edges{node{id handle title totalInventory variants(first:1){edges{node{price}}}}}
+      }
+    }
+  }`, { id: collectionId });
+  const all = data.collection.products.edges.map(e => ({
+    id: e.node.id,
+    handle: e.node.handle,
+    title: e.node.title,
+    stock: e.node.totalInventory ?? 0,
+    price: parseFloat(e.node.variants.edges[0]?.node.price || 0),
+  }));
+  // Prioriza com stock > 0, depois mantém ordem (best selling)
+  const withStock = all.filter(p => p.stock > 0).slice(0, n);
+  return withStock.length >= n ? withStock : [...withStock, ...all.filter(p => p.stock === 0)].slice(0, n);
+}
+
+function buildSeoCollectionPrompt(collection, topProducts) {
+  const category = detectCollectionCategory(collection.title);
+  const questions = SEO_QUESTIONS_COLLECTION[category] || SEO_QUESTIONS_COLLECTION.generic;
+  const productsList = topProducts.map((p, i) =>
+    `  ${i + 1}. ${p.title}  (handle: ${p.handle}, €${p.price.toFixed(2)}, stock ${p.stock})`
+  ).join('\n');
+
+  return `És especialista em SEO de páginas de categoria para e-commerce de tecnologia em Portugal.
+
+COLEÇÃO:
+- Título: ${collection.title}
+- Categoria detectada: ${category}
+- Total produtos: ${collection.productsCount}
+- Top produtos da coleção:
+${productsList || '  (sem produtos no top)'}
+
+PERGUNTAS-BASE DE INVERSE PROMPTING (intent comercial de categoria):
+${questions.map((q, i) => `${i + 1}. ${q}`).join('\n')}
+
+TAREFA — gera conteúdo SEO completo de página de categoria em JSON estrito:
+
+1. Adapta 5-6 perguntas mais relevantes à coleção (substitui {categoria} pelo título)
+2. Para cada pergunta, escreve resposta directa em 80-150 palavras
+3. No corpo, integra MENÇÕES AOS TOP PRODUTOS com links: <a href="/products/{handle}">Nome do Produto</a>
+4. Compõe os elementos SEO
+
+REGRAS DE ESTILO:
+- PT-PT (não PT-BR). Tu, não vós. Não uses dashes "—" no body (usa pontos ou vírgulas)
+- Tom: guia de compra honesto, não vendedor. Sem hyperbole.
+- Title: 50-60 chars, "<Categoria> em Portugal — <Beneficio> | BeeStore"
+- Meta: 140-155 chars com gancho + USP (envio, garantia, stock imediato) + CTA implícito
+- Body HTML: 800-1200 palavras estruturado como guia. Inclui 1-2 listas <ul>.
+- Linka pelo menos 4 produtos do topProducts no body (anchor texts naturais)
+- FAQ Schema: JSON-LD válido com as 5-6 perguntas/respostas
+
+OUTPUT (JSON puro):
+{
+  "category": "smartphones",
+  "title": "...",
+  "metaDescription": "...",
+  "h1": "...",
+  "bodyHtml": "<p>intro...</p><h2>Pergunta 1</h2><p>...<a href=\\"/products/...\\">...</a>...</p>...",
+  "faqSchema": {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[...]},
+  "productLinks": [{"handle":"...","title":"..."}]
+}`;
+}
+
+window.seoStudioGenerateCollectionOne = async function(collectionId) {
+  const collection = colState.collections.find(c => c.id === collectionId);
+  if (!collection) return;
+  toast(`A gerar SEO para "${collection.title}"...`, 'info');
+  try {
+    const topProducts = await fetchTopProductsForCollection(collectionId, 8);
+    const prompt = buildSeoCollectionPrompt(collection, topProducts);
+    const raw = await callClaude(prompt);
+    const json = raw.match(/\{[\s\S]*\}/)?.[0];
+    if (!json) throw new Error('Resposta sem JSON válido');
+    const parsed = JSON.parse(json);
+    seoState.collectionResults[collectionId] = {
+      ...parsed,
+      topProducts,
+      generatedAt: new Date().toISOString(),
+    };
+    save();
+    toast('✓ SEO de coleção gerado', 'success');
+    seoStudio();
+    seoStudioPreviewCollection(collectionId);
+  } catch (e) {
+    console.error(e);
+    toast(`Erro: ${e.message}`, 'error');
+  }
+};
+
+window.seoStudioGenerateBatchCollections = async function() {
+  const ids = [...seoState.selectedCollectionIds];
+  if (!ids.length) return;
+  if (!confirm(`Gerar SEO para ${ids.length} coleção(ões)?\n\nCusto estimado (Haiku): ~$${(ids.length * 0.002).toFixed(2)}.`)) return;
+  let ok = 0, fail = 0;
+  for (const id of ids) {
+    try { await window.seoStudioGenerateCollectionOne(id); ok++; }
+    catch (e) { fail++; }
+    await new Promise(r => setTimeout(r, 600));
+  }
+  toast(`Batch concluído: ${ok} gerados, ${fail} falhas`, fail ? 'warn' : 'success');
+};
+
+window.seoStudioPreviewCollection = function(collectionId) {
+  const collection = colState.collections.find(c => c.id === collectionId);
+  const r = seoState.collectionResults[collectionId];
+  if (!collection || !r) return;
+  const titleLen = (r.title || '').length;
+  const metaLen = (r.metaDescription || '').length;
+  document.getElementById('modal-content').innerHTML = `
+    <div class="modal-title">🏛 SEO Preview — Coleção: ${collection.title}</div>
+    <div style="display:grid;gap:10px;margin-top:12px">
+      <div style="background:var(--panel);padding:10px 12px;border-radius:8px">
+        <div style="font-size:11px;color:var(--text3);margin-bottom:4px">TITLE (${titleLen}/60 ${titleLen<=60?'✓':'⚠'})</div>
+        <div style="font-size:14px;font-weight:600">${r.title || ''}</div>
+      </div>
+      <div style="background:var(--panel);padding:10px 12px;border-radius:8px">
+        <div style="font-size:11px;color:var(--text3);margin-bottom:4px">META DESCRIPTION (${metaLen}/155 ${metaLen<=155?'✓':'⚠'})</div>
+        <div style="font-size:13px">${r.metaDescription || ''}</div>
+      </div>
+      <div style="background:var(--panel);padding:10px 12px;border-radius:8px">
+        <div style="font-size:11px;color:var(--text3);margin-bottom:4px">H1</div>
+        <div style="font-size:14px;font-weight:700">${r.h1 || ''}</div>
+      </div>
+      <div style="background:var(--panel);padding:10px 12px;border-radius:8px;max-height:300px;overflow-y:auto">
+        <div style="font-size:11px;color:var(--text3);margin-bottom:4px">BODY HTML (com links hub-spoke)</div>
+        <div style="font-size:13px;line-height:1.5">${r.bodyHtml || ''}</div>
+      </div>
+      ${r.productLinks?.length ? `
+      <div style="background:var(--green-bg);padding:10px 12px;border-radius:8px;border:1px solid #BBF7D0">
+        <div style="font-size:11px;color:var(--green);margin-bottom:4px;font-weight:600">🔗 ${r.productLinks.length} produtos linkados (hub-spoke)</div>
+        <div style="font-size:12px">${r.productLinks.map(p => `<code>/products/${p.handle}</code>`).join(' · ')}</div>
+      </div>` : ''}
+      <details style="background:var(--panel);padding:10px 12px;border-radius:8px">
+        <summary style="cursor:pointer;font-size:11px;color:var(--text3)">FAQ Schema (JSON-LD)</summary>
+        <pre style="font-size:10px;margin-top:6px;background:var(--surface);padding:8px;border-radius:6px;overflow-x:auto">${JSON.stringify(r.faqSchema || {}, null, 2)}</pre>
+      </details>
+    </div>
+    <div class="modal-footer" style="margin-top:14px">
+      <button class="btn btn-ghost" onclick="closeModal()">Fechar</button>
+      <button class="btn btn-primary" onclick="seoStudioApplyCollection('${collectionId}')">✓ Aplicar à Shopify</button>
+    </div>`;
+  openModal();
+};
+
+window.seoStudioApplyCollection = async function(collectionId) {
+  const r = seoState.collectionResults[collectionId];
+  if (!r) return;
+  toast('A aplicar SEO da coleção à Shopify...', 'info');
+  try {
+    const seoBody = `${r.bodyHtml || ''}\n<script type="application/ld+json">${JSON.stringify(r.faqSchema || {})}<\/script>`;
+    await shopifyGQL(`mutation($input:CollectionInput!){
+      collectionUpdate(input:$input){
+        collection{id title}
+        userErrors{message field}
+      }
+    }`, {
+      input: {
+        id: collectionId,
+        descriptionHtml: seoBody,
+        seo: { title: r.title, description: r.metaDescription },
+      },
+    });
+    toast('✓ SEO da coleção aplicado', 'success');
     closeModal();
   } catch (e) {
     toast(`Erro: ${e.message}`, 'error');
