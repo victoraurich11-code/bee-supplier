@@ -5012,6 +5012,30 @@ function detectCategory(product) {
 }
 
 // Estado da página
+// Debounce do filtro de pesquisa do SEO Studio.
+// Sem isto, cada keystroke re-renderiza a página inteira (478 produtos, 250 linhas
+// HTML) e o input fica laggy / "travado". 250ms é o sweet-spot: input fluido,
+// re-render só após parar de escrever.
+let _seoFilterDebounceTimer = null;
+window.seoStudioDebouncedFilter = function(value) {
+  seoState.filterText = value;
+  clearTimeout(_seoFilterDebounceTimer);
+  _seoFilterDebounceTimer = setTimeout(() => {
+    // Re-render mantendo o foco no input
+    seoStudio();
+    const inputs = document.querySelectorAll('#content input[type="text"]');
+    for (const inp of inputs) {
+      if (inp.placeholder && inp.placeholder.toLowerCase().includes('procurar')) {
+        inp.focus();
+        // Move cursor para o fim
+        const len = inp.value.length;
+        inp.setSelectionRange(len, len);
+        break;
+      }
+    }
+  }, 250);
+};
+
 let seoState = {
   tab: 'products',                  // 'products' | 'collections'
   selectedProductIds: new Set(),
@@ -5155,7 +5179,7 @@ function seoStudio() {
     <div class="card" style="padding:14px 16px;margin-bottom:14px">
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
         <input type="text" placeholder="Procurar produto..." value="${seoState.filterText}"
-               oninput="seoState.filterText=this.value; seoStudio()"
+               oninput="seoStudioDebouncedFilter(this.value)"
                style="flex:1;min-width:200px;padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:13px">
         <select onchange="seoState.category=this.value; seoStudio()" style="padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:13px">
           <option value="all"${cat==='all'?' selected':''}>Todas as categorias</option>
@@ -5588,7 +5612,7 @@ function seoStudioRenderCollections(tabsHtml) {
 
     <div class="card" style="padding:14px 16px;margin-bottom:14px">
       <input type="text" placeholder="Procurar coleção..." value="${seoState.filterText}"
-             oninput="seoState.filterText=this.value; seoStudio()"
+             oninput="seoStudioDebouncedFilter(this.value)"
              style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:13px">
       <div style="margin-top:8px;font-size:12px;color:var(--text2)">${filtered.length} coleção(ões) com produtos</div>
     </div>
