@@ -5198,7 +5198,7 @@ function seoStudio() {
 
     <div class="card" style="padding:0;overflow:hidden;margin-bottom:14px">
       <div style="padding:10px 14px;background:var(--panel);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-        <input type="checkbox" id="seo-chk-all" onchange="seoStudioToggleAll(this.checked)" ${filtered.length>0 && filtered.every(p=>seoState.selectedProductIds.has(p.id))?'checked':''}>
+        <input type="checkbox" id="seo-chk-all" onchange="seoStudioToggleAll(this.checked)">
         <label for="seo-chk-all" style="font-size:13px;font-weight:600;cursor:pointer">Seleccionar todos os ${filtered.length} ${seoState.filterText||seoState.category!=='all'?'(filtrados)':''}</label>
         <span style="color:var(--text3);font-size:11px">·</span>
         <span style="font-size:12px;color:var(--text2)">Seleccionados: <strong id="seo-selected-count">${seoState.selectedProductIds.size}</strong></span>
@@ -5256,15 +5256,20 @@ function seoStudio() {
       4. Cada pergunta vira um H2 no corpo + entry no FAQ Schema (Google "People Also Ask").<br>
       5. Title e meta são optimizados para CTR (gancho + USP + CTA).<br>
     </div>`;
+  // Sincroniza estado visual do master + contadores após o render
+  setTimeout(_seoStudioUpdateCounters, 0);
 }
 
+// Toggle individual — actualização cirúrgica (sem re-render da página).
+// Importante: NÃO chama seoStudio() para evitar interferir com clicks subsequentes.
 window.seoStudioToggle = function(productId, checked) {
   if (checked) seoState.selectedProductIds.add(productId);
   else seoState.selectedProductIds.delete(productId);
-  document.getElementById('seo-selected-count').textContent = seoState.selectedProductIds.size;
+  _seoStudioUpdateCounters();
 };
+
+// Toggle master — também actualização cirúrgica (não re-render).
 window.seoStudioToggleAll = function(checked) {
-  // FIX: respeita TODOS os filtrados, não só os primeiros 250 renderizados.
   const filter = (seoState.filterText || '').toLowerCase();
   const cat = seoState.category;
   const filtered = state.shopifyProducts.filter(p => {
@@ -5274,8 +5279,47 @@ window.seoStudioToggleAll = function(checked) {
   });
   if (checked) filtered.forEach(p => seoState.selectedProductIds.add(p.id));
   else filtered.forEach(p => seoState.selectedProductIds.delete(p.id));
-  seoStudio();
+  // Sincroniza visualmente todas as checkboxes individuais visíveis
+  document.querySelectorAll('#content table tbody input[type="checkbox"]').forEach(cb => {
+    cb.checked = checked;
+  });
+  _seoStudioUpdateCounters();
 };
+
+// Atualiza contadores + estado dos botões sem re-render
+function _seoStudioUpdateCounters() {
+  const count = seoState.selectedProductIds.size;
+  const countEl = document.getElementById('seo-selected-count');
+  if (countEl) countEl.textContent = count;
+  // Atualiza botão "Gerar SEO (N)"
+  const genBtn = document.querySelector('button[onclick="seoStudioGenerateBatch()"]');
+  if (genBtn) {
+    genBtn.disabled = count === 0;
+    genBtn.textContent = count > 0 ? `🧠 Gerar SEO (${count})` : '🧠 Gerar SEO';
+  }
+  // Sincroniza master checkbox indeterminate/checked
+  const master = document.getElementById('seo-chk-all');
+  if (master) {
+    const filter = (seoState.filterText || '').toLowerCase();
+    const cat = seoState.category;
+    const filtered = state.shopifyProducts.filter(p => {
+      if (filter && !p.title.toLowerCase().includes(filter)) return false;
+      if (cat !== 'all' && detectCategory(p) !== cat) return false;
+      return true;
+    });
+    const selectedInFiltered = filtered.filter(p => seoState.selectedProductIds.has(p.id)).length;
+    if (selectedInFiltered === 0) {
+      master.checked = false;
+      master.indeterminate = false;
+    } else if (selectedInFiltered === filtered.length) {
+      master.checked = true;
+      master.indeterminate = false;
+    } else {
+      master.checked = false;
+      master.indeterminate = true;
+    }
+  }
+}
 window.seoStudioReset = function() {
   seoState.selectedProductIds.clear();
   seoStudio();
@@ -5620,7 +5664,7 @@ function seoStudioRenderCollections(tabsHtml) {
 
     <div class="card" style="padding:0;overflow:hidden;margin-bottom:14px">
       <div style="padding:10px 14px;background:var(--panel);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-        <input type="checkbox" id="seo-coll-chk-all" onchange="seoStudioToggleAllCollections(this.checked)" ${filtered.length>0 && filtered.every(c=>seoState.selectedCollectionIds.has(c.id))?'checked':''}>
+        <input type="checkbox" id="seo-coll-chk-all" onchange="seoStudioToggleAllCollections(this.checked)">
         <label for="seo-coll-chk-all" style="font-size:13px;font-weight:600;cursor:pointer">Seleccionar todas as ${filtered.length}</label>
         <span style="color:var(--text3);font-size:11px">·</span>
         <span style="font-size:12px;color:var(--text2)">Seleccionadas: <strong id="seo-coll-selected-count">${seoState.selectedCollectionIds.size}</strong></span>
@@ -5672,12 +5716,13 @@ function seoStudioRenderCollections(tabsHtml) {
       <strong>Hub-spoke automático:</strong> ao gerar SEO de uma coleção, o sistema busca os <strong>top 8 produtos</strong> dela (por stock) e adiciona links internos no body.
       Os clientes que cheguem à página da coleção têm caminho directo para os produtos populares — e o Google percebe a estrutura de autoridade.
     </div>`;
+  setTimeout(_seoStudioUpdateCollectionCounters, 0);
 }
 
 window.seoStudioToggleCollection = function(id, checked) {
   if (checked) seoState.selectedCollectionIds.add(id);
   else seoState.selectedCollectionIds.delete(id);
-  document.getElementById('seo-coll-selected-count').textContent = seoState.selectedCollectionIds.size;
+  _seoStudioUpdateCollectionCounters();
 };
 window.seoStudioToggleAllCollections = function(checked) {
   const filter = (seoState.filterText || '').toLowerCase();
@@ -5688,8 +5733,33 @@ window.seoStudioToggleAllCollections = function(checked) {
   });
   if (checked) filtered.forEach(c => seoState.selectedCollectionIds.add(c.id));
   else filtered.forEach(c => seoState.selectedCollectionIds.delete(c.id));
-  seoStudio();
+  document.querySelectorAll('#content table tbody input[type="checkbox"]').forEach(cb => { cb.checked = checked; });
+  _seoStudioUpdateCollectionCounters();
 };
+
+function _seoStudioUpdateCollectionCounters() {
+  const count = seoState.selectedCollectionIds.size;
+  const countEl = document.getElementById('seo-coll-selected-count');
+  if (countEl) countEl.textContent = count;
+  const genBtn = document.querySelector('button[onclick="seoStudioGenerateBatchCollections()"]');
+  if (genBtn) {
+    genBtn.disabled = count === 0;
+    genBtn.textContent = count > 0 ? `🧠 Gerar (${count})` : '🧠 Gerar';
+  }
+  const master = document.getElementById('seo-coll-chk-all');
+  if (master) {
+    const filter = (seoState.filterText || '').toLowerCase();
+    const filtered = colState.collections.filter(c => {
+      if (filter && !c.title.toLowerCase().includes(filter)) return false;
+      if (c.productsCount === 0) return false;
+      return true;
+    });
+    const selectedInFiltered = filtered.filter(c => seoState.selectedCollectionIds.has(c.id)).length;
+    if (selectedInFiltered === 0) { master.checked = false; master.indeterminate = false; }
+    else if (selectedInFiltered === filtered.length) { master.checked = true; master.indeterminate = false; }
+    else { master.checked = false; master.indeterminate = true; }
+  }
+}
 
 // Busca top N produtos da coleção (com stock) para hub-spoke linking
 async function fetchTopProductsForCollection(collectionId, n = 8) {
