@@ -347,6 +347,13 @@ const DEFAULT_SETTINGS = {
   // Auto-sync Shopify ao abrir a app (evita ter de clicar "↻ Sincronizar" sempre).
   // Só dispara se cache tem >15 minutos.
   autoSyncOnBoot: true,
+  // Templates SEO — padronização de Title/H1 em todos os produtos/coleções.
+  // Placeholders: {brand} {model} {capacity} {color} {benefit} {store} {category} {topProducts}
+  seoTitleTemplate: '{brand} {model} {capacity} {color} | {store}',
+  seoH1Template: '{brand} {model} {capacity} {color}',
+  seoCollectionTitleTemplate: '{category} em Portugal — Stock Imediato | {store}',
+  seoCollectionH1Template: '{category}',
+  seoStoreName: 'BeeStore',
 };
 
 // ═══════════════════════════════════════════
@@ -5366,6 +5373,10 @@ function buildSeoPrompt(product) {
   ).join('\n');
   const tags = (product.tags || []).filter(t => !t.startsWith('sup:') && !t.startsWith('cat:') && !t.startsWith('last-seen:') && !t.startsWith('bsm:')).join(', ');
 
+  const titleTpl = state.settings?.seoTitleTemplate || '{brand} {model} {capacity} {color} | {store}';
+  const h1Tpl = state.settings?.seoH1Template || '{brand} {model} {capacity} {color}';
+  const storeName = state.settings?.seoStoreName || 'BeeStore';
+
   return `És especialista em SEO técnico para e-commerce de tecnologia em Portugal.
 
 PRODUTO:
@@ -5375,49 +5386,62 @@ PRODUTO:
 - Tags: ${tags || '(nenhuma relevante)'}
 - Variantes:
 ${variants || '  (sem variantes)'}
+- Nome da loja: ${storeName}
 
 PERGUNTAS-BASE DESTA CATEGORIA (inverse prompting):
 ${questions.map((q, i) => `${i + 1}. ${q}`).join('\n')}
 
 TAREFA — gera conteúdo SEO completo em JSON estrito:
 
-1. Adapta as 6 perguntas mais relevantes ao produto específico (substitui {modelo}, {capacidade}, etc.)
-2. Para cada pergunta, escreve uma resposta DIRECTA, factual, em 60-120 palavras
-3. Compõe os elementos SEO
+1. Extrai do título atual ou inferes do contexto: brand, model, capacity, color
+2. Adapta as 6 perguntas mais relevantes ao produto específico
+3. Para cada pergunta, escreve uma resposta DIRECTA, factual, em 60-120 palavras
+4. **Constrói Title e H1 SEGUINDO EXACTAMENTE OS TEMPLATES** (ver REGRA DE TEMPLATES)
 
-REGRAS DE ESTILO:
+REGRAS DE TEMPLATES (obrigatórias — não desviar):
+
+  TITLE template = "${titleTpl}"
+  H1 template    = "${h1Tpl}"
+
+  Placeholders disponíveis e como preenchê-los:
+    {brand}    = marca extraída (ex: Samsung, Apple, Xiaomi)
+    {model}    = modelo completo sem capacidade nem cor (ex: Galaxy S26 Ultra, iPhone 17 Pro Max)
+    {capacity} = armazenamento (ex: 256GB, 1TB). Se múltiplas variantes, usa a maior comum.
+    {color}    = cor exacta como vem nos dados (ex: Black, Cobalt Violet, Cosmic Orange).
+                 Não traduzas Black para Preto.
+    {benefit}  = gancho comercial curto em 3-5 palavras (ex: "Stock Imediato PT", "Garantia 2 anos")
+    {store}    = "${storeName}"
+    {category} = categoria detectada (ex: smartphone, tablet)
+
+  Substitui os placeholders no template e devolve a string final como title e h1.
+  Se a string resultante exceder 60 chars no title, encurta {benefit} ou retira-o.
+  NUNCA inclui no H1: "Guia", "Tutorial", "Análise", "Review", "Especificações",
+  "Tudo Sobre", emojis, ou hyperbole. O H1 deve ser limpo e idêntico em formato a
+  todos os outros produtos da loja.
+
+REGRAS DE ESTILO GERAIS:
 - PT-PT (não PT-BR). Tu, não vós. Não uses dashes "—" no body (usa pontos ou vírgulas)
-- Tom profissional, directo, sem hyperbole ("incrível", "revolucionário")
-- Mencionar "Portugal", "PT", "garantia 2 anos" quando relevante
-- Title: 50-60 caracteres, com nome do produto + benefício + "BeeStore" no fim
+- Tom profissional, directo, sem hyperbole
+- Mencionar "Portugal", "PT", "garantia 2 anos" quando relevante no body
 - Meta: 140-155 caracteres, gancho + 1 USP + CTA implícito
 - Body HTML: ~600-900 palavras, H2 por pergunta, parágrafos curtos, 1-2 listas <ul>
 - FAQ Schema: JSON-LD válido para schema.org/FAQPage
 - Não inventes specs: usa apenas o que tens nos dados
 
-REGRA CRÍTICA DO H1 — consistência absoluta entre todos os produtos:
-- H1 = "{Marca} {Modelo completo} {Capacidade} {Cor}"
-  Exemplos válidos:
-    "Samsung Galaxy S26 Ultra 256GB Black"
-    "Apple iPhone 17 Pro Max 512GB Cosmic Orange"
-    "Xiaomi Redmi Note 15 Pro 5G 256GB Midnight Black"
-- NUNCA incluir no H1: "Guia", "Tutorial", "Análise", "Review", "Especificações",
-  "Tudo Sobre", "Comprar", "Em Stock", "Características", emojis, hyperbole
-  ("Topo de Gama", "Sem Limites", "Inovação Pura", etc.)
-- NÃO incluir BeeStore no H1 (só no Title)
-- Mantém o H1 visualmente limpo — é o que aparece em catálogos, pesquisa interna e cards
-- Se houver dúvida sobre cor exacta, usa exactamente como vem nos dados; não inventes
-  variações como "Preto" se os dados dizem "Black"
-
 OUTPUT (JSON puro, sem markdown wrapping):
 {
   "category": "smartphone",
-  "title": "...",
+  "brand": "Samsung",
+  "model": "Galaxy S26 Ultra",
+  "capacity": "256GB",
+  "color": "Black",
+  "benefit": "Stock Imediato PT",
+  "title": "<resultado do template aplicado>",
+  "h1": "<resultado do template aplicado>",
   "metaDescription": "...",
-  "h1": "...",
-  "bodyHtml": "<h2>Pergunta 1</h2><p>...</p><h2>Pergunta 2</h2>...",
+  "bodyHtml": "<h2>Pergunta 1</h2><p>...</p>...",
   "faqSchema": { "@context":"https://schema.org", "@type":"FAQPage", "mainEntity":[...] },
-  "internalLinkSuggestions": ["nome de coleção 1", "nome de coleção 2", ...]
+  "internalLinkSuggestions": ["nome de coleção 1", "nome de coleção 2"]
 }`;
 }
 
@@ -5798,6 +5822,10 @@ function buildSeoCollectionPrompt(collection, topProducts) {
     `  ${i + 1}. ${p.title}  (handle: ${p.handle}, €${p.price.toFixed(2)}, stock ${p.stock})`
   ).join('\n');
 
+  const titleTpl = state.settings?.seoCollectionTitleTemplate || '{category} em Portugal — Stock Imediato | {store}';
+  const h1Tpl = state.settings?.seoCollectionH1Template || '{category}';
+  const storeName = state.settings?.seoStoreName || 'BeeStore';
+
   return `És especialista em SEO de páginas de categoria para e-commerce de tecnologia em Portugal.
 
 COLEÇÃO:
@@ -5806,6 +5834,7 @@ COLEÇÃO:
 - Total produtos: ${collection.productsCount}
 - Top produtos da coleção:
 ${productsList || '  (sem produtos no top)'}
+- Nome da loja: ${storeName}
 
 PERGUNTAS-BASE DE INVERSE PROMPTING (intent comercial de categoria):
 ${questions.map((q, i) => `${i + 1}. ${q}`).join('\n')}
@@ -5815,12 +5844,25 @@ TAREFA — gera conteúdo SEO completo de página de categoria em JSON estrito:
 1. Adapta 5-6 perguntas mais relevantes à coleção (substitui {categoria} pelo título)
 2. Para cada pergunta, escreve resposta directa em 80-150 palavras
 3. No corpo, integra MENÇÕES AOS TOP PRODUTOS com links: <a href="/products/{handle}">Nome do Produto</a>
-4. Compõe os elementos SEO
+4. **Constrói Title e H1 SEGUINDO EXACTAMENTE OS TEMPLATES** (ver REGRA DE TEMPLATES)
 
-REGRAS DE ESTILO:
+REGRAS DE TEMPLATES (obrigatórias):
+
+  TITLE template = "${titleTpl}"
+  H1 template    = "${h1Tpl}"
+
+  Placeholders:
+    {category} = nome legível da categoria (ex: "Smartphones Samsung", "Tablets")
+    {benefit}  = gancho comercial curto (ex: "Stock Imediato", "Envio Grátis")
+    {store}    = "${storeName}"
+
+  Substitui no template e devolve a string final como title e h1.
+  Se title exceder 60 chars, encurta {benefit} ou retira-o.
+  H1 fica limpo, sem "Guia", "Tutorial", "Análise", emojis ou hyperbole.
+
+REGRAS DE ESTILO GERAIS:
 - PT-PT (não PT-BR). Tu, não vós. Não uses dashes "—" no body (usa pontos ou vírgulas)
 - Tom: guia de compra honesto, não vendedor. Sem hyperbole.
-- Title: 50-60 chars, "<Categoria> em Portugal — <Beneficio> | BeeStore"
 - Meta: 140-155 chars com gancho + USP (envio, garantia, stock imediato) + CTA implícito
 - Body HTML: 800-1200 palavras estruturado como guia. Inclui 1-2 listas <ul>.
 - Linka pelo menos 4 produtos do topProducts no body (anchor texts naturais)
@@ -6141,6 +6183,67 @@ function settings() {
           </p>
         </div>
       </div>
+
+      <div style="margin-bottom:24px">
+        <div class="settings-label">SEO Studio — Padrões de Title e H1</div>
+        <div class="card">
+          <p style="color:var(--text2);font-size:13px;margin-bottom:14px">
+            Templates aplicados em TODAS as gerações SEO. Garante formato consistente entre produtos.
+            O Claude segue os templates exactamente.
+          </p>
+          <div class="form-grid">
+            <div class="form-group">
+              <label>Nome da loja <span style="color:var(--text3);font-weight:400">(placeholder {store})</span></label>
+              <input type="text" id="cfg-seo-store" value="${state.settings.seoStoreName||'BeeStore'}" placeholder="BeeStore">
+            </div>
+
+            <div style="border-top:1px solid var(--border);padding-top:14px">
+              <div style="font-weight:600;font-size:13px;margin-bottom:10px;color:var(--text)">📦 Produtos</div>
+              <div class="form-group">
+                <label>Template TITLE (SEO)</label>
+                <input type="text" id="cfg-seo-title-tpl" value="${(state.settings.seoTitleTemplate||'{brand} {model} {capacity} {color} | {store}').replace(/"/g,'&quot;')}"
+                       oninput="document.getElementById('seo-tpl-preview-title').textContent = this.value.replace('{brand}','Samsung').replace('{model}','Galaxy S26 Ultra').replace('{capacity}','256GB').replace('{color}','Black').replace('{benefit}','Stock PT').replace('{store}',document.getElementById('cfg-seo-store').value||'BeeStore')">
+                <div style="font-size:11px;color:var(--text3);margin-top:4px">Preview: <code id="seo-tpl-preview-title" style="color:var(--blue);font-weight:600"></code></div>
+              </div>
+              <div class="form-group">
+                <label>Template H1 (visível no site)</label>
+                <input type="text" id="cfg-seo-h1-tpl" value="${(state.settings.seoH1Template||'{brand} {model} {capacity} {color}').replace(/"/g,'&quot;')}"
+                       oninput="document.getElementById('seo-tpl-preview-h1').textContent = this.value.replace('{brand}','Samsung').replace('{model}','Galaxy S26 Ultra').replace('{capacity}','256GB').replace('{color}','Black').replace('{benefit}','Stock PT').replace('{store}',document.getElementById('cfg-seo-store').value||'BeeStore')">
+                <div style="font-size:11px;color:var(--text3);margin-top:4px">Preview: <code id="seo-tpl-preview-h1" style="color:var(--blue);font-weight:600"></code></div>
+              </div>
+            </div>
+
+            <div style="border-top:1px solid var(--border);padding-top:14px">
+              <div style="font-weight:600;font-size:13px;margin-bottom:10px;color:var(--text)">📁 Coleções</div>
+              <div class="form-group">
+                <label>Template TITLE (SEO)</label>
+                <input type="text" id="cfg-seo-coll-title-tpl" value="${(state.settings.seoCollectionTitleTemplate||'{category} em Portugal — Stock Imediato | {store}').replace(/"/g,'&quot;')}"
+                       oninput="document.getElementById('seo-tpl-preview-coll-title').textContent = this.value.replace('{category}','Smartphones Samsung').replace('{benefit}','Stock Imediato').replace('{store}',document.getElementById('cfg-seo-store').value||'BeeStore')">
+                <div style="font-size:11px;color:var(--text3);margin-top:4px">Preview: <code id="seo-tpl-preview-coll-title" style="color:var(--blue);font-weight:600"></code></div>
+              </div>
+              <div class="form-group">
+                <label>Template H1</label>
+                <input type="text" id="cfg-seo-coll-h1-tpl" value="${(state.settings.seoCollectionH1Template||'{category}').replace(/"/g,'&quot;')}"
+                       oninput="document.getElementById('seo-tpl-preview-coll-h1').textContent = this.value.replace('{category}','Smartphones Samsung').replace('{benefit}','Stock Imediato').replace('{store}',document.getElementById('cfg-seo-store').value||'BeeStore')">
+                <div style="font-size:11px;color:var(--text3);margin-top:4px">Preview: <code id="seo-tpl-preview-coll-h1" style="color:var(--blue);font-weight:600"></code></div>
+              </div>
+            </div>
+
+            <div style="background:var(--panel);padding:10px 12px;border-radius:8px;font-size:12px;color:var(--text2)">
+              <strong>Placeholders disponíveis:</strong><br>
+              <code>{brand}</code> · <code>{model}</code> · <code>{capacity}</code> · <code>{color}</code> · <code>{benefit}</code> · <code>{store}</code> · <code>{category}</code>
+              <br><br>
+              <strong>Exemplos sugeridos:</strong><br>
+              • H1 simples: <code>{brand} {model} {capacity} {color}</code><br>
+              • Title comercial: <code>{brand} {model} {capacity} {color} - {benefit} | {store}</code><br>
+              • Coleção H1: <code>{category}</code> ou <code>Comprar {category} Online</code>
+            </div>
+
+            <button class="btn btn-primary btn-sm" onclick="saveSeoTemplates()">Guardar Templates</button>
+          </div>
+        </div>
+      </div>
+
       <div style="margin-bottom:24px">
         <div class="settings-label">Normalização de Imagens</div>
         <div class="card">
@@ -6175,6 +6278,8 @@ function settings() {
         </div>
       </div>
     </div>`;
+  // Popula previews dos templates SEO após o render
+  setTimeout(() => { if (typeof _seoTemplatesRefreshPreview === 'function') _seoTemplatesRefreshPreview(); }, 0);
 }
 
 function saveSettings() {
@@ -6191,6 +6296,34 @@ function saveSettingsCloud() {
   state.settings = { ...state.settings, supabaseUrl:document.getElementById('cfg-supa-url')?.value.trim(), supabaseKey:document.getElementById('cfg-supa-key')?.value.trim() };
   save(); toast('Configuração cloud guardada','success');
 }
+// Renderiza previews iniciais dos templates SEO ao abrir a Settings.
+function _seoTemplatesRefreshPreview() {
+  const store = document.getElementById('cfg-seo-store')?.value || 'BeeStore';
+  const subst = (tpl) => (tpl || '')
+    .replace('{brand}','Samsung').replace('{model}','Galaxy S26 Ultra')
+    .replace('{capacity}','256GB').replace('{color}','Black')
+    .replace('{benefit}','Stock PT').replace('{store}', store)
+    .replace('{category}','Smartphones Samsung');
+  const set = (id, tpl) => { const el = document.getElementById(id); if (el) el.textContent = subst(tpl); };
+  set('seo-tpl-preview-title',      document.getElementById('cfg-seo-title-tpl')?.value);
+  set('seo-tpl-preview-h1',         document.getElementById('cfg-seo-h1-tpl')?.value);
+  set('seo-tpl-preview-coll-title', document.getElementById('cfg-seo-coll-title-tpl')?.value);
+  set('seo-tpl-preview-coll-h1',    document.getElementById('cfg-seo-coll-h1-tpl')?.value);
+}
+
+function saveSeoTemplates() {
+  state.settings = {
+    ...state.settings,
+    seoStoreName: document.getElementById('cfg-seo-store')?.value.trim() || 'BeeStore',
+    seoTitleTemplate: document.getElementById('cfg-seo-title-tpl')?.value || '{brand} {model} {capacity} {color} | {store}',
+    seoH1Template: document.getElementById('cfg-seo-h1-tpl')?.value || '{brand} {model} {capacity} {color}',
+    seoCollectionTitleTemplate: document.getElementById('cfg-seo-coll-title-tpl')?.value || '{category} em Portugal — Stock Imediato | {store}',
+    seoCollectionH1Template: document.getElementById('cfg-seo-coll-h1-tpl')?.value || '{category}',
+  };
+  save();
+  toast('Templates SEO guardados — próximas gerações vão usar estes formatos', 'success');
+}
+
 function saveImgSettings() {
   const num = (id, def, min, max) => {
     const v = parseFloat(document.getElementById(id)?.value);
