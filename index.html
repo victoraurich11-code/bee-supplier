@@ -344,6 +344,9 @@ const DEFAULT_SETTINGS = {
   imgAlphaThreshold: 10,      // se imagem já tem alpha, pixel com alpha < isto = transparente
   imgQuality: 0.9,            // qualidade WebP 0-1
   imgBatchSize: 5,            // máximo de produtos por batch (rate limit Shopify)
+  // Auto-sync Shopify ao abrir a app (evita ter de clicar "↻ Sincronizar" sempre).
+  // Só dispara se cache tem >15 minutos.
+  autoSyncOnBoot: true,
 };
 
 // ═══════════════════════════════════════════
@@ -720,8 +723,9 @@ async function testConnection() {
   catch(e) { return { ok:false, error:e.message }; }
 }
 
-async function fetchShopifyProducts() {
-  toast('A carregar produtos do Shopify...','info');
+async function fetchShopifyProducts(opts = {}) {
+  const silent = opts.silent === true;
+  if (!silent) toast('A carregar produtos do Shopify...','info');
   let products=[], cursor=null, hasNext=true;
   while(hasNext) {
     // Filtro `status:active`: exclui drafts e archived. Sem isto, produtos antigos
@@ -740,8 +744,13 @@ async function fetchShopifyProducts() {
     hasNext=page.pageInfo.hasNextPage; cursor=page.pageInfo.endCursor;
     if(products.length>8000) break;
   }
-  state.shopifyProducts=products; save();
-  toast(`${products.length} produtos carregados`,'success');
+  const prevCount = state.shopifyProducts.length;
+  state.shopifyProducts=products;
+  state.lastShopifySyncAt = new Date().toISOString();
+  save();
+  const delta = products.length - prevCount;
+  const deltaStr = delta === 0 ? '' : delta > 0 ? ` (+${delta})` : ` (${delta})`;
+  toast(`${products.length} produtos carregados${deltaStr}`,'success');
   return products;
 }
 
@@ -6034,9 +6043,20 @@ function settings() {
             <div class="form-group"><label>Shop domain</label><input type="text" id="cfg-shop" value="${state.settings.shop||''}" placeholder="bee-store-loja.myshopify.com"></div>
             <div class="form-group"><label>Admin API token</label><input type="password" id="cfg-token" value="${state.settings.token||''}" placeholder="shpat_..."></div>
             <div class="form-group"><label>API Version</label><input type="text" id="cfg-version" value="${state.settings.apiVersion||'2026-01'}" placeholder="2026-01"></div>
+            <div class="form-group" style="background:var(--panel);border-radius:8px;padding:10px 12px;border:1px solid var(--border)">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:0">
+                <input type="checkbox" id="cfg-autosync" ${state.settings.autoSyncOnBoot !== false ? 'checked' : ''} style="width:16px;height:16px;accent-color:var(--blue)">
+                <span style="font-weight:600">Auto-sincronizar Shopify ao abrir a app</span>
+              </label>
+              <span style="font-size:11px;color:var(--text2);display:block;margin-top:6px;margin-left:24px">
+                Quando activo, refresca a lista de produtos automaticamente no boot (se cache tem mais de 15 min).
+                ${state.lastShopifySyncAt ? `Última sync: ${new Date(state.lastShopifySyncAt).toLocaleString('pt-PT')}` : 'Nunca sincronizado.'}
+              </span>
+            </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
               <button class="btn btn-primary btn-sm" onclick="saveSettings()">Guardar</button>
               <button class="btn btn-ghost btn-sm" onclick="testConn()">Testar Ligação</button>
+              <button class="btn btn-ghost btn-sm" onclick="fetchShopifyProducts().then(render)">↻ Sincronizar Agora</button>
               <div id="conn-result" style="font-size:13px"></div>
             </div>
             <p style="font-size:11px;color:var(--text3);margin-top:4px">O token fica só no teu browser e nunca é enviado para o GitHub. (Migração para server-side está planeada.)</p>
@@ -6163,6 +6183,7 @@ function saveSettings() {
     shop: document.getElementById('cfg-shop')?.value.trim() || state.settings.shop,
     token: document.getElementById('cfg-token')?.value.trim() || state.settings.token,
     apiVersion: document.getElementById('cfg-version')?.value.trim() || state.settings.apiVersion || '2026-01',
+    autoSyncOnBoot: document.getElementById('cfg-autosync')?.checked !== false,
   };
   save(); updateBadges(); toast('Configurações guardadas','success');
 }
@@ -7652,6 +7673,27 @@ async function boot() {
   }
   await runMigrationIfNeeded();
   navigate('dashboard');
+
+  // Auto-sync em background: a cache pode estar stale (limpezas feitas via scripts
+  // não actualizam state.shopifyProducts). Refresca silenciosamente após boot
+  // para o user ter sempre dados frescos sem precisar de clicar "↻ Sincronizar".
+  // Default ON, controlável em Settings (autoSyncOnBoot).
+  const autoSync = state.settings?.autoSyncOnBoot !== false;
+  if (autoSync && state.settings?.shop && state.settings?.token) {
+    const lastSync = state.lastShopifySyncAt ? new Date(state.lastShopifySyncAt) : null;
+    const ageMin = lastSync ? Math.round((Date.now() - lastSync.getTime()) / 60000) : Infinity;
+    // Só sincroniza se a cache tem >15 min, para não martelar a Shopify em reloads frequentes
+    if (ageMin > 15) {
+      setTimeout(async () => {
+        try {
+          await fetchShopifyProducts({ silent: false });
+          render();   // re-render da página actual com dados frescos
+        } catch (e) {
+          console.warn('Auto-sync falhou:', e.message);
+        }
+      }, 800);
+    }
+  }
 }
 </script>
 </body>
