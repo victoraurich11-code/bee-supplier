@@ -5198,8 +5198,8 @@ function seoStudio() {
 
     <div class="card" style="padding:0;overflow:hidden;margin-bottom:14px">
       <div style="padding:10px 14px;background:var(--panel);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-        <input type="checkbox" id="seo-chk-all" onchange="seoStudioToggleAll(this.checked)">
-        <label for="seo-chk-all" style="font-size:13px;font-weight:600;cursor:pointer">Seleccionar todos os ${filtered.length} visíveis</label>
+        <input type="checkbox" id="seo-chk-all" onchange="seoStudioToggleAll(this.checked)" ${filtered.length>0 && filtered.every(p=>seoState.selectedProductIds.has(p.id))?'checked':''}>
+        <label for="seo-chk-all" style="font-size:13px;font-weight:600;cursor:pointer">Seleccionar todos os ${filtered.length} ${seoState.filterText||seoState.category!=='all'?'(filtrados)':''}</label>
         <span style="color:var(--text3);font-size:11px">·</span>
         <span style="font-size:12px;color:var(--text2)">Seleccionados: <strong id="seo-selected-count">${seoState.selectedProductIds.size}</strong></span>
         <span style="flex:1"></span>
@@ -5220,7 +5220,7 @@ function seoStudio() {
             <th>Estado</th>
             <th style="text-align:right">Acção</th>
           </tr></thead>
-          <tbody>${filtered.slice(0, 250).map(p => {
+          <tbody>${filtered.slice(0, 1000).map(p => {
             const cat = detectCategory(p);
             const checked = seoState.selectedProductIds.has(p.id);
             const result = seoState.results[p.id];
@@ -5264,13 +5264,14 @@ window.seoStudioToggle = function(productId, checked) {
   document.getElementById('seo-selected-count').textContent = seoState.selectedProductIds.size;
 };
 window.seoStudioToggleAll = function(checked) {
+  // FIX: respeita TODOS os filtrados, não só os primeiros 250 renderizados.
   const filter = (seoState.filterText || '').toLowerCase();
   const cat = seoState.category;
   const filtered = state.shopifyProducts.filter(p => {
     if (filter && !p.title.toLowerCase().includes(filter)) return false;
     if (cat !== 'all' && detectCategory(p) !== cat) return false;
     return true;
-  }).slice(0, 250);
+  });
   if (checked) filtered.forEach(p => seoState.selectedProductIds.add(p.id));
   else filtered.forEach(p => seoState.selectedProductIds.delete(p.id));
   seoStudio();
@@ -5619,7 +5620,7 @@ function seoStudioRenderCollections(tabsHtml) {
 
     <div class="card" style="padding:0;overflow:hidden;margin-bottom:14px">
       <div style="padding:10px 14px;background:var(--panel);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-        <input type="checkbox" id="seo-coll-chk-all" onchange="seoStudioToggleAllCollections(this.checked)">
+        <input type="checkbox" id="seo-coll-chk-all" onchange="seoStudioToggleAllCollections(this.checked)" ${filtered.length>0 && filtered.every(c=>seoState.selectedCollectionIds.has(c.id))?'checked':''}>
         <label for="seo-coll-chk-all" style="font-size:13px;font-weight:600;cursor:pointer">Seleccionar todas as ${filtered.length}</label>
         <span style="color:var(--text3);font-size:11px">·</span>
         <span style="font-size:12px;color:var(--text2)">Seleccionadas: <strong id="seo-coll-selected-count">${seoState.selectedCollectionIds.size}</strong></span>
