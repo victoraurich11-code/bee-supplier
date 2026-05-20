@@ -299,6 +299,7 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--blue); cur
         <div class="nav-item" onclick="navigate('upload')" id="nav-upload"><span class="icon">⬆</span> Processar Ficheiro</div>
         <div class="nav-item" onclick="navigate('alerts')" id="nav-alerts"><span class="icon">🔔</span> Alertas <span class="nav-badge" id="alert-badge" style="display:none">0</span></div>
         <div class="nav-item" onclick="navigate('health')" id="nav-health"><span class="icon">🩺</span> Saúde do Catálogo <span class="nav-badge yellow" id="health-badge" style="display:none">0</span></div>
+        <div class="nav-item" onclick="navigate('tek4life')" id="nav-tek4life"><span class="icon">📱</span> Tek4life <span class="nav-badge yellow" id="badge-tek4life" style="display:none">!</span></div>
       </div>
 
       <!-- Grupo: Catálogo (criar e enriquecer produtos) -->
@@ -320,7 +321,6 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--blue); cur
       <div class="nav-group-children" id="navgroup-children-maintenance">
         <div class="nav-item" onclick="navigate('splitVariants')" id="nav-splitVariants"><span class="icon">🔀</span> Separar Variantes</div>
         <div class="nav-item" onclick="navigate('collections')" id="nav-collections"><span class="icon">📁</span> Categorias</div>
-        <div class="nav-item" onclick="navigate('tek4life')" id="nav-tek4life"><span class="icon">📱</span> Tek4life <span class="nav-badge yellow" id="badge-tek4life" style="display:none">!</span></div>
       </div>
 
       <!-- Top-level: Mercado -->
@@ -505,6 +505,7 @@ let state = {
   productCanonicals: DB.get('productCanonicals', {}), // { [canonicalId]: { id, shopifyProductId, shopifyVariantId, shopifyInventoryItemId, primarySku, primaryBarcode, title, brand } }
   productAliases: DB.get('productAliases', []),       // [{ id, canonicalId, suppId, sku, barcode, source, confidence, addedAt, addedBy }]
   negativeMatches: DB.get('negativeMatches', []),     // [{ canonicalId, suppId, sku, barcode, rejectedAt }]
+  pageUsage: DB.get('pageUsage', {}),                  // { [page]: { count, firstVisited, lastVisited } } — instrumentação para decidir consolidações
   parsedRows: [], uploadSuppId: null, colMap: {}, analysisResult: null,
 };
 
@@ -1250,14 +1251,31 @@ function resetSkuHealth(sku, barcode) {
 // ═══════════════════════════════════════════
 // Mapeamento page → grupo. Permite auto-expand do grupo da página activa.
 const NAV_PAGE_TO_GROUP = {
-  upload: 'stocks', alerts: 'stocks', health: 'stocks',
+  upload: 'stocks', alerts: 'stocks', health: 'stocks', tek4life: 'stocks',
   toCreate: 'catalog', create: 'catalog', seoStudio: 'catalog', images: 'catalog', matching: 'catalog',
-  splitVariants: 'maintenance', collections: 'maintenance', tek4life: 'maintenance',
+  splitVariants: 'maintenance', collections: 'maintenance',
   suppliers: 'config', settings: 'config',
 };
 
+// Tracking de uso por página — informa decisões de consolidação.
+// Guarda: { count, lastVisited, firstVisited }
+function _trackPageUsage(page) {
+  if (!page || page === 'dashboard') return;   // dashboard é entrada default, não conta
+  state.pageUsage = state.pageUsage || {};
+  const now = new Date().toISOString();
+  if (!state.pageUsage[page]) {
+    state.pageUsage[page] = { count: 0, firstVisited: now, lastVisited: now };
+  }
+  state.pageUsage[page].count++;
+  state.pageUsage[page].lastVisited = now;
+  // Persistência leve (debounced via timeout para não martelar localStorage em navegações rápidas)
+  clearTimeout(_trackPageUsage._t);
+  _trackPageUsage._t = setTimeout(() => { try { DB.set('pageUsage', state.pageUsage); } catch {} }, 500);
+}
+
 function navigate(page) {
   state.page = page;
+  _trackPageUsage(page);
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   document.getElementById('nav-'+page)?.classList.add('active');
   // Auto-expand do grupo a que a página actual pertence + marca cabeçalho como activo
@@ -6268,6 +6286,52 @@ function settings() {
           <p style="font-size:12px;color:var(--text2);margin-top:10px">
             Sem API key: o Mercado fica em modo manual — usa os links "Ver no KK" por produto.
           </p>
+        </div>
+      </div>
+
+      <div style="margin-bottom:24px">
+        <div class="settings-label">Uso das Páginas</div>
+        <div class="card">
+          <p style="color:var(--text2);font-size:13px;margin-bottom:14px">
+            Tracking interno do uso de cada página, para informar decisões de consolidação da app.
+            Os dados ficam só no teu browser e no Supabase (não saem para fora).
+          </p>
+          ${(() => {
+            const usage = state.pageUsage || {};
+            const PAGE_LABELS = {
+              suppliers:'🏭 Fornecedores', upload:'⬆ Processar Ficheiro', health:'🩺 Saúde do Catálogo',
+              alerts:'🔔 Alertas', mercado:'📊 Mercado', matching:'🔗 Matching',
+              tek4life:'📱 Tek4life', create:'✚ Criar Produtos', toCreate:'💡 Para Criar',
+              splitVariants:'🔀 Separar Variantes', images:'🖼 Normalizar Imagens',
+              collections:'📁 Categorias', seoStudio:'🚀 SEO Studio', settings:'⚙ Configurações',
+            };
+            const rows = Object.entries(PAGE_LABELS).map(([k, label]) => {
+              const u = usage[k] || { count: 0, lastVisited: null };
+              const ago = u.lastVisited
+                ? Math.round((Date.now() - new Date(u.lastVisited).getTime()) / 86400000) + 'd'
+                : '—';
+              return { key: k, label, count: u.count, lastAgo: ago, last: u.lastVisited };
+            }).sort((a, b) => b.count - a.count);
+            const maxCount = Math.max(1, ...rows.map(r => r.count));
+            return `<div style="display:flex;flex-direction:column;gap:6px">
+              ${rows.map(r => {
+                const pct = Math.round((r.count / maxCount) * 100);
+                const flagged = r.count === 0;
+                return `<div style="display:flex;align-items:center;gap:10px;padding:6px 10px;border-radius:6px;background:${flagged?'var(--orange-bg)':'var(--panel)'}">
+                  <div style="flex:1;font-size:12px">${r.label}</div>
+                  <div style="width:120px;height:6px;background:var(--border);border-radius:3px;overflow:hidden">
+                    <div style="width:${pct}%;height:100%;background:${flagged?'var(--orange)':'var(--blue)'}"></div>
+                  </div>
+                  <div class="mono" style="width:50px;text-align:right;font-size:12px;font-weight:600">${r.count}×</div>
+                  <div class="mono" style="width:50px;text-align:right;font-size:11px;color:var(--text3)">${r.lastAgo}</div>
+                </div>`;
+              }).join('')}
+            </div>
+            <div style="margin-top:10px;font-size:11px;color:var(--text2)">
+              Páginas com fundo laranja são candidatas a consolidação (zero uso). Os dados acumulam-se a partir de agora.
+            </div>
+            <button class="btn btn-ghost btn-sm" style="margin-top:10px" onclick="if(confirm('Reset do tracking de uso?')){state.pageUsage={};DB.set('pageUsage',{});toast('Tracking resetado','info');settings();}">Reset tracking</button>`;
+          })()}
         </div>
       </div>
 
