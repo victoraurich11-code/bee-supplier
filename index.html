@@ -40,6 +40,16 @@ body { background: var(--bg); color: var(--text); font-family: 'Outfit', sans-se
 .nav-item:hover { background: rgba(255,255,255,0.07); color: white; }
 .nav-item.active { background: rgba(245,196,0,0.15); color: var(--sidebar-active); }
 .nav-item .icon { font-size: 15px; width: 20px; text-align: center; }
+.nav-group-header { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--sidebar-text); transition: all 0.15s; margin-bottom: 2px; user-select: none; }
+.nav-group-header:hover { background: rgba(255,255,255,0.05); color: white; }
+.nav-group-header.has-active { color: var(--sidebar-active); }
+.nav-group-header .icon { font-size: 15px; width: 20px; text-align: center; }
+.nav-group-header .chevron { margin-left: auto; font-size: 10px; transition: transform 0.2s; opacity: 0.6; }
+.nav-group-header.open .chevron { transform: rotate(90deg); }
+.nav-group-children { padding-left: 14px; margin-bottom: 4px; display: none; }
+.nav-group-children.open { display: block; }
+.nav-group-children .nav-item { font-size: 12px; padding: 7px 12px; font-weight: 400; }
+.nav-group-children .nav-item .icon { font-size: 12px; width: 16px; }
 .nav-badge { margin-left: auto; background: var(--red); color: white; font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 10px; min-width: 18px; text-align: center; }
 .nav-badge.yellow { background: #D4A800; }
 .sidebar-footer { padding: 14px; border-top: 1px solid rgba(255,255,255,0.08); }
@@ -278,21 +288,52 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--blue); cur
       <div class="logo-version">v3.0 — Tags + Health</div>
     </div>
     <nav class="nav">
+      <!-- Top-level: Dashboard -->
       <div class="nav-item active" onclick="navigate('dashboard')" id="nav-dashboard"><span class="icon">⬡</span> Dashboard</div>
-      <div class="nav-item" onclick="navigate('suppliers')" id="nav-suppliers"><span class="icon">🏭</span> Fornecedores</div>
-      <div class="nav-item" onclick="navigate('upload')" id="nav-upload"><span class="icon">⬆</span> Processar Ficheiro</div>
-      <div class="nav-item" onclick="navigate('health')" id="nav-health"><span class="icon">🩺</span> Saúde do Catálogo <span class="nav-badge yellow" id="health-badge" style="display:none">0</span></div>
-      <div class="nav-item" onclick="navigate('alerts')" id="nav-alerts"><span class="icon">🔔</span> Alertas <span class="nav-badge" id="alert-badge" style="display:none">0</span></div>
+
+      <!-- Grupo: Stock & Preços (workflow diário) -->
+      <div class="nav-group-header" onclick="toggleNavGroup('stocks')" id="navgroup-header-stocks">
+        <span class="icon">📥</span> Stock &amp; Preços <span class="chevron">▶</span>
+      </div>
+      <div class="nav-group-children" id="navgroup-children-stocks">
+        <div class="nav-item" onclick="navigate('upload')" id="nav-upload"><span class="icon">⬆</span> Processar Ficheiro</div>
+        <div class="nav-item" onclick="navigate('alerts')" id="nav-alerts"><span class="icon">🔔</span> Alertas <span class="nav-badge" id="alert-badge" style="display:none">0</span></div>
+        <div class="nav-item" onclick="navigate('health')" id="nav-health"><span class="icon">🩺</span> Saúde do Catálogo <span class="nav-badge yellow" id="health-badge" style="display:none">0</span></div>
+      </div>
+
+      <!-- Grupo: Catálogo (criar e enriquecer produtos) -->
+      <div class="nav-group-header" onclick="toggleNavGroup('catalog')" id="navgroup-header-catalog">
+        <span class="icon">✚</span> Catálogo <span class="chevron">▶</span>
+      </div>
+      <div class="nav-group-children" id="navgroup-children-catalog">
+        <div class="nav-item" onclick="navigate('toCreate')" id="nav-toCreate"><span class="icon">💡</span> Para Criar <span class="nav-badge green" id="badge-toCreate" style="display:none">0</span></div>
+        <div class="nav-item" onclick="navigate('create')" id="nav-create"><span class="icon">✚</span> Criar Produtos</div>
+        <div class="nav-item" onclick="navigate('seoStudio')" id="nav-seoStudio"><span class="icon">🚀</span> SEO Studio</div>
+        <div class="nav-item" onclick="navigate('images')" id="nav-images"><span class="icon">🖼</span> Normalizar Imagens</div>
+        <div class="nav-item" onclick="navigate('matching')" id="nav-matching"><span class="icon">🔗</span> Matching</div>
+      </div>
+
+      <!-- Grupo: Manutenção (operações pontuais) -->
+      <div class="nav-group-header" onclick="toggleNavGroup('maintenance')" id="navgroup-header-maintenance">
+        <span class="icon">🛠</span> Manutenção <span class="chevron">▶</span>
+      </div>
+      <div class="nav-group-children" id="navgroup-children-maintenance">
+        <div class="nav-item" onclick="navigate('splitVariants')" id="nav-splitVariants"><span class="icon">🔀</span> Separar Variantes</div>
+        <div class="nav-item" onclick="navigate('collections')" id="nav-collections"><span class="icon">📁</span> Categorias</div>
+        <div class="nav-item" onclick="navigate('tek4life')" id="nav-tek4life"><span class="icon">📱</span> Tek4life <span class="nav-badge yellow" id="badge-tek4life" style="display:none">!</span></div>
+      </div>
+
+      <!-- Top-level: Mercado -->
       <div class="nav-item" onclick="navigate('mercado')" id="nav-mercado"><span class="icon">📊</span> Mercado <span class="nav-badge yellow" id="badge-mercado" style="display:none">!</span></div>
-      <div class="nav-item" onclick="navigate('matching')" id="nav-matching"><span class="icon">🔗</span> Matching</div>
-      <div class="nav-item" onclick="navigate('tek4life')" id="nav-tek4life"><span class="icon">📱</span> Tek4life <span class="nav-badge yellow" id="badge-tek4life" style="display:none">!</span></div>
-      <div class="nav-item" onclick="navigate('create')" id="nav-create"><span class="icon">✚</span> Criar Produtos</div>
-      <div class="nav-item" onclick="navigate('toCreate')" id="nav-toCreate"><span class="icon">💡</span> Para Criar <span class="nav-badge green" id="badge-toCreate" style="display:none">0</span></div>
-      <div class="nav-item" onclick="navigate('splitVariants')" id="nav-splitVariants"><span class="icon">🔀</span> Separar Variantes</div>
-      <div class="nav-item" onclick="navigate('images')" id="nav-images"><span class="icon">🖼</span> Normalizar Imagens</div>
-      <div class="nav-item" onclick="navigate('collections')" id="nav-collections"><span class="icon">📁</span> Categorias</div>
-      <div class="nav-item" onclick="navigate('seoStudio')" id="nav-seoStudio"><span class="icon">🚀</span> SEO Studio</div>
-      <div class="nav-item" onclick="navigate('settings')" id="nav-settings"><span class="icon">⚙</span> Configurações</div>
+
+      <!-- Grupo: Configuração -->
+      <div class="nav-group-header" onclick="toggleNavGroup('config')" id="navgroup-header-config">
+        <span class="icon">⚙</span> Configuração <span class="chevron">▶</span>
+      </div>
+      <div class="nav-group-children" id="navgroup-children-config">
+        <div class="nav-item" onclick="navigate('suppliers')" id="nav-suppliers"><span class="icon">🏭</span> Fornecedores</div>
+        <div class="nav-item" onclick="navigate('settings')" id="nav-settings"><span class="icon">⚙</span> Definições</div>
+      </div>
     </nav>
     <div class="sidebar-footer">
       <div class="connection-status">
@@ -1207,13 +1248,59 @@ function resetSkuHealth(sku, barcode) {
 // ═══════════════════════════════════════════
 // NAVIGATION
 // ═══════════════════════════════════════════
+// Mapeamento page → grupo. Permite auto-expand do grupo da página activa.
+const NAV_PAGE_TO_GROUP = {
+  upload: 'stocks', alerts: 'stocks', health: 'stocks',
+  toCreate: 'catalog', create: 'catalog', seoStudio: 'catalog', images: 'catalog', matching: 'catalog',
+  splitVariants: 'maintenance', collections: 'maintenance', tek4life: 'maintenance',
+  suppliers: 'config', settings: 'config',
+};
+
 function navigate(page) {
   state.page = page;
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   document.getElementById('nav-'+page)?.classList.add('active');
+  // Auto-expand do grupo a que a página actual pertence + marca cabeçalho como activo
+  document.querySelectorAll('.nav-group-header').forEach(h => h.classList.remove('has-active'));
+  const group = NAV_PAGE_TO_GROUP[page];
+  if (group) {
+    openNavGroup(group, true);
+    document.getElementById('navgroup-header-' + group)?.classList.add('has-active');
+  }
   const titles = { dashboard:'Dashboard', suppliers:'Fornecedores', upload:'Processar Ficheiro', health:'Saúde do Catálogo', alerts:'Alertas', mercado:'Mercado (KuantoKusta)', matching:'Matching Inteligente', tek4life:'Tek4life — iPhones Grade A+', create:'Criar Produtos', toCreate:'Para Criar — Sugestões dos Fornecedores', splitVariants:'Separar Variantes — Inspeção', images:'Normalizar Imagens', collections:'Categorias', seoStudio:'SEO Studio — Inverse Prompting', settings:'Configurações' };
   document.getElementById('page-title').textContent = titles[page]||page;
   render();
+}
+
+// Toggle expand/colapse dos grupos da sidebar.
+// Estado persistente em state.settings.sidebarOpenGroups.
+window.toggleNavGroup = function(groupId) {
+  const isOpen = document.getElementById('navgroup-children-' + groupId)?.classList.contains('open');
+  openNavGroup(groupId, !isOpen);
+};
+function openNavGroup(groupId, open) {
+  const header = document.getElementById('navgroup-header-' + groupId);
+  const children = document.getElementById('navgroup-children-' + groupId);
+  if (!header || !children) return;
+  if (open) {
+    header.classList.add('open');
+    children.classList.add('open');
+  } else {
+    header.classList.remove('open');
+    children.classList.remove('open');
+  }
+  // Persiste estado
+  state.settings = state.settings || {};
+  state.settings.sidebarOpenGroups = state.settings.sidebarOpenGroups || {};
+  state.settings.sidebarOpenGroups[groupId] = !!open;
+  try { DB.set('settings', state.settings); } catch {}
+}
+// Restaura estado dos grupos no boot
+function restoreNavGroupsState() {
+  const openGroups = state.settings?.sidebarOpenGroups || {};
+  for (const [groupId, isOpen] of Object.entries(openGroups)) {
+    if (isOpen) openNavGroup(groupId, true);
+  }
 }
 
 function render() {
@@ -7805,6 +7892,7 @@ async function boot() {
     DB.set('suppliers', state.suppliers);
   }
   await runMigrationIfNeeded();
+  restoreNavGroupsState();
   navigate('dashboard');
 
   // Auto-sync em background: a cache pode estar stale (limpezas feitas via scripts
