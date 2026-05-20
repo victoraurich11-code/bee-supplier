@@ -262,8 +262,10 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; }
 .btn-sm { padding: 4px 10px; font-size: var(--text-sm); border-radius: var(--radius-xs); }
 .btn-lg { padding: 10px var(--space-5); font-size: var(--text-md); border-radius: var(--radius); }
 
-/* ── Content ─────────────────────────────────────────────────────────── */
-.content { padding: var(--space-6) var(--space-6); flex: 1; max-width: 1600px; }
+/* ── Content (subtle fade ao mudar de página) ────────────────────────── */
+.content { padding: var(--space-6) var(--space-6); flex: 1; max-width: 1600px; animation: content-enter 220ms var(--ease-out); }
+@keyframes content-enter { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+.content.no-anim { animation: none; }
 
 /* ── Cards (3 tipos: panel, card, card-emphasis; nunca nested) ──────── */
 .card {
@@ -277,8 +279,8 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; }
 
 /* ── Stats grid (escala decisiva — números grandes mas tipográficos, não SaaS) */
 .stats-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: var(--space-3); margin-bottom: var(--space-5); }
-.stat-card { background: var(--ink-0); border: 1px solid var(--ink-200); border-radius: var(--radius); padding: var(--space-4) var(--space-5); transition: border-color var(--duration-fast), background var(--duration-fast); box-shadow: 0 1px 2px oklch(0% 0 0 / 0.03); }
-.stat-card:hover { border-color: var(--ink-300); background: var(--ink-50); }
+.stat-card { background: var(--ink-0); border: 1px solid var(--ink-200); border-radius: var(--radius); padding: var(--space-4) var(--space-5); transition: border-color var(--duration-fast), background var(--duration-fast), transform var(--duration-fast), box-shadow var(--duration-fast); box-shadow: 0 1px 2px oklch(0% 0 0 / 0.03); }
+.stat-card:hover { border-color: var(--ink-300); background: var(--ink-50); transform: translateY(-1px); box-shadow: 0 4px 8px oklch(0% 0 0 / 0.05), 0 1px 2px oklch(0% 0 0 / 0.03); }
 .stat-card.c-yellow { background: var(--bee-50); border-color: var(--bee-200); }
 .stat-card.c-yellow:hover { background: oklch(96% 0.040 80); }
 .stat-card.c-red    { background: var(--danger-50); border-color: oklch(85% 0.060 25); }
@@ -1538,6 +1540,14 @@ function _trackPageUsage(page) {
 function navigate(page) {
   state.page = page;
   _trackPageUsage(page);
+  // Reset da animação de entrada do conteúdo (subtle fade-up de 220ms)
+  const contentEl = document.getElementById('content');
+  if (contentEl) {
+    contentEl.style.animation = 'none';
+    // eslint-disable-next-line no-unused-expressions
+    contentEl.offsetHeight;   // trigger reflow para reiniciar animation
+    contentEl.style.animation = '';
+  }
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   document.getElementById('nav-'+page)?.classList.add('active');
   // Auto-expand do grupo a que a página actual pertence + marca cabeçalho como activo
@@ -6353,7 +6363,13 @@ window.seoStudioApplyAllPendingCollections = async function() {
     await new Promise(r => setTimeout(r, 400));
   }
   save();
-  toast(`Bulk apply: ${ok} aplicadas, ${fail} falhas`, fail ? 'warn' : 'success');
+  if (fail === 0) {
+    ProgressPanel.complete(`${ok} coleção(ões) actualizada(s)`);
+    toast(`Bulk apply concluído: ${ok} aplicadas`, 'success');
+  } else {
+    ProgressPanel.complete(`${ok} ok · ${fail} falhas`);
+    toast(`Bulk apply: ${ok} aplicadas, ${fail} falhas. Vê detalhes no painel.`, 'warning');
+  }
   seoStudio();
 };
 
