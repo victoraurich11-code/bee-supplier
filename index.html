@@ -5892,8 +5892,12 @@ window.seoStudioApplyAllPending = async function() {
   const pending = Object.entries(seoState.results).filter(([id, r]) => !r.appliedAt);
   if (!pending.length) { toast('Nenhum SEO gerado pendente de aplicação', 'info'); return; }
   if (!confirm(`Aplicar ${pending.length} SEO(s) à Shopify de uma vez?\n\nSem custo Claude (já estão gerados). Só requests Shopify.`)) return;
-  let ok = 0, fail = 0;
+  ProgressPanel.start(`A aplicar SEO a ${pending.length} produto(s)`, pending.length);
+  let ok = 0, fail = 0, idx = 0;
   for (const [id, r] of pending) {
+    idx++;
+    const product = state.shopifyProducts.find(p => p.id === id);
+    const label = (product?.title || r.title || id).slice(0, 60);
     try {
       const seoBody = `${r.bodyHtml || ''}\n<script type="application/ld+json">${JSON.stringify(r.faqSchema || {})}<\/script>`;
       await shopifyGQL(`mutation($input:ProductInput!){productUpdate(input:$input){product{id}userErrors{message field}}}`, {
@@ -5901,12 +5905,22 @@ window.seoStudioApplyAllPending = async function() {
       });
       r.appliedAt = new Date().toISOString();
       ok++;
-      if (ok % 10 === 0) toast(`Aplicados ${ok}/${pending.length}...`, 'info');
-    } catch (e) { fail++; console.error(e); }
+      ProgressPanel.update(idx, label, 'ok');
+    } catch (e) {
+      fail++;
+      ProgressPanel.update(idx, `${label}: ${e.message}`, 'fail');
+      console.error(e);
+    }
     await new Promise(r => setTimeout(r, 350));
   }
   save();
-  toast(`Bulk apply: ${ok} aplicados, ${fail} falhas`, fail ? 'warn' : 'success');
+  if (fail === 0) {
+    ProgressPanel.complete(`${ok} produto(s) actualizados`);
+    toast(`Bulk apply concluído: ${ok} aplicados`, 'success');
+  } else {
+    ProgressPanel.complete(`${ok} ok · ${fail} falhas`);
+    toast(`Bulk apply: ${ok} aplicados, ${fail} falhas. Vê detalhes no painel.`, 'warning');
+  }
   seoStudio();
 };
 
@@ -6317,8 +6331,12 @@ window.seoStudioApplyAllPendingCollections = async function() {
   const pending = Object.entries(seoState.collectionResults).filter(([id, r]) => !r.appliedAt);
   if (!pending.length) { toast('Nenhuma coleção pendente', 'info'); return; }
   if (!confirm(`Aplicar ${pending.length} coleção(ões) à Shopify de uma vez?\n\nSem custo Claude.`)) return;
-  let ok = 0, fail = 0;
+  ProgressPanel.start(`A aplicar SEO a ${pending.length} coleção(ões)`, pending.length);
+  let ok = 0, fail = 0, idx = 0;
   for (const [id, r] of pending) {
+    idx++;
+    const coll = colState.collections.find(c => c.id === id);
+    const label = (coll?.title || r.title || id).slice(0, 60);
     try {
       const seoBody = `${r.bodyHtml || ''}\n<script type="application/ld+json">${JSON.stringify(r.faqSchema || {})}<\/script>`;
       await shopifyGQL(`mutation($input:CollectionInput!){collectionUpdate(input:$input){collection{id}userErrors{message field}}}`, {
@@ -6326,7 +6344,12 @@ window.seoStudioApplyAllPendingCollections = async function() {
       });
       r.appliedAt = new Date().toISOString();
       ok++;
-    } catch (e) { fail++; console.error(e); }
+      ProgressPanel.update(idx, label, 'ok');
+    } catch (e) {
+      fail++;
+      ProgressPanel.update(idx, `${label}: ${e.message}`, 'fail');
+      console.error(e);
+    }
     await new Promise(r => setTimeout(r, 400));
   }
   save();
@@ -6818,6 +6841,141 @@ function toast(msg, type = 'info') {
 }
 function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 function timeAgo(d){ const m=Math.floor((Date.now()-new Date(d))/60000); const h=Math.floor(m/60); const dy=Math.floor(h/24); return dy>0?dy+'d':h>0?h+'h':m>0?m+'min':'agora'; }
+
+// ═══════════════════════════════════════════
+// PROGRESS PANEL — bottom-right, persistente, não bloqueia interacção.
+// API: ProgressPanel.start(title, total) → .update(current, logEntry?)
+//      .log(message, type?) → .complete(summary?) → .fail(message)
+// Para operações longas (>30s): aplicar SEO em batch, gerar batch, etc.
+// ═══════════════════════════════════════════
+const ProgressPanel = {
+  el: null,
+  state: { active: false, title: '', current: 0, total: 0, log: [], startTime: 0 },
+
+  _ensureEl() {
+    if (this.el) return;
+    this.el = document.createElement('div');
+    this.el.className = 'progress-panel hidden';
+    this.el.innerHTML = `
+      <div class="progress-panel-header">
+        <div class="progress-panel-icon" aria-hidden="true" style="width:18px;height:18px;display:flex;align-items:center;justify-content:center">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <circle cx="7" cy="7" r="5" stroke="var(--bee-500)" stroke-width="2" stroke-dasharray="31.4" stroke-dashoffset="23.5"
+                    style="transform-origin:center;animation:spin 1.2s linear infinite"/>
+          </svg>
+        </div>
+        <div class="progress-panel-title">A processar...</div>
+        <div class="progress-panel-actions">
+          <button data-action="minimize" title="Minimizar" type="button" aria-label="Minimizar">−</button>
+          <button data-action="close" title="Fechar (após terminar)" type="button" aria-label="Fechar" style="display:none">×</button>
+        </div>
+      </div>
+      <div class="progress-panel-body">
+        <div class="progress-bar"><div class="progress-fill" style="width:0%"></div></div>
+        <div class="progress-meta">
+          <span class="progress-panel-counter">0 / 0</span>
+          <span class="progress-panel-eta">a estimar...</span>
+        </div>
+        <div class="progress-panel-log" role="log" aria-live="polite"></div>
+      </div>
+    `;
+    document.body.appendChild(this.el);
+    this.el.querySelector('[data-action="minimize"]').onclick = () => this.toggleMinimize();
+    this.el.querySelector('[data-action="close"]').onclick = () => this.close();
+  },
+
+  start(title, total) {
+    this._ensureEl();
+    this.state = { active: true, title, current: 0, total, log: [], startTime: Date.now() };
+    this.el.querySelector('.progress-panel-title').textContent = title;
+    this.el.querySelector('.progress-panel-counter').textContent = `0 / ${total}`;
+    this.el.querySelector('.progress-panel-eta').textContent = 'a estimar...';
+    this.el.querySelector('.progress-fill').style.width = '0%';
+    this.el.querySelector('.progress-fill').classList.add('animating');
+    this.el.querySelector('.progress-panel-log').innerHTML = '';
+    this.el.querySelector('[data-action="close"]').style.display = 'none';
+    this.el.classList.remove('hidden', 'minimized');
+  },
+
+  update(current, logEntry, logType = 'info') {
+    if (!this.state.active) return;
+    this.state.current = current;
+    const pct = this.state.total > 0 ? Math.round((current / this.state.total) * 100) : 0;
+    this.el.querySelector('.progress-fill').style.width = pct + '%';
+    this.el.querySelector('.progress-panel-counter').textContent = `${current} / ${this.state.total} · ${pct}%`;
+    // ETA simples: extrapola pelo ritmo médio actual
+    const elapsed = (Date.now() - this.state.startTime) / 1000;
+    if (current > 0 && current < this.state.total) {
+      const ratePerSec = current / elapsed;
+      const remaining = (this.state.total - current) / ratePerSec;
+      const etaStr = remaining > 90
+        ? `~${Math.round(remaining / 60)}min restantes`
+        : `~${Math.round(remaining)}s restantes`;
+      this.el.querySelector('.progress-panel-eta').textContent = etaStr;
+    }
+    if (logEntry) this.log(logEntry, logType);
+  },
+
+  log(message, type = 'info') {
+    if (!this.el) return;
+    this.state.log.push({ message, type, t: Date.now() });
+    const logEl = this.el.querySelector('.progress-panel-log');
+    const icon = { ok: '✓', success: '✓', fail: '✗', error: '✗', info: '·', warn: '⚠' }[type] || '·';
+    const color = { ok: 'var(--success-700)', success: 'var(--success-700)', fail: 'var(--danger-700)', error: 'var(--danger-700)', warn: 'var(--warning-700)' }[type] || 'var(--ink-400)';
+    const item = document.createElement('div');
+    item.className = 'progress-panel-log-item';
+    item.innerHTML = `<span style="color:${color};font-weight:600;width:10px">${icon}</span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${message}</span>`;
+    logEl.appendChild(item);
+    // Auto-scroll: manter sempre a última no fundo
+    logEl.scrollTop = logEl.scrollHeight;
+    // Limitar a 200 linhas para não consumir memória
+    while (logEl.children.length > 200) logEl.removeChild(logEl.firstChild);
+  },
+
+  complete(summary) {
+    if (!this.state.active) return;
+    this.state.active = false;
+    const elapsed = Math.round((Date.now() - this.state.startTime) / 1000);
+    const elapsedStr = elapsed > 60 ? `${Math.round(elapsed / 60)}min` : `${elapsed}s`;
+    this.el.querySelector('.progress-panel-title').textContent = '✓ ' + (summary || 'Concluído');
+    this.el.querySelector('.progress-panel-counter').textContent = `${this.state.current} / ${this.state.total} · 100%`;
+    this.el.querySelector('.progress-panel-eta').textContent = `feito em ${elapsedStr}`;
+    this.el.querySelector('.progress-fill').style.width = '100%';
+    this.el.querySelector('.progress-fill').classList.remove('animating');
+    this.el.querySelector('.progress-fill').style.background = 'var(--success-500)';
+    // Substitui spinner por check
+    const iconEl = this.el.querySelector('.progress-panel-icon');
+    if (iconEl) iconEl.innerHTML = '<span style="color:var(--success-500);font-weight:700;font-size:14px">✓</span>';
+    this.el.querySelector('[data-action="close"]').style.display = '';
+    // Auto-close depois de 12s se user não fechou
+    setTimeout(() => { if (this.el && !this.state.active) this.close(); }, 12000);
+  },
+
+  fail(message) {
+    if (!this.state.active) return;
+    this.state.active = false;
+    this.el.querySelector('.progress-panel-title').textContent = '✗ ' + (message || 'Falhou');
+    this.el.querySelector('.progress-fill').style.background = 'var(--danger-500)';
+    this.el.querySelector('.progress-fill').classList.remove('animating');
+    const iconEl = this.el.querySelector('.progress-panel-icon');
+    if (iconEl) iconEl.innerHTML = '<span style="color:var(--danger-500);font-weight:700;font-size:14px">✗</span>';
+    this.el.querySelector('[data-action="close"]').style.display = '';
+  },
+
+  toggleMinimize() {
+    if (!this.el) return;
+    this.el.classList.toggle('minimized');
+    const btn = this.el.querySelector('[data-action="minimize"]');
+    if (btn) btn.textContent = this.el.classList.contains('minimized') ? '+' : '−';
+  },
+
+  close() {
+    if (!this.el) return;
+    this.el.classList.add('hidden');
+    setTimeout(() => { if (this.el && this.el.classList.contains('hidden')) { this.el.remove(); this.el = null; } }, 300);
+  },
+};
+window.ProgressPanel = ProgressPanel;
 
 // ═══════════════════════════════════════════
 // KK MARKET — KuantoKusta price monitoring
