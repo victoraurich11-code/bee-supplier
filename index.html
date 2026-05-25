@@ -571,7 +571,6 @@ input[type=checkbox]:focus-visible { outline: none; box-shadow: var(--shadow-foc
         <span class="icon">✚</span> Catálogo <span class="chevron">▶</span>
       </div>
       <div class="nav-group-children" id="navgroup-children-catalog">
-        <div class="nav-item" onclick="navigate('toCreate')" id="nav-toCreate"><span class="icon">💡</span> Para Criar <span class="nav-badge green" id="badge-toCreate" style="display:none">0</span></div>
         <div class="nav-item" onclick="navigate('create')" id="nav-create"><span class="icon">✚</span> Criar Produtos</div>
         <div class="nav-item" onclick="navigate('seoStudio')" id="nav-seoStudio"><span class="icon">🚀</span> SEO Studio</div>
         <div class="nav-item" onclick="navigate('images')" id="nav-images"><span class="icon">🖼</span> Normalizar Imagens</div>
@@ -1516,7 +1515,7 @@ function resetSkuHealth(sku, barcode) {
 // Mapeamento page → grupo. Permite auto-expand do grupo da página activa.
 const NAV_PAGE_TO_GROUP = {
   upload: 'stocks', alerts: 'stocks', health: 'stocks', tek4life: 'stocks',
-  toCreate: 'catalog', create: 'catalog', seoStudio: 'catalog', images: 'catalog', matching: 'catalog',
+  toCreate: 'stocks', create: 'catalog', seoStudio: 'catalog', images: 'catalog', matching: 'catalog',
   splitVariants: 'maintenance', collections: 'maintenance',
   suppliers: 'config', settings: 'config',
 };
@@ -1604,6 +1603,8 @@ function updateBadges() {
   if(ab){ ab.textContent=ac; ab.style.display=ac>0?'flex':'none'; }
 
   // Badge "Para Criar": número de MODELOS (grupos) novos por criar
+  // Legacy: badge-toCreate já não existe (fusão para tab dentro de Alertas).
+  // Mantém-se o code defensivo, mas getElementById devolve null → bail-out.
   const tcb = document.getElementById('badge-toCreate');
   if (tcb) {
     const active = state.alerts.filter(a => a.type === 'new_product' && !a.dismissed);
@@ -3472,20 +3473,211 @@ function resetUpload() {
 // ═══════════════════════════════════════════
 // ALERTS
 // ═══════════════════════════════════════════
+// Estado da página Alertas: qual tab está activa.
+// Persistido em window._alertsTab. Default: 'create' (foco no que dá receita).
+window._alertsTab = window._alertsTab || 'create';
+
 function alerts() {
-  document.getElementById('topbar-actions').innerHTML=`<button class="btn btn-ghost btn-sm" onclick="dismissAllAlerts()">Dispensar todos</button>`;
-  const active = state.alerts.filter(a=>!a.dismissed);
-  const byType = (type) => active.filter(a=>a.type===type);
-  document.getElementById('content').innerHTML=`
-    <div class="tabs">
-      <button class="tab active" onclick="filterAlerts('all',this)">Todos (${active.length})</button>
-      <button class="tab" onclick="filterAlerts('new_product',this)">Novos Produtos (${byType('new_product').length})</button>
-      <button class="tab" onclick="filterAlerts('no_update',this)">Sem Update (${byType('no_update').length})</button>
-      <button class="tab" onclick="filterAlerts('zero_stock',this)">Stock Zerado (${byType('zero_stock').length})</button>
-      <button class="tab" onclick="filterAlerts('no_origin',this)">Sem Origem (${byType('no_origin').length})</button>
+  const active = state.alerts.filter(a => !a.dismissed);
+  const newProds = active.filter(a => a.type === 'new_product');
+  const issues   = active.filter(a => a.type !== 'new_product');
+  const tab = window._alertsTab;
+
+  // Topbar actions variam consoante a tab
+  document.getElementById('topbar-actions').innerHTML = tab === 'issues'
+    ? `<button class="btn btn-ghost btn-sm" onclick="dismissAllIssueAlerts()">Dispensar todos</button>`
+    : '';
+
+  // Tabs sempre presentes; renderiza conteúdo conforme tab
+  const tabsHtml = `
+    <div class="tabs" style="margin-bottom:var(--space-4)">
+      <button class="tab ${tab==='create'?'active':''}" onclick="window._alertsTab='create';alerts()">
+        🆕 Criar Produtos
+        <span class="badge ${newProds.length>0?'badge-green':'badge-gray'}" style="margin-left:6px;font-size:10px;padding:1px 6px">${newProds.length}</span>
+      </button>
+      <button class="tab ${tab==='issues'?'active':''}" onclick="window._alertsTab='issues';alerts()">
+        ⚠ Por Resolver
+        <span class="badge ${issues.length>0?'badge-yellow':'badge-gray'}" style="margin-left:6px;font-size:10px;padding:1px 6px">${issues.length}</span>
+      </button>
     </div>
-    <div class="alert-list" id="alert-list">${renderAlertList(active)}</div>`;
+  `;
+
+  if (tab === 'create') {
+    document.getElementById('content').innerHTML = tabsHtml + '<div id="alerts-tab-create"></div>';
+    renderCreateTab(newProds);
+  } else {
+    document.getElementById('content').innerHTML = tabsHtml + '<div id="alerts-tab-issues"></div>';
+    renderIssuesTab(issues);
+  }
 }
+
+// Tab "Por Resolver" — alertas não-new_product.
+function renderIssuesTab(issues) {
+  const byType = (type) => issues.filter(a => a.type === type);
+  const el = document.getElementById('alerts-tab-issues');
+  if (!issues.length) {
+    el.innerHTML = `<div class="empty-state">
+      <div class="empty-icon">✓</div>
+      <p>Nenhum alerta por resolver.</p>
+      <p style="font-size:var(--text-sm);color:var(--ink-400);margin-top:var(--space-2)">Quando produtos ficarem sem update ou sem origem, aparecem aqui.</p>
+    </div>`;
+    return;
+  }
+  el.innerHTML = `
+    <div style="display:flex;gap:var(--space-2);margin-bottom:var(--space-3);flex-wrap:wrap">
+      <button class="btn btn-ghost btn-sm" onclick="filterIssueAlerts('all',this)" data-filter="all">Todos (${issues.length})</button>
+      <button class="btn btn-ghost btn-sm" onclick="filterIssueAlerts('no_update',this)" data-filter="no_update">Sem Update (${byType('no_update').length})</button>
+      <button class="btn btn-ghost btn-sm" onclick="filterIssueAlerts('zero_stock',this)" data-filter="zero_stock">Stock Zerado (${byType('zero_stock').length})</button>
+      <button class="btn btn-ghost btn-sm" onclick="filterIssueAlerts('no_origin',this)" data-filter="no_origin">Sem Origem (${byType('no_origin').length})</button>
+    </div>
+    <div class="alert-list" id="alert-list">${renderAlertList(issues)}</div>
+  `;
+}
+
+// Tab "Criar Produtos" — vista agregada por modelo+marca (era a antiga função toCreate).
+// Re-aproveita a lógica do `toCreate()` original sem mudar o comportamento.
+function renderCreateTab(newProds) {
+  const el = document.getElementById('alerts-tab-create');
+  if (!newProds.length) {
+    el.innerHTML = `<div class="empty-state">
+      <div class="empty-icon">💡</div>
+      <p>Nenhum produto novo sugerido pelos fornecedores.</p>
+      <p style="font-size:var(--text-sm);color:var(--ink-400);margin-top:var(--space-2)">Quando processares um upload, produtos que não existem na Shopify aparecem aqui agrupados.</p>
+    </div>`;
+    return;
+  }
+  // Contagens por fornecedor
+  const supplierCounts = new Map();
+  for (const a of newProds) supplierCounts.set(a.suppId, (supplierCounts.get(a.suppId) || 0) + 1);
+  const filterSupp = toCreateState.suppFilter;
+  const filtered = newProds.filter(a => {
+    if (filterSupp !== 'all' && a.suppId !== filterSupp) return false;
+    if (toCreateState.onlyWithImage && !a.attachedImage) return false;
+    return true;
+  });
+
+  const groups = new Map();
+  for (const a of filtered) {
+    const key = _toCreateGroupKey(a.name);
+    if (!groups.has(key)) groups.set(key, { key, items: [], suppliers: new Set(), totalStock: 0, totalSeen: 0, prices: [] });
+    const g = groups.get(key);
+    g.items.push(a);
+    g.suppliers.add(a.suppId);
+    g.totalStock += a.stock || 0;
+    g.totalSeen += a.seenCount || 1;
+    if (a.price) g.prices.push(a.price);
+  }
+  const groupsList = [...groups.values()].sort((a, b) => {
+    const sa = a.totalSeen * Math.log10(a.totalStock + 1);
+    const sb = b.totalSeen * Math.log10(b.totalStock + 1);
+    return sb - sa;
+  });
+  const groupTitle = (g) => (g.items[0].name || '').replace(/\s-\s.+$/, '').trim();
+  const supplierOptions = [...supplierCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([id, count]) => {
+      const s = state.suppliers.find(x => x.id === id);
+      return `<option value="${id}" ${filterSupp === id ? 'selected' : ''}>${s?.name || id} (${count})</option>`;
+    }).join('');
+  const withImage = filtered.filter(a => a.attachedImage).length;
+
+  el.innerHTML = `
+    <div class="card" style="display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap;padding:var(--space-3) var(--space-4);margin-bottom:var(--space-3)">
+      <label style="font-size:var(--text-sm);font-weight:600;color:var(--ink-700)">Fornecedor:</label>
+      <select onchange="toCreateState.suppFilter=this.value;alerts()" style="min-width:200px;padding:6px 10px">
+        <option value="all" ${filterSupp==='all'?'selected':''}>Todos (${newProds.length})</option>
+        ${supplierOptions}
+      </select>
+      <label style="display:flex;align-items:center;gap:6px;font-size:var(--text-sm);color:var(--ink-700);cursor:pointer">
+        <input type="checkbox" ${toCreateState.onlyWithImage?'checked':''} onchange="toCreateState.onlyWithImage=this.checked;alerts()">
+        Só com imagem
+      </label>
+      <div style="flex:1"></div>
+      <span style="font-size:var(--text-sm);color:var(--ink-500)">${filtered.length} variação(ões) · ${groupsList.length} modelo(s) · ${withImage} com imagem</span>
+    </div>
+
+    ${filtered.length > 0 ? `
+    <div class="card" style="display:flex;gap:var(--space-2);align-items:center;flex-wrap:wrap;padding:var(--space-3) var(--space-4);margin-bottom:var(--space-3);background:var(--bee-50);border-color:var(--bee-200)">
+      <div style="flex:1;font-size:var(--text-sm);color:var(--ink-700)">
+        <strong>Acções em massa</strong> · ${filtered.length} produto(s) seleccionado(s) pelo filtro
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="toCreateAutoFetchImagesAll()" title="Tenta buscar imagens via KuantoKusta">🖼 Buscar imagens auto</button>
+      <button class="btn btn-primary" onclick="toCreateBulkCreate()" title="Cria todos os ${filtered.length} produtos na Shopify (status DRAFT)">🚀 Criar ${filtered.length} no Shopify</button>
+    </div>` : ''}
+
+    <div style="display:flex;flex-direction:column;gap:var(--space-2)">
+      ${groupsList.map((g, gi) => {
+        const avgPrice = g.prices.length ? (g.prices.reduce((a, x) => a + x, 0) / g.prices.length) : 0;
+        const supLabels = [...g.suppliers].map(id => {
+          const s = state.suppliers.find(x => x.id === id);
+          return s?.name || id;
+        }).join(', ');
+        const itemsHtml = g.items.slice(0, 30).map(it => {
+          const seenBadge = (it.seenCount && it.seenCount > 1)
+            ? `<span class="badge badge-green" style="font-size:10px;padding:1px 6px">${it.seenCount}×</span>` : '';
+          return `<tr>
+            <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${it.name}">${it.name.replace(/.*\s-\s/, '') || it.name} ${seenBadge}</td>
+            <td class="mono" style="font-size:11px;color:var(--ink-500)">${it.sku || '—'}</td>
+            <td class="mono" style="font-size:11px;color:var(--ink-500)">${it.barcode || '—'}</td>
+            <td class="mono num">€${(it.price || 0).toFixed(2)}</td>
+            <td class="mono num"><strong>${it.stock || 0}</strong></td>
+            <td style="text-align:right"><button class="btn btn-ghost btn-sm" onclick="suggestCreate('${it.id}')" title="Editar e criar este produto individualmente">Criar individual</button></td>
+          </tr>`;
+        }).join('');
+        const hotBadge = g.totalSeen >= 3
+          ? `<span class="badge badge-green" style="background:var(--success-500);color:white;font-weight:700">🔥 ${g.totalSeen} aparições</span>`
+          : g.totalSeen >= 2
+          ? `<span class="badge badge-orange">${g.totalSeen}×</span>` : '';
+        return `
+          <details class="card" style="padding:0;overflow:hidden">
+            <summary style="padding:var(--space-3) var(--space-4);cursor:pointer;display:flex;align-items:center;gap:var(--space-3);list-style:none">
+              ${g.items[0]?.attachedImage?.dataUrl
+                ? `<img src="${g.items[0].attachedImage.dataUrl}" style="width:44px;height:44px;object-fit:contain;border-radius:var(--radius-sm);border:1px solid var(--ink-200);background:white" />`
+                : '<span style="font-size:22px;width:44px;height:44px;display:flex;align-items:center;justify-content:center;background:var(--ink-100);border-radius:var(--radius-sm);border:1px solid var(--ink-200)">📦</span>'}
+              <div style="flex:1;min-width:0">
+                <div style="font-weight:600;font-size:var(--text-base);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${groupTitle(g)}${g.items[0]?.attachedImage ? ' <span class="badge badge-green" style="font-size:10px;padding:1px 6px">🖼 imagem</span>' : ''}</div>
+                <div style="font-size:var(--text-xs);color:var(--ink-500);margin-top:3px">
+                  ${g.items.length} variação(ões) · Stock <strong>${g.totalStock}</strong> · Média €${avgPrice.toFixed(2)} · ${supLabels}
+                </div>
+              </div>
+              <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">${hotBadge}</div>
+            </summary>
+            <div style="border-top:1px solid var(--ink-200);padding:0">
+              <div class="table-wrap" style="border:none;border-radius:0;box-shadow:none;max-height:300px;overflow-y:auto">
+                <table style="font-size:var(--text-sm)">
+                  <thead><tr><th>Variação</th><th>SKU</th><th>EAN</th><th class="num">Preço</th><th class="num">Stock</th><th></th></tr></thead>
+                  <tbody>${itemsHtml}</tbody>
+                </table>
+              </div>
+              <div style="padding:var(--space-3) var(--space-4);display:flex;gap:var(--space-2);flex-wrap:wrap;border-top:1px solid var(--ink-200);background:var(--ink-50);align-items:center">
+                <button class="btn btn-ghost btn-sm" onclick="toCreateDismissGroup(${gi})">Dispensar grupo</button>
+                <button class="btn btn-ghost btn-sm" onclick="toCreateOpenImageSearch(${gi})">🔍 Procurar imagem</button>
+                <button class="btn btn-primary btn-sm" onclick="toCreateAttachImage(${gi})">🖼 Anexar imagem</button>
+              </div>
+            </div>
+          </details>`;
+      }).join('')}
+    </div>
+  `;
+}
+
+// Filtro de tipo dentro da tab "Por Resolver"
+window.filterIssueAlerts = function(type, btn) {
+  const issues = state.alerts.filter(a => !a.dismissed && a.type !== 'new_product');
+  document.querySelectorAll('#alerts-tab-issues [data-filter]').forEach(b => b.classList.remove('btn-primary'));
+  if (btn) { btn.classList.remove('btn-ghost'); btn.classList.add('btn-primary'); }
+  const filtered = type === 'all' ? issues : issues.filter(a => a.type === type);
+  document.getElementById('alert-list').innerHTML = renderAlertList(filtered);
+};
+
+window.dismissAllIssueAlerts = function() {
+  const issues = state.alerts.filter(a => !a.dismissed && a.type !== 'new_product');
+  if (!issues.length) return;
+  if (!confirm(`Dispensar ${issues.length} alerta(s) por resolver?`)) return;
+  const ids = new Set(issues.map(a => a.id));
+  state.alerts = state.alerts.map(a => ids.has(a.id) ? { ...a, dismissed: true } : a);
+  save(); alerts(); updateBadges();
+};
 
 const alertIcon = { new_product:'🆕', no_update:'⚠', zero_stock:'🔴', no_origin:'🔍' };
 
@@ -3617,7 +3809,18 @@ function _toCreateGroupKey(name) {
 // Estado local de Para Criar: filtro por fornecedor + opções
 const toCreateState = (window._toCreateState = window._toCreateState || { suppFilter: 'all', onlyWithImage: false });
 
+// Alias legacy: navigate('toCreate') redirecciona para Alertas tab Criar.
+// Mantém URLs internos a funcionar (links antigos, badge no menu, etc.).
 function toCreate() {
+  window._alertsTab = 'create';
+  state.page = 'alerts';
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('nav-alerts')?.classList.add('active');
+  document.getElementById('page-title').textContent = 'Alertas — Criar Produtos';
+  alerts();
+  return;
+  // Código antigo abaixo (não atingido) — mantido para referência durante transição:
+  // eslint-disable-next-line no-unreachable
   const allActive = state.alerts.filter(a => a.type === 'new_product' && !a.dismissed);
 
   // Contagens por fornecedor (para o dropdown)
