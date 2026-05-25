@@ -91,14 +91,34 @@ async function kkSearch(
   return {
     success: true,
     total: basePage?.total || 0,
-    data: products.map((p: any) => ({
-      id: p.id,
-      name: p.name,
-      priceMin: p.priceMin,
-      totalOffers: p.totalOffers,
-      url: "https://www.kuantokusta.pt" + p.url,
-      brand: p.brand,
-      category: p.category,
-    })),
+    data: products.map((p: any) => {
+      // KK expõe imagens em campos variáveis: `image`, `imageUrl`, `imageUrlSm`, `images[0].url`.
+      // Tentamos por ordem de qualidade (maior → menor) e devolvemos a primeira disponível.
+      let image: string | null = null;
+      if (p.image && typeof p.image === "string") {
+        image = p.image;
+      } else if (p.imageUrl && typeof p.imageUrl === "string") {
+        image = p.imageUrl;
+      } else if (Array.isArray(p.images) && p.images.length > 0) {
+        const first = p.images[0];
+        if (typeof first === "string") image = first;
+        else if (first?.url) image = first.url;
+      } else if (p.imageUrlSm) {
+        image = p.imageUrlSm;
+      }
+      // Normaliza para URL absoluta
+      if (image && image.startsWith("//")) image = "https:" + image;
+      else if (image && image.startsWith("/")) image = "https://www.kuantokusta.pt" + image;
+      return {
+        id: p.id,
+        name: p.name,
+        priceMin: p.priceMin,
+        totalOffers: p.totalOffers,
+        url: "https://www.kuantokusta.pt" + p.url,
+        brand: p.brand,
+        category: p.category,
+        image,
+      };
+    }),
   };
 }

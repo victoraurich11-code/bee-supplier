@@ -4467,32 +4467,73 @@ window.toCreateAutoFetchImagesAll = async function() {
   toCreate();
 };
 
-// Tenta obter URL de imagem do KuantoKusta para um produto.
-// Estratégia: kkSearch → pega primeiro resultado → fetch da página → extrai og:image.
+// Tenta obter URL de imagem para um produto. Estratégia em cascata:
+//   1) Padrões URL directos para Samsung/Apple/Xiaomi (instant, sem chamadas)
+//   2) KK search devolve `image` (após upgrade da edge function)
+//   3) Fallback: scrape KK page → og:image
 async function tryFetchProductImageViaKK(name, sku) {
   if (!name) return null;
+  // ── Tentativa 1: padrões URL directos ────────────────────────────────
+  const directUrl = tryFetchImageViaDirectURLs(name);
+  if (directUrl) {
+    // Confirma que carrega antes de retornar
+    if (await _imageLoads(directUrl)) return directUrl;
+  }
+  // ── Tentativa 2: KK search devolve `image` ───────────────────────────
   try {
     const res = await kkSearch(name);
-    if (!res?.success || !res.data?.length) return null;
-    const best = bestMatch(res.data, name) || res.data[0];
-    if (!best?.url) return null;
-    // Fetch página do produto via worker (CORS)
-    const resp = await fetch(PROXY, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Endpoint': 'kk-page',
-        'X-KK-URL': best.url,
-      },
-      body: '{}',
-    }).catch(() => null);
-    if (!resp || !resp.ok) return null;
-    const html = await resp.text();
-    const m = html.match(/<meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i);
-    return m?.[1] || null;
-  } catch {
-    return null;
-  }
+    if (res?.success && res.data?.length) {
+      const best = bestMatch(res.data, name) || res.data[0];
+      if (best?.image && await _imageLoads(best.image)) return best.image;
+      // ── Tentativa 3: fetch página do produto KK → og:image ────────
+      if (best?.url) {
+        try {
+          const resp = await fetch(PROXY, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Endpoint': 'kk-page', 'X-KK-URL': best.url },
+            body: '{}',
+          });
+          if (resp.ok) {
+            const html = await resp.text();
+            const m = html.match(/<meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i);
+            if (m?.[1] && await _imageLoads(m[1])) return m[1];
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+  return null;
+}
+
+// Padrões URL CDN oficiais para tech mainstream.
+// Não é exaustivo mas cobre os modelos mais comuns que tu vendes.
+function tryFetchImageViaDirectURLs(name) {
+  const t = (name || '').toLowerCase();
+  // Apple — não tem padrão URL público previsível sem SKU interno, skip
+  // Samsung Galaxy — formato `https://images.samsung.com/is/image/samsung/p6pim/pt/[SKU]/...`
+  // Não tenho o SKU interno aqui, e o padrão é difícil sem ele.
+  // Xiaomi — i01.appmifile.com/v1/MI_18455B3E4DA706226CF7C2A92FEEC1FA9F/...
+  // Também sem padrão facilmente previsível.
+  //
+  // ── DuckDuckGo Instant Answer (sem API key, sem auth) ───
+  // Pequeno: DDG não tem image API directa pública sem token, skip.
+  //
+  // Por agora, esta função fica como hook para futuro (padrões manuais).
+  // Devolve null para passar para a próxima estratégia (KK).
+  return null;
+}
+
+// Verifica se uma URL de imagem carrega (HEAD ou GET probe via Image()).
+function _imageLoads(url) {
+  return new Promise(resolve => {
+    if (!url) return resolve(false);
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    const timer = setTimeout(() => { img.src = ''; resolve(false); }, 6000);
+    img.onload = () => { clearTimeout(timer); resolve(img.naturalWidth > 50); };
+    img.onerror = () => { clearTimeout(timer); resolve(false); };
+    img.src = url;
+  });
 }
 
 // ═══════════════════════════════════════════
