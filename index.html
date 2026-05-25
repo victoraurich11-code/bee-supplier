@@ -3614,9 +3614,25 @@ function _toCreateGroupKey(name) {
   return `${brand}|${k.model}|${k.tier}|${k.caps}`;
 }
 
+// Estado local de Para Criar: filtro por fornecedor + opções
+const toCreateState = (window._toCreateState = window._toCreateState || { suppFilter: 'all', onlyWithImage: false });
+
 function toCreate() {
-  const active = state.alerts.filter(a => a.type === 'new_product' && !a.dismissed);
-  if (!active.length) {
+  const allActive = state.alerts.filter(a => a.type === 'new_product' && !a.dismissed);
+
+  // Contagens por fornecedor (para o dropdown)
+  const supplierCounts = new Map();
+  for (const a of allActive) supplierCounts.set(a.suppId, (supplierCounts.get(a.suppId) || 0) + 1);
+
+  // Aplicar filtro fornecedor
+  const filterSupp = toCreateState.suppFilter;
+  const active = allActive.filter(a => {
+    if (filterSupp !== 'all' && a.suppId !== filterSupp) return false;
+    if (toCreateState.onlyWithImage && !a.attachedImage) return false;
+    return true;
+  });
+
+  if (!allActive.length) {
     document.getElementById('content').innerHTML = `
       <div class="empty-state">
         <div class="empty-icon">💡</div>
@@ -3626,7 +3642,7 @@ function toCreate() {
     return;
   }
 
-  // Agrupar
+  // Agrupar (apenas os filtrados)
   const groups = new Map();
   for (const a of active) {
     const key = _toCreateGroupKey(a.name);
@@ -3639,37 +3655,73 @@ function toCreate() {
     if (a.price) g.prices.push(a.price);
   }
   const groupsList = [...groups.values()].sort((a, b) => {
-    // Prioridade: visto mais vezes * stock total
     const sa = a.totalSeen * Math.log10(a.totalStock + 1);
     const sb = b.totalSeen * Math.log10(b.totalStock + 1);
     return sb - sa;
   });
 
-  // Header do grupo: usa o primeiro item para inferir "modelo base"
   const groupTitle = (g) => {
-    // Tira a parte da cor / sufixo após " - " para representar o agrupamento
     const first = g.items[0].name || '';
     return first.replace(/\s-\s.+$/, '').trim();
   };
 
+  // Opções de fornecedor para dropdown
+  const supplierOptions = [...supplierCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([id, count]) => {
+      const s = state.suppliers.find(x => x.id === id);
+      return `<option value="${id}" ${filterSupp === id ? 'selected' : ''}>${s?.name || id} (${count})</option>`;
+    }).join('');
+
+  // Contadores condicionais ao filtro aplicado
+  const variations = active.length;
+  const totalStock = active.reduce((s, a) => s + (a.stock || 0), 0);
+  const withImage = active.filter(a => a.attachedImage).length;
+
   document.getElementById('content').innerHTML = `
-    <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap">
-      <div class="stat-card" style="border-left:3px solid var(--green)">
-        <div class="stat-num" style="color:var(--green)">${groupsList.length}</div>
-        <div class="stat-lbl">Modelos sugeridos</div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:var(--space-3);margin-bottom:var(--space-4)">
+      <div class="stat-card">
+        <div class="stat-num">${groupsList.length}</div>
+        <div class="stat-lbl">Modelos${filterSupp!=='all'?' filtrados':''}</div>
       </div>
-      <div class="stat-card" style="border-left:3px solid var(--blue)">
-        <div class="stat-num" style="color:var(--blue)">${active.length}</div>
-        <div class="stat-lbl">Variações totais</div>
+      <div class="stat-card">
+        <div class="stat-num">${variations}</div>
+        <div class="stat-lbl">Variações</div>
       </div>
-      <div class="stat-card" style="border-left:3px solid var(--purple)">
-        <div class="stat-num" style="color:var(--purple)">${active.reduce((s, a) => s + (a.stock || 0), 0)}</div>
-        <div class="stat-lbl">Stock total disponível</div>
+      <div class="stat-card c-yellow">
+        <div class="stat-num">${totalStock}</div>
+        <div class="stat-lbl">Stock disponível</div>
+      </div>
+      <div class="stat-card c-purple">
+        <div class="stat-num">${withImage}<span style="font-size:14px;color:var(--ink-400);font-weight:500"> / ${active.length}</span></div>
+        <div class="stat-lbl">Com imagem anexada</div>
       </div>
     </div>
 
-    <div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:12px;color:var(--text2)">
-      💡 Ordenado por <strong>relevância</strong> = aparições × log(stock). Quem aparece mais vezes E tem mais stock está no topo.
+    <div class="card" style="padding:var(--space-3) var(--space-4);margin-bottom:var(--space-4);display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap">
+      <div style="display:flex;align-items:center;gap:var(--space-2);flex-wrap:wrap">
+        <label style="font-size:var(--text-sm);font-weight:600;color:var(--ink-700)">Fornecedor:</label>
+        <select id="tc-supp-filter" onchange="toCreateState.suppFilter=this.value;toCreate()" style="min-width:200px;padding:6px 10px">
+          <option value="all" ${filterSupp==='all'?'selected':''}>Todos (${allActive.length})</option>
+          ${supplierOptions}
+        </select>
+        <label style="display:flex;align-items:center;gap:6px;font-size:var(--text-sm);color:var(--ink-700);cursor:pointer;margin-left:var(--space-3)">
+          <input type="checkbox" ${toCreateState.onlyWithImage?'checked':''} onchange="toCreateState.onlyWithImage=this.checked;toCreate()">
+          Só com imagem
+        </label>
+      </div>
+      <div style="flex:1"></div>
+      ${variations > 0 ? `
+        <button class="btn btn-ghost btn-sm" onclick="toCreateAutoFetchImagesAll()" title="Tenta buscar imagens via KuantoKusta para todos os grupos sem imagem anexada">🖼 Buscar imagens auto</button>
+        <button class="btn btn-primary" onclick="toCreateBulkCreate()" title="Cria todos os ${variations} produtos visíveis na Shopify (status: DRAFT)">🚀 Criar ${variations} no Shopify</button>
+      ` : ''}
+    </div>
+
+    <div class="card" style="padding:var(--space-3) var(--space-4);margin-bottom:var(--space-4);font-size:var(--text-sm);color:var(--ink-500);background:var(--info-50);border-color:oklch(88% 0.050 240)">
+      <strong style="color:var(--info-700)">Bulk create:</strong>
+      Cada produto é criado em <strong>DRAFT</strong> na Shopify com vendor, productType, tags (sup:X, cat:atualizado, last-seen), SKU, EAN, preço (com margem do fornecedor) e stock.
+      Imagens anexadas (manualmente ou via "Buscar imagens auto") são enviadas via staged upload.
+      Tu validas e publicas manualmente na Shopify Admin.
     </div>
 
     <div style="display:flex;flex-direction:column;gap:10px">
@@ -3828,6 +3880,215 @@ window.toCreateDismissGroup = function(gi) {
   toast(`${target.length} alertas dispensados`, 'success');
   toCreate();
 };
+
+// ─── Bulk create — itera alertas filtrados e cria 1 produto por alerta ─
+// Status: DRAFT. Inclui vendor, productType, tags, sku, barcode, preço, stock + imagem (se anexada).
+window.toCreateBulkCreate = async function() {
+  const allActive = state.alerts.filter(a => a.type === 'new_product' && !a.dismissed);
+  const filterSupp = toCreateState.suppFilter;
+  const active = allActive.filter(a => {
+    if (filterSupp !== 'all' && a.suppId !== filterSupp) return false;
+    if (toCreateState.onlyWithImage && !a.attachedImage) return false;
+    return true;
+  });
+  if (!active.length) { toast('Sem produtos a criar com os filtros actuais', 'info'); return; }
+
+  const supplierName = filterSupp === 'all'
+    ? 'Todos os fornecedores'
+    : (state.suppliers.find(s => s.id === filterSupp)?.name || filterSupp);
+  const withImage = active.filter(a => a.attachedImage).length;
+  const confirmMsg =
+    `Criar ${active.length} produto(s) na Shopify?\n\n` +
+    `Fornecedor: ${supplierName}\n` +
+    `Com imagem anexada: ${withImage}/${active.length}\n` +
+    `Status: DRAFT (vais validar e publicar manualmente)\n\n` +
+    `Cada produto leva ~2-3 segundos. Tempo total estimado: ~${Math.ceil(active.length * 2.5 / 60)}min.`;
+  if (!confirm(confirmMsg)) return;
+
+  const locationId = await getLocationId().catch(() => null);
+  ProgressPanel.start(`A criar ${active.length} produto(s) na Shopify`, active.length);
+  let ok = 0, fail = 0, withImageOk = 0, idx = 0;
+
+  for (const alert of active) {
+    idx++;
+    const data = inferProductDataFromAlert(alert);
+    const labelShort = (data.title || 'produto').slice(0, 60);
+    try {
+      // 1) Cria produto base DRAFT
+      const productInput = {
+        title: data.title,
+        vendor: data.vendor || undefined,
+        productType: data.productType || undefined,
+        status: 'DRAFT',
+        tags: data.tags,
+      };
+      const createRes = await shopifyGQL(
+        `mutation($input:ProductInput!){productCreate(input:$input){product{id variants(first:1){edges{node{id inventoryItem{id}}}}}userErrors{message field}}}`,
+        { input: productInput }
+      );
+      if (createRes.productCreate.userErrors?.length) {
+        throw new Error(createRes.productCreate.userErrors.map(e => e.message).join('; '));
+      }
+      const product = createRes.productCreate.product;
+      const variantId = product?.variants?.edges[0]?.node?.id;
+      const invId = product?.variants?.edges[0]?.node?.inventoryItem?.id;
+
+      // 2) Update variant: price + barcode
+      if (variantId) {
+        const variantInput = { id: variantId, price: String(data.price.toFixed(2)) };
+        if (data.barcode) variantInput.barcode = data.barcode;
+        await shopifyGQL(
+          `mutation($productId:ID!,$variants:[ProductVariantsBulkInput!]!){productVariantsBulkUpdate(productId:$productId,variants:$variants){userErrors{message field}}}`,
+          { productId: product.id, variants: [variantInput] }
+        );
+      }
+      // 3) SKU via inventoryItemUpdate
+      if (invId && data.sku) {
+        try { await updateVariantSKU(invId, data.sku); } catch (e) { console.warn('SKU update:', e.message); }
+      }
+      // 4) Stock no location (com tracked + activate + set)
+      if (invId && locationId && data.stock > 0) {
+        try {
+          await shopifyGQL(
+            `mutation($id:ID!,$input:InventoryItemInput!){inventoryItemUpdate(id:$id,input:$input){userErrors{message}}}`,
+            { id: invId, input: { tracked: true } }
+          );
+          await shopifyGQL(
+            `mutation($inventoryItemId:ID!,$locationId:ID!){inventoryActivate(inventoryItemId:$inventoryItemId,locationId:$locationId){userErrors{message}}}`,
+            { inventoryItemId: invId, locationId }
+          );
+          await updateVariantStock(invId, locationId, data.stock);
+        } catch (e) { console.warn('Stock activate:', e.message); }
+      }
+      // 5) Histórico de custo (para futura detecção de variações)
+      if (data.histKey && data.cost) {
+        state.costHistory[data.histKey] = { custo: data.cost, data: new Date().toISOString() };
+      }
+      // 6) Imagem anexada (se houver) — fetch dataURL → Blob → staged upload
+      let imageOk = false;
+      if (data.attachedImage?.dataUrl) {
+        try {
+          const blob = await (await fetch(data.attachedImage.dataUrl)).blob();
+          const filename = `${data.title.replace(/[^a-z0-9]+/gi, '-').toLowerCase().slice(0, 60)}.webp`;
+          const target = await stagedUploadCreate(filename, blob.type || 'image/webp', blob.size);
+          await uploadToStaged(target, blob, filename);
+          await productCreateMediaFromStaged(product.id, target.resourceUrl, data.title);
+          imageOk = true;
+          withImageOk++;
+        } catch (e) { console.warn('Imagem:', e.message); }
+      }
+      // 7) Dismiss alerta (limpeza)
+      const alertEl = state.alerts.find(a => a.id === alert.id);
+      if (alertEl) alertEl.dismissed = true;
+
+      ok++;
+      const logMsg = `${labelShort}${imageOk ? ' (+ imagem)' : ''}`;
+      ProgressPanel.update(idx, logMsg, 'ok');
+    } catch (e) {
+      fail++;
+      ProgressPanel.update(idx, `${labelShort}: ${e.message}`, 'fail');
+      console.error(e);
+    }
+    await sleep(350);
+  }
+  save();
+
+  if (fail === 0) {
+    ProgressPanel.complete(`${ok} produto(s) criados${withImageOk > 0 ? ` (${withImageOk} com imagem)` : ''}`);
+    toast(`✓ ${ok} produtos criados em DRAFT. Vai à Shopify Admin para rever e publicar.`, 'success');
+  } else {
+    ProgressPanel.complete(`${ok} ok · ${fail} falhas`);
+    toast(`${ok} criados, ${fail} falhas. Vê detalhes no painel.`, 'warning');
+  }
+  // Refresca catálogo local (silencioso) — útil para o próximo upload já matchar os novos
+  fetchShopifyProducts({ silent: true }).then(() => render()).catch(() => {});
+  toCreate();
+};
+
+// ─── Auto-fetch de imagens via KuantoKusta para todos os grupos sem imagem
+// Best-effort: KK pode falhar por anti-bot. Falhas são silenciosas.
+window.toCreateAutoFetchImagesAll = async function() {
+  const allActive = state.alerts.filter(a => a.type === 'new_product' && !a.dismissed);
+  const filterSupp = toCreateState.suppFilter;
+  const active = allActive.filter(a => filterSupp === 'all' || a.suppId === filterSupp);
+  const groups = new Map();
+  for (const a of active) {
+    const key = _toCreateGroupKey(a.name);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(a);
+  }
+  const toFetch = [...groups.entries()].filter(([_, items]) => !items[0]?.attachedImage);
+  if (!toFetch.length) { toast('Todos os grupos visíveis já têm imagem', 'info'); return; }
+  if (!confirm(`Tentar buscar imagens automaticamente para ${toFetch.length} grupo(s) via KuantoKusta?\n\nProcesso best-effort. Falhas são silenciosas. O resultado é guardado nos alertas para usar no bulk create.`)) return;
+
+  ProgressPanel.start(`A buscar imagens automaticamente (${toFetch.length} grupos)`, toFetch.length);
+  let ok = 0, fail = 0, idx = 0;
+  for (const [key, items] of toFetch) {
+    idx++;
+    const first = items[0];
+    const baseName = (first.name || '').replace(/\s-\s.+$/, '').trim();
+    try {
+      const url = await tryFetchProductImageViaKK(baseName, first.sku);
+      if (url) {
+        // Carrega + normaliza
+        const bitmap = await loadImageBitmap(url);
+        const opts = {
+          canvasSize: state.settings?.imgCanvasSize || 2000,
+          paddingPct: state.settings?.imgPaddingPct || 10,
+          whiteThreshold: state.settings?.imgWhiteThreshold || 245,
+          alphaThreshold: state.settings?.imgAlphaThreshold || 10,
+          quality: state.settings?.imgQuality || 0.9,
+        };
+        const blob = await normalizeImage(bitmap, opts);
+        const dataUrl = await new Promise((res, rej) => {
+          const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(blob);
+        });
+        items.forEach(a => { a.attachedImage = { url, dataUrl, normalizedAt: new Date().toISOString(), source: 'kk-auto' }; });
+        ok++;
+        ProgressPanel.update(idx, `${baseName.slice(0, 60)} ✓`, 'ok');
+      } else {
+        fail++;
+        ProgressPanel.update(idx, `${baseName.slice(0, 60)} (sem resultados)`, 'warn');
+      }
+    } catch (e) {
+      fail++;
+      ProgressPanel.update(idx, `${baseName.slice(0, 60)} (erro: ${e.message})`, 'fail');
+    }
+    await sleep(600);   // throttle KK
+  }
+  save();
+  ProgressPanel.complete(`${ok} imagens anexadas, ${fail} sem resultado`);
+  toast(`✓ ${ok}/${toFetch.length} imagens anexadas`, ok > 0 ? 'success' : 'warning');
+  toCreate();
+};
+
+// Tenta obter URL de imagem do KuantoKusta para um produto.
+// Estratégia: kkSearch → pega primeiro resultado → fetch da página → extrai og:image.
+async function tryFetchProductImageViaKK(name, sku) {
+  if (!name) return null;
+  try {
+    const res = await kkSearch(name);
+    if (!res?.success || !res.data?.length) return null;
+    const best = bestMatch(res.data, name) || res.data[0];
+    if (!best?.url) return null;
+    // Fetch página do produto via worker (CORS)
+    const resp = await fetch(PROXY, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Endpoint': 'kk-page',
+        'X-KK-URL': best.url,
+      },
+      body: '{}',
+    }).catch(() => null);
+    if (!resp || !resp.ok) return null;
+    const html = await resp.text();
+    const m = html.match(/<meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i);
+    return m?.[1] || null;
+  } catch {
+    return null;
+  }
+}
 
 // ═══════════════════════════════════════════
 // MATCHING
@@ -5393,7 +5654,7 @@ const SEO_QUESTIONS_BY_CATEGORY = {
 
 // Detecta categoria a partir do título e tags do produto.
 function detectCategory(product) {
-  const text = ((product.title || '') + ' ' + ((product.tags || []).join(' '))).toLowerCase();
+  const text = ((product.title || product.name || '') + ' ' + ((product.tags || []).join(' '))).toLowerCase();
   if (/\b(iphone|galaxy s\d|galaxy a\d|xiaomi.*5g|pixel|redmi|smartphone|telem[óo]vel)\b/i.test(text)) return 'smartphone';
   if (/\b(tablet|ipad|galaxy tab)\b/i.test(text)) return 'tablet';
   if (/\b(laptop|portátil|macbook|notebook|aspire|thinkpad|vivobook)\b/i.test(text)) return 'laptop';
@@ -5402,6 +5663,97 @@ function detectCategory(product) {
   if (/\b(tv|televisão|televisor)\b/i.test(text)) return 'tv';
   if (/\b(capa|case|carregador|cabo|adaptador|suporte|cover)\b/i.test(text)) return 'accessory';
   return 'generic';
+}
+
+// Detecta a marca a partir do nome do produto (vendor para Shopify).
+function detectVendor(name) {
+  const t = (name || '').toLowerCase();
+  const brands = [
+    ['apple', /\b(apple|iphone|ipad|airpods|imac|macbook|airtag|magic mouse)\b/],
+    ['Samsung', /\bsamsung|galaxy\b/],
+    ['Xiaomi', /\bxiaomi|redmi|poco|mi\s/],
+    ['Google', /\bgoogle\s+pixel|pixel\b/],
+    ['Apple', /\bapple\b/],
+    ['Microsoft', /\bmicrosoft|surface\b/],
+    ['Sony', /\bsony|playstation|ps5\b/],
+    ['Nintendo', /\bnintendo|switch\b/],
+    ['Asus', /\basus|vivobook|zenbook|rog\b/],
+    ['Acer', /\bacer|aspire\b/],
+    ['HP', /\bhp\s|laserjet|deskjet\b/],
+    ['Lenovo', /\blenovo|thinkpad|legion\b/],
+    ['Dell', /\bdell|alienware\b/],
+    ['Huawei', /\bhuawei|honor\b/],
+    ['JBL', /\bjbl\b/],
+    ['Bose', /\bbose\b/],
+    ['Sennheiser', /\bsennheiser\b/],
+    ['LG', /\blg\s/],
+    ['Logitech', /\blogitech\b/],
+    ['Razer', /\brazer\b/],
+    ['Anker', /\banker\b/],
+    ['TP-Link', /\btp-link|tplink\b/],
+    ['Kingston', /\bkingston\b/],
+    ['Seagate', /\bseagate\b/],
+    ['Crucial', /\bcrucial\b/],
+    ['Intel', /\bintel\b/],
+    ['AMD', /\bamd\s|ryzen\b/],
+    ['Nvidia', /\bnvidia|geforce|rtx\b/],
+  ];
+  for (const [vendor, regex] of brands) {
+    if (regex.test(t)) return vendor === 'apple' ? 'Apple' : vendor;
+  }
+  return '';
+}
+
+// Converte categoria interna em product_type Shopify (legível, padrão de mercado).
+const CATEGORY_TO_PRODUCT_TYPE = {
+  smartphone:  'Smartphones',
+  tablet:      'Tablets',
+  laptop:      'Computadores Portáteis',
+  earbuds:     'Áudio',
+  smartwatch:  'Smartwatches',
+  tv:          'Televisores',
+  accessory:   'Acessórios',
+  generic:     '',
+};
+
+// Compõe os dados completos para criar um produto Shopify a partir de um alerta new_product.
+// Devolve: { title, vendor, productType, tags, sku, barcode, cost, price, stock, suppId }
+function inferProductDataFromAlert(alert) {
+  const name = (alert.name || '').trim();
+  const supplier = state.suppliers.find(s => s.id === alert.suppId);
+  const vendor = detectVendor(name);
+  const category = detectCategory({ title: name, name });
+  const productType = CATEGORY_TO_PRODUCT_TYPE[category] || '';
+  // Preço sugerido — se temos custo histórico, aplica margem do fornecedor; senão usa preço do alerta directo
+  const histKey = alert.sku ? `${alert.suppId}::${alert.sku.toLowerCase()}` : null;
+  const histCost = histKey && state.costHistory[histKey]?.custo;
+  const cost = histCost ?? alert.price;
+  const isManual = supplier?.pricingMode === 'manual';
+  const margin = supplier?.margin ?? 7;
+  const rawPrice = (supplier?.priceType === 'pvp' || isManual) ? cost : cost * (1 + margin / 100);
+  const price = applyPriceRounding(rawPrice, supplier?.rounding || 'none');
+  // Tags
+  const tags = [
+    `sup:${alert.suppId}`,
+    'cat:atualizado',
+    `last-seen:${YYYYMM()}`,
+  ];
+  return {
+    title: name,
+    vendor,
+    productType,
+    tags,
+    sku: alert.sku || '',
+    barcode: alert.barcode || '',
+    cost,
+    price,
+    stock: alert.stock || 0,
+    suppId: alert.suppId,
+    suppName: supplier?.name || alert.suppId,
+    category,
+    histKey,
+    attachedImage: alert.attachedImage || null,
+  };
 }
 
 // Estado da página
