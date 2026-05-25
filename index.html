@@ -3613,11 +3613,10 @@ function renderCreateTab(newProds) {
     <div class="card" style="display:flex;gap:var(--space-2);align-items:center;flex-wrap:wrap;padding:var(--space-3) var(--space-4);margin-bottom:var(--space-3);background:var(--bee-50);border-color:var(--bee-200)">
       <div style="flex:1;font-size:var(--text-sm);color:var(--ink-700)">
         <strong>Acções em massa</strong> · ${filtered.length} produto(s) seleccionado(s) pelo filtro
-        ${toCreateState.selectedCollectionIds.size > 0 ? `<span class="badge badge-purple" style="margin-left:8px">📁 ${toCreateState.selectedCollectionIds.size} coleção(ões) seleccionada(s)</span>` : ''}
+        <span style="display:block;font-size:11px;color:var(--ink-500);margin-top:3px">Coleções escolhem-se individualmente em cada produto (clica "Criar individual" na linha).</span>
       </div>
-      <button class="btn btn-ghost btn-sm" onclick="toCreateOpenCollectionsPicker()" title="Escolhe coleções para aplicar a todos os produtos do bulk">📁 Coleções${toCreateState.selectedCollectionIds.size > 0 ? ` (${toCreateState.selectedCollectionIds.size})` : ''}</button>
       <button class="btn btn-ghost btn-sm" onclick="toCreateAutoFetchImagesAll()" title="Tenta buscar imagens via KuantoKusta">🖼 Buscar imagens auto</button>
-      <button class="btn btn-primary" onclick="toCreateBulkCreate()" title="Cria todos os ${filtered.length} produtos na Shopify (status DRAFT)">🚀 Criar ${filtered.length} no Shopify</button>
+      <button class="btn btn-primary" onclick="toCreateBulkCreate()" title="Cria todos os ${filtered.length} produtos na Shopify (status DRAFT, sem coleções)">🚀 Criar ${filtered.length} no Shopify</button>
     </div>` : ''}
 
     <div style="display:flex;flex-direction:column;gap:var(--space-2)">
@@ -3754,76 +3753,272 @@ function filterAlerts(type, el) {
 function dismissAlert(id) { state.alerts=state.alerts.map(a=>a.id===id?{...a,dismissed:true}:a); save(); document.getElementById('alert-'+id)?.remove(); updateBadges(); }
 function dismissAllAlerts() { state.alerts=state.alerts.map(a=>({...a,dismissed:true})); save(); render(); }
 
-function suggestCreate(alertId) {
-  const a = state.alerts.find(x=>x.id===alertId); if(!a) return;
-  const supp = state.suppliers.find(s=>s.id===a.suppId);
-  document.getElementById('modal-content').innerHTML=`
+// Estado local do modal de criar produto individual (preserva selecção de
+// coleções enquanto o user edita os campos).
+window._singleCreateState = window._singleCreateState || { selectedCollectionIds: new Set(), filter: '' };
+
+async function suggestCreate(alertId) {
+  const a = state.alerts.find(x => x.id === alertId); if (!a) return;
+
+  // Garante que temos coleções carregadas (sem bloquear o modal se falhar)
+  if (!colState.collections.length) {
+    try { await colFetchAll(); } catch {}
+  }
+
+  // Auto-popula campos a partir do alerta + heurísticas
+  const data = inferProductDataFromAlert(a);
+  // Pre-selecciona coleções sugeridas no primeiro uso
+  if (window._singleCreateState.selectedCollectionIds.size === 0) {
+    const { exact } = suggestCollectionsForProduct(data);
+    exact.forEach(c => window._singleCreateState.selectedCollectionIds.add(c.id));
+  }
+  // Detecta duplicados na loja para mostrar aviso inline
+  const dups = findShopifyDuplicates(a);
+
+  document.getElementById('modal-content').innerHTML = `
     <div class="modal-title">🆕 Criar Produto no Shopify</div>
+    <div class="modal-sub">Cria em <strong>DRAFT</strong>. Tu publicas manualmente após validar.</div>
+
+    ${dups.length ? `
+    <div class="card" style="background:var(--warning-50);border-color:oklch(88% 0.080 60);padding:var(--space-3);margin-bottom:var(--space-4)">
+      <div style="font-size:var(--text-sm);font-weight:600;color:var(--warning-700);margin-bottom:6px">⚠ ${dups.length} produto(s) parecido(s) já existem na loja</div>
+      ${dups.slice(0,3).map(d => {
+        const matchLabel = { ean: 'EAN igual', sku: 'SKU igual', name: `nome ${d.score}%` }[d.matchType];
+        return `<div style="font-size:var(--text-xs);color:var(--ink-700);padding:4px 0">
+          <strong>${d.product.title.slice(0,60)}</strong> · <span style="color:var(--warning-700);font-weight:600">${matchLabel}</span>
+          <button class="btn btn-text btn-sm" style="float:right" onclick="closeModal();_associateFromAlert('${alertId}','${d.product.id}','${d.variant.id}')">Associar em vez de criar</button>
+        </div>`;
+      }).join('')}
+    </div>` : ''}
+
     <div class="form-grid">
-      <div class="form-group"><label>Título</label><input type="text" id="np-title" value="${a.name}"></div>
+      <div class="form-group"><label>Título</label><input type="text" id="np-title" value="${(data.title||'').replace(/"/g,'&quot;')}"></div>
       <div class="form-row">
-        <div class="form-group"><label>SKU</label><input type="text" id="np-sku" value="${a.sku||''}"></div>
-        <div class="form-group"><label>Barcode</label><input type="text" id="np-barcode" value="${a.barcode||''}"></div>
+        <div class="form-group"><label>SKU</label><input type="text" id="np-sku" value="${data.sku||''}"></div>
+        <div class="form-group"><label>Barcode</label><input type="text" id="np-barcode" value="${data.barcode||''}"></div>
       </div>
       <div class="form-row">
-        <div class="form-group"><label>Preço (€)</label><input type="number" id="np-price" value="${a.price||''}" step="0.01"></div>
-        <div class="form-group"><label>Stock Inicial</label><input type="number" id="np-stock" value="${a.stock||0}"></div>
+        <div class="form-group">
+          <label>Preço (€) <span style="color:var(--ink-400);font-weight:400">· custo €${(data.cost||0).toFixed(2)}${data.cost!==data.price?` · margem aplicada`:''}</span></label>
+          <input type="number" id="np-price" value="${(data.price||0).toFixed(2)}" step="0.01">
+        </div>
+        <div class="form-group"><label>Stock Inicial</label><input type="number" id="np-stock" value="${data.stock||0}"></div>
       </div>
-      <div class="form-group"><label>Vendor</label><input type="text" id="np-vendor" value="${supp?.name||''}"></div>
+      <div class="form-row">
+        <div class="form-group"><label>Vendor (marca)</label><input type="text" id="np-vendor" value="${data.vendor||''}" placeholder="Apple, Samsung, ..."></div>
+        <div class="form-group"><label>Product Type</label><input type="text" id="np-ptype" value="${data.productType||''}" placeholder="Smartphones, Tablets, ..."></div>
+      </div>
+      ${data.attachedImage?.dataUrl ? `
+      <div style="display:flex;align-items:center;gap:var(--space-3);padding:var(--space-2) var(--space-3);background:var(--success-50);border:1px solid oklch(88% 0.060 150);border-radius:var(--radius-sm)">
+        <img src="${data.attachedImage.dataUrl}" style="width:48px;height:48px;object-fit:contain;border-radius:var(--radius-xs);background:white;border:1px solid var(--ink-200)" />
+        <div style="flex:1;font-size:var(--text-sm);color:var(--success-700);font-weight:600">🖼 Imagem anexada será enviada com o produto</div>
+      </div>` : ''}
+
+      <!-- Coleções inline -->
+      <div class="form-group" style="border-top:1px solid var(--ink-200);padding-top:var(--space-3);margin-top:var(--space-2)">
+        <label style="display:flex;align-items:center;gap:var(--space-2);margin-bottom:var(--space-2)">
+          <span>📁 Coleções</span>
+          <span class="badge ${window._singleCreateState.selectedCollectionIds.size>0?'badge-purple':'badge-gray'}" id="np-coll-count">
+            ${window._singleCreateState.selectedCollectionIds.size} seleccionada(s)
+          </span>
+          <span style="flex:1"></span>
+          <button type="button" class="btn btn-text btn-sm" onclick="_singleCreateApplySuggested('${alertId}')">Só sugeridas</button>
+          <button type="button" class="btn btn-text btn-sm" onclick="_singleCreateClearCollections('${alertId}')">Limpar</button>
+        </label>
+        <input type="text" placeholder="Filtrar coleções..." value="${window._singleCreateState.filter||''}" oninput="window._singleCreateState.filter=this.value;_singleCreateRenderCollList('${alertId}')" style="margin-bottom:var(--space-2);padding:6px 10px">
+        <div id="np-coll-list" style="max-height:200px;overflow-y:auto;border:1px solid var(--ink-200);border-radius:var(--radius-sm);padding:4px"></div>
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>
-      <button class="btn btn-primary" onclick="createFromAlert('${alertId}')">Criar no Shopify</button>
+      <button class="btn btn-primary" onclick="createFromAlert('${alertId}')">🚀 Criar no Shopify</button>
     </div>`;
   openModal();
+  _singleCreateRenderCollList(alertId);
 }
 
+// Render apenas da lista de coleções (sub-render, evita rebuild do modal todo)
+window._singleCreateRenderCollList = function(alertId) {
+  const a = state.alerts.find(x => x.id === alertId);
+  if (!a) return;
+  const data = inferProductDataFromAlert(a);
+  const { exact, partial } = suggestCollectionsForProduct(data);
+  const suggestedIds = new Set([...exact, ...partial].map(c => c.id));
+
+  const manual = colState.collections.filter(c => c.sortOrder === 'MANUAL');
+  const filter = (window._singleCreateState.filter || '').toLowerCase();
+  const visible = manual.filter(c => !filter || c.title.toLowerCase().includes(filter));
+  const selected = window._singleCreateState.selectedCollectionIds;
+
+  const suggested = visible.filter(c => suggestedIds.has(c.id)).sort((a, b) => a.title.localeCompare(b.title));
+  const others = visible.filter(c => !suggestedIds.has(c.id)).sort((a, b) => a.title.localeCompare(b.title));
+
+  const rowHtml = (c, isSug) => `
+    <label style="display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:var(--radius-xs);cursor:pointer" onmouseover="this.style.background='var(--ink-100)'" onmouseout="this.style.background=''">
+      <input type="checkbox" ${selected.has(c.id)?'checked':''} onchange="_singleCreateToggleColl('${c.id}',this.checked)">
+      <span style="flex:1;font-size:var(--text-sm)">${c.title}</span>
+      ${isSug ? '<span class="badge badge-green" style="font-size:10px;padding:1px 5px">sugerida</span>' : ''}
+    </label>
+  `;
+  document.getElementById('np-coll-list').innerHTML = `
+    ${!manual.length ? '<div style="padding:var(--space-3);text-align:center;color:var(--ink-400);font-size:var(--text-sm)">A carregar coleções...</div>' : ''}
+    ${suggested.length ? `<div style="font-size:10px;color:var(--ink-500);padding:4px 8px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Sugeridas</div>` : ''}
+    ${suggested.map(c => rowHtml(c, true)).join('')}
+    ${others.length ? `<div style="font-size:10px;color:var(--ink-500);padding:4px 8px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-top:4px">Outras (${others.length})</div>` : ''}
+    ${others.map(c => rowHtml(c, false)).join('')}
+  `;
+  document.getElementById('np-coll-count').textContent = `${selected.size} seleccionada(s)`;
+  document.getElementById('np-coll-count').className = `badge ${selected.size>0?'badge-purple':'badge-gray'}`;
+};
+window._singleCreateToggleColl = function(id, checked) {
+  if (checked) window._singleCreateState.selectedCollectionIds.add(id);
+  else window._singleCreateState.selectedCollectionIds.delete(id);
+  // Só actualiza o contador (não re-render da lista para preservar scroll)
+  const c = document.getElementById('np-coll-count');
+  if (c) {
+    c.textContent = `${window._singleCreateState.selectedCollectionIds.size} seleccionada(s)`;
+    c.className = `badge ${window._singleCreateState.selectedCollectionIds.size>0?'badge-purple':'badge-gray'}`;
+  }
+};
+window._singleCreateApplySuggested = function(alertId) {
+  const a = state.alerts.find(x => x.id === alertId); if (!a) return;
+  const data = inferProductDataFromAlert(a);
+  const { exact, partial } = suggestCollectionsForProduct(data);
+  window._singleCreateState.selectedCollectionIds.clear();
+  [...exact, ...partial].forEach(c => window._singleCreateState.selectedCollectionIds.add(c.id));
+  _singleCreateRenderCollList(alertId);
+};
+window._singleCreateClearCollections = function(alertId) {
+  window._singleCreateState.selectedCollectionIds.clear();
+  _singleCreateRenderCollList(alertId);
+};
+
+// Atalho do aviso "Associar em vez de criar" no modal individual
+window._associateFromAlert = async function(alertId, productId, variantId) {
+  const a = state.alerts.find(x => x.id === alertId); if (!a) return;
+  const product = state.shopifyProducts.find(p => p.id === productId);
+  if (!product) { toast('Produto não encontrado', 'error'); return; }
+  if (!confirm(`Associar este alerta ao produto existente "${product.title}"?\n\nCria alias canónico (futuros uploads batem directo) e dispensa o alerta.`)) {
+    suggestCreate(alertId); return;   // re-abre modal
+  }
+  const canonical = ensureCanonicalForVariant(productId, variantId);
+  if (!canonical) { toast('Erro a criar canónico', 'error'); return; }
+  addAlias({
+    canonicalId: canonical.id, suppId: a.suppId,
+    sku: a.sku, barcode: a.barcode,
+    source: 'individual-associate', confidence: 100, addedBy: 'user',
+  });
+  const alertEl = state.alerts.find(x => x.id === alertId);
+  if (alertEl) alertEl.dismissed = true;
+  save();
+  toast(`✓ Associado a "${product.title.slice(0,50)}"`, 'success');
+  alerts();
+};
+
 async function createFromAlert(alertId) {
-  const title=document.getElementById('np-title')?.value.trim();
-  const sku=document.getElementById('np-sku')?.value.trim();
-  const barcode=document.getElementById('np-barcode')?.value.trim();
-  const price=document.getElementById('np-price')?.value;
-  const vendor=document.getElementById('np-vendor')?.value.trim();
-  if(!title){toast('Título obrigatório','error');return;}
-  toast('A criar produto...','info');
-  try{
-    // Step 1: create product without variants (API 2026-01 removed variants from ProductInput)
-    const data=await shopifyGQL(`mutation($input:ProductInput!){productCreate(input:$input){product{id variants(first:1){edges{node{id inventoryItem{id}}}}}userErrors{message}}}`,{input:{title,vendor,status:'DRAFT'}});
-    if(data.productCreate.userErrors.length){toast(data.productCreate.userErrors[0].message,'error');return;}
-    const product=data.productCreate.product;
-    const variantId=product?.variants?.edges[0]?.node?.id;
-    const invId=product?.variants?.edges[0]?.node?.inventoryItem?.id;
-    // Step 2: update default variant with price and barcode
-    if(variantId){
-      const variantInput={id:variantId,price:String(price)};
-      if(barcode) variantInput.barcode=barcode;
-      const vData=await shopifyGQL(`mutation($productId:ID!,$variants:[ProductVariantsBulkInput!]!){productVariantsBulkUpdate(productId:$productId,variants:$variants){userErrors{message}}}`,{productId:product.id,variants:[variantInput]});
-      if(vData.productVariantsBulkUpdate.userErrors.length){toast(vData.productVariantsBulkUpdate.userErrors[0].message,'error');return;}
+  const title = document.getElementById('np-title')?.value.trim();
+  const sku = document.getElementById('np-sku')?.value.trim();
+  const barcode = document.getElementById('np-barcode')?.value.trim();
+  const price = document.getElementById('np-price')?.value;
+  const stock = parseInt(document.getElementById('np-stock')?.value, 10) || 0;
+  const vendor = document.getElementById('np-vendor')?.value.trim();
+  const productType = document.getElementById('np-ptype')?.value.trim();
+  const collectionIds = [...window._singleCreateState.selectedCollectionIds];
+  if (!title) { toast('Título obrigatório', 'error'); return; }
+  const a = state.alerts.find(x => x.id === alertId);
+  if (!a) { toast('Alerta não encontrado', 'error'); return; }
+
+  toast('A criar produto...', 'info');
+  try {
+    // 1) Cria produto base (DRAFT)
+    const productInput = {
+      title,
+      vendor: vendor || undefined,
+      productType: productType || undefined,
+      status: 'DRAFT',
+      tags: [`sup:${a.suppId}`, 'cat:atualizado', `last-seen:${YYYYMM()}`],
+    };
+    const created = await shopifyGQL(
+      `mutation($input:ProductInput!){productCreate(input:$input){product{id variants(first:1){edges{node{id inventoryItem{id}}}}}userErrors{message field}}}`,
+      { input: productInput }
+    );
+    if (created.productCreate.userErrors?.length) {
+      toast(created.productCreate.userErrors[0].message, 'error'); return;
     }
-    if(invId&&sku) await updateVariantSKU(invId,sku);
-    // Apply tags immediately
-    const a=state.alerts.find(x=>x.id===alertId);
-    if(a?.suppId) await updateProductTags(product.id, [`sup:${a.suppId}`, 'cat:atualizado', `last-seen:${YYYYMM()}`]);
-    // Upload imagem anexada (se houver — via "Para Criar" → 🖼 Anexar imagem)
-    if (a?.attachedImage?.dataUrl) {
+    const product = created.productCreate.product;
+    const variantId = product?.variants?.edges[0]?.node?.id;
+    const invId = product?.variants?.edges[0]?.node?.inventoryItem?.id;
+
+    // 2) Variant: price + barcode
+    if (variantId) {
+      const variantInput = { id: variantId, price: String(price) };
+      if (barcode) variantInput.barcode = barcode;
+      const vData = await shopifyGQL(
+        `mutation($productId:ID!,$variants:[ProductVariantsBulkInput!]!){productVariantsBulkUpdate(productId:$productId,variants:$variants){userErrors{message}}}`,
+        { productId: product.id, variants: [variantInput] }
+      );
+      if (vData.productVariantsBulkUpdate.userErrors?.length) {
+        toast(vData.productVariantsBulkUpdate.userErrors[0].message, 'error'); return;
+      }
+    }
+    if (invId && sku) await updateVariantSKU(invId, sku);
+
+    // 3) Stock no location
+    if (invId && stock > 0) {
       try {
-        // dataUrl → Blob
-        const resp = await fetch(a.attachedImage.dataUrl);
-        const blob = await resp.blob();
-        const filename = `${(title||'product').replace(/[^a-z0-9]+/gi,'-').toLowerCase().slice(0,60)}.webp`;
+        const locationId = await getLocationId();
+        await shopifyGQL(
+          `mutation($id:ID!,$input:InventoryItemInput!){inventoryItemUpdate(id:$id,input:$input){userErrors{message}}}`,
+          { id: invId, input: { tracked: true } }
+        );
+        await shopifyGQL(
+          `mutation($inventoryItemId:ID!,$locationId:ID!){inventoryActivate(inventoryItemId:$inventoryItemId,locationId:$locationId){userErrors{message}}}`,
+          { inventoryItemId: invId, locationId }
+        );
+        await updateVariantStock(invId, locationId, stock);
+      } catch (e) { console.warn('Stock:', e.message); }
+    }
+
+    // 4) Histórico de custo (baseline para futuras variações)
+    const data = inferProductDataFromAlert(a);
+    if (data.histKey && data.cost) {
+      state.costHistory[data.histKey] = { custo: data.cost, data: new Date().toISOString() };
+    }
+
+    // 5) Imagem anexada (se houver)
+    let imageOk = false;
+    if (a.attachedImage?.dataUrl) {
+      try {
+        const blob = await (await fetch(a.attachedImage.dataUrl)).blob();
+        const filename = `${title.replace(/[^a-z0-9]+/gi, '-').toLowerCase().slice(0, 60)}.webp`;
         const target = await stagedUploadCreate(filename, blob.type || 'image/webp', blob.size);
         await uploadToStaged(target, blob, filename);
         await productCreateMediaFromStaged(product.id, target.resourceUrl, title);
-        toast('🖼 Imagem anexada ao produto', 'success');
-      } catch (e) {
-        console.warn('Falha ao anexar imagem:', e);
-        toast(`Produto criado mas imagem falhou: ${e.message}`, 'error');
-      }
+        imageOk = true;
+      } catch (e) { console.warn('Imagem:', e.message); }
     }
-    dismissAlert(alertId); closeModal();
-    toast('Produto criado com tags de fornecedor ✓','success');
-    fetchShopifyProducts();
-  }catch(e){toast('Erro: '+e.message,'error');}
+
+    // 6) Coleções seleccionadas
+    let collOk = 0;
+    if (collectionIds.length) {
+      const r = await addProductToCollections(product.id, collectionIds);
+      collOk = r.added;
+    }
+
+    // 7) Reset do estado do modal para próxima criação
+    window._singleCreateState.selectedCollectionIds = new Set();
+
+    dismissAlert(alertId);
+    closeModal();
+    const parts = [];
+    if (imageOk) parts.push('imagem');
+    if (collOk > 0) parts.push(`${collOk} coleção${collOk>1?'ões':''}`);
+    toast(`✓ Produto criado em DRAFT${parts.length?' (+ ' + parts.join(' + ') + ')':''}`, 'success');
+    // Refresca catálogo em background
+    fetchShopifyProducts({ silent: true }).catch(() => {});
+  } catch (e) {
+    toast('Erro: ' + e.message, 'error');
+  }
 }
 
 // ═══════════════════════════════════════════
