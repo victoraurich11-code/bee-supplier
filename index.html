@@ -3600,7 +3600,9 @@ function renderCreateTab(newProds) {
     <div class="card" style="display:flex;gap:var(--space-2);align-items:center;flex-wrap:wrap;padding:var(--space-3) var(--space-4);margin-bottom:var(--space-3);background:var(--bee-50);border-color:var(--bee-200)">
       <div style="flex:1;font-size:var(--text-sm);color:var(--ink-700)">
         <strong>Acções em massa</strong> · ${filtered.length} produto(s) seleccionado(s) pelo filtro
+        ${toCreateState.selectedCollectionIds.size > 0 ? `<span class="badge badge-purple" style="margin-left:8px">📁 ${toCreateState.selectedCollectionIds.size} coleção(ões) seleccionada(s)</span>` : ''}
       </div>
+      <button class="btn btn-ghost btn-sm" onclick="toCreateOpenCollectionsPicker()" title="Escolhe coleções para aplicar a todos os produtos do bulk">📁 Coleções${toCreateState.selectedCollectionIds.size > 0 ? ` (${toCreateState.selectedCollectionIds.size})` : ''}</button>
       <button class="btn btn-ghost btn-sm" onclick="toCreateAutoFetchImagesAll()" title="Tenta buscar imagens via KuantoKusta">🖼 Buscar imagens auto</button>
       <button class="btn btn-primary" onclick="toCreateBulkCreate()" title="Cria todos os ${filtered.length} produtos na Shopify (status DRAFT)">🚀 Criar ${filtered.length} no Shopify</button>
     </div>` : ''}
@@ -3807,7 +3809,63 @@ function _toCreateGroupKey(name) {
 }
 
 // Estado local de Para Criar: filtro por fornecedor + opções
-const toCreateState = (window._toCreateState = window._toCreateState || { suppFilter: 'all', onlyWithImage: false });
+const toCreateState = (window._toCreateState = window._toCreateState || {
+  suppFilter: 'all',
+  onlyWithImage: false,
+  selectedCollectionIds: new Set(),   // Coleções a aplicar a TODOS os produtos do bulk
+  autoSuggestCollections: true,        // Marca automaticamente as sugeridas
+});
+
+// Sugere coleções relevantes para um produto, baseado em vendor + category.
+// Devolve { exact: [collection], partial: [collection] } onde exact tem prioridade.
+function suggestCollectionsForProduct(productData) {
+  const { vendor, category } = productData;
+  const all = colState.collections || [];
+  // Só coleções editáveis manualmente (Smart Collections gerem-se via tags)
+  const manual = all.filter(c => c.sortOrder === 'MANUAL' && c.productsCount !== undefined);
+  if (!manual.length) return { exact: [], partial: [] };
+
+  const categoryNames = {
+    smartphone: ['smartphone', 'telemóv', 'telemov'],
+    tablet:     ['tablet', 'ipad'],
+    laptop:     ['laptop', 'portátil', 'portatil', 'computador'],
+    earbuds:    ['áudio', 'audio', 'auricular', 'fones', 'buds', 'headset', 'coluna'],
+    smartwatch: ['smartwatch', 'watch', 'wearable'],
+    tv:         ['tv', 'televis', 'monitor'],
+    accessory:  ['acessório', 'acessorio', 'capa', 'carregador', 'cabo'],
+  };
+
+  const vendorLow = (vendor || '').toLowerCase();
+  const catKeywords = categoryNames[category] || [];
+
+  const scored = manual.map(c => {
+    const title = (c.title || '').toLowerCase();
+    let score = 0;
+    let matchType = null;
+
+    // Match exacto: nome contém vendor E categoria (ex: "Smartphones Samsung")
+    if (vendorLow && title.includes(vendorLow)) {
+      score += 50;
+      matchType = 'vendor';
+    }
+    for (const kw of catKeywords) {
+      if (title.includes(kw)) {
+        score += 30;
+        matchType = matchType === 'vendor' ? 'exact' : 'category';
+        break;
+      }
+    }
+    // Bónus: nome exactamente igual a categoria
+    if (catKeywords.some(kw => title === kw + 's' || title === kw)) score += 10;
+
+    return { collection: c, score, matchType };
+  });
+
+  const exact = scored.filter(s => s.matchType === 'exact').sort((a, b) => b.score - a.score).map(s => s.collection);
+  const partial = scored.filter(s => s.matchType && s.matchType !== 'exact').sort((a, b) => b.score - a.score).map(s => s.collection);
+
+  return { exact, partial };
+}
 
 // Alias legacy: navigate('toCreate') redirecciona para Alertas tab Criar.
 // Mantém URLs internos a funcionar (links antigos, badge no menu, etc.).
@@ -4086,6 +4144,140 @@ window.toCreateDismissGroup = function(gi) {
 
 // ─── Bulk create — itera alertas filtrados e cria 1 produto por alerta ─
 // Status: DRAFT. Inclui vendor, productType, tags, sku, barcode, preço, stock + imagem (se anexada).
+// Abre modal com seleção de coleções para aplicar a todos os produtos do bulk.
+// Pré-seleciona coleções sugeridas pelo primeiro produto filtrado (exact match).
+window.toCreateOpenCollectionsPicker = async function() {
+  if (!colState.collections.length) {
+    toast('A carregar coleções da Shopify...', 'info');
+    await colFetchAll();
+  }
+  // Aplica sugestão automática se ainda não seleccionou nada manualmente
+  if (toCreateState.autoSuggestCollections && toCreateState.selectedCollectionIds.size === 0) {
+    const allActive = state.alerts.filter(a => a.type === 'new_product' && !a.dismissed);
+    const filterSupp = toCreateState.suppFilter;
+    const sample = allActive.filter(a => filterSupp === 'all' || a.suppId === filterSupp).slice(0, 5);
+    // Junta sugestões exact de todos os samples
+    const exactIds = new Set();
+    for (const alert of sample) {
+      const data = inferProductDataFromAlert(alert);
+      const { exact } = suggestCollectionsForProduct(data);
+      exact.forEach(c => exactIds.add(c.id));
+    }
+    exactIds.forEach(id => toCreateState.selectedCollectionIds.add(id));
+  }
+  _renderCollectionsPickerModal();
+};
+
+function _renderCollectionsPickerModal() {
+  const manual = colState.collections.filter(c => c.sortOrder === 'MANUAL');
+  if (!manual.length) {
+    toast('Não há coleções MANUAL para escolher. Cria ou converte coleções em Categorias.', 'warning');
+    return;
+  }
+  // Filter input
+  const filter = (window._collPickerFilter || '').toLowerCase();
+  const visible = manual.filter(c => !filter || c.title.toLowerCase().includes(filter));
+  const selected = toCreateState.selectedCollectionIds;
+
+  // Agrupa sugeridas vs outras
+  const allActive = state.alerts.filter(a => a.type === 'new_product' && !a.dismissed);
+  const filterSupp = toCreateState.suppFilter;
+  const sample = allActive.filter(a => filterSupp === 'all' || a.suppId === filterSupp).slice(0, 5);
+  const suggestedIds = new Set();
+  for (const alert of sample) {
+    const data = inferProductDataFromAlert(alert);
+    const { exact, partial } = suggestCollectionsForProduct(data);
+    [...exact, ...partial].forEach(c => suggestedIds.add(c.id));
+  }
+  const suggested = visible.filter(c => suggestedIds.has(c.id)).sort((a, b) => a.title.localeCompare(b.title));
+  const others = visible.filter(c => !suggestedIds.has(c.id)).sort((a, b) => a.title.localeCompare(b.title));
+
+  const rowHtml = (c, isSuggested) => `
+    <label style="display:flex;align-items:center;gap:var(--space-2);padding:8px 12px;border-radius:var(--radius-sm);cursor:pointer;transition:background var(--duration-fast)" onmouseover="this.style.background='var(--ink-100)'" onmouseout="this.style.background=''">
+      <input type="checkbox" ${selected.has(c.id)?'checked':''} onchange="toCreateToggleCollection('${c.id}',this.checked)">
+      <span style="flex:1;font-size:var(--text-sm)">${c.title}</span>
+      ${isSuggested ? '<span class="badge badge-green" style="font-size:10px;padding:1px 6px">sugerida</span>' : ''}
+      <span class="mono" style="font-size:11px;color:var(--ink-400)">${c.productsCount} prod</span>
+    </label>
+  `;
+
+  document.getElementById('modal-content').innerHTML = `
+    <div class="modal-title">📁 Coleções a aplicar</div>
+    <div class="modal-sub">Cada produto criado vai ser adicionado às coleções escolhidas. Só listo coleções MANUAL (as automáticas atribuem-se sozinhas via tags).</div>
+    <input type="text" placeholder="Filtrar coleções..." value="${filter}" oninput="window._collPickerFilter=this.value;_renderCollectionsPickerModal()" style="width:100%;padding:8px 12px;margin-bottom:var(--space-3)">
+    <div style="display:flex;align-items:center;gap:var(--space-2);margin-bottom:var(--space-2);font-size:var(--text-xs);color:var(--ink-500)">
+      <strong style="color:var(--ink-700)">${selected.size}</strong> seleccionada(s) de ${manual.length} total
+      <span style="flex:1"></span>
+      <button class="btn btn-ghost btn-sm" onclick="toCreateClearAllCollections()">Limpar</button>
+      <button class="btn btn-ghost btn-sm" onclick="toCreateSelectSuggestedCollections()">Só sugeridas</button>
+    </div>
+    <div style="max-height:380px;overflow-y:auto;border:1px solid var(--ink-200);border-radius:var(--radius-sm);padding:var(--space-2)">
+      ${suggested.length ? `<div style="font-size:var(--text-xs);color:var(--ink-500);padding:6px 12px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Sugeridas (${suggested.length})</div>` : ''}
+      ${suggested.map(c => rowHtml(c, true)).join('')}
+      ${others.length ? `<div style="font-size:var(--text-xs);color:var(--ink-500);padding:6px 12px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-top:8px">Outras (${others.length})</div>` : ''}
+      ${others.map(c => rowHtml(c, false)).join('')}
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary" onclick="closeModal();alerts();">Aplicar ${selected.size} coleção(ões)</button>
+    </div>
+  `;
+  openModal();
+}
+
+window.toCreateToggleCollection = function(id, checked) {
+  if (checked) toCreateState.selectedCollectionIds.add(id);
+  else toCreateState.selectedCollectionIds.delete(id);
+  // Atualiza só o contador no modal sem re-render completo
+  const countEls = document.querySelectorAll('.modal-content strong');
+  // Simples: re-render
+  _renderCollectionsPickerModal();
+};
+
+window.toCreateClearAllCollections = function() {
+  toCreateState.selectedCollectionIds.clear();
+  _renderCollectionsPickerModal();
+};
+
+window.toCreateSelectSuggestedCollections = function() {
+  toCreateState.selectedCollectionIds.clear();
+  const allActive = state.alerts.filter(a => a.type === 'new_product' && !a.dismissed);
+  const filterSupp = toCreateState.suppFilter;
+  const sample = allActive.filter(a => filterSupp === 'all' || a.suppId === filterSupp).slice(0, 5);
+  for (const alert of sample) {
+    const data = inferProductDataFromAlert(alert);
+    const { exact, partial } = suggestCollectionsForProduct(data);
+    [...exact, ...partial].forEach(c => toCreateState.selectedCollectionIds.add(c.id));
+  }
+  _renderCollectionsPickerModal();
+};
+
+// Adiciona produto a múltiplas coleções via collectionAddProducts.
+// Coleções MANUAL: produto fica no fim. User pode reorganizar via página Categorias.
+async function addProductToCollections(productId, collectionIds) {
+  if (!collectionIds || !collectionIds.length) return { added: 0, failed: 0 };
+  let added = 0, failed = 0;
+  for (const collId of collectionIds) {
+    try {
+      const r = await shopifyGQL(
+        `mutation($id:ID!,$productIds:[ID!]!){collectionAddProducts(id:$id,productIds:$productIds){collection{id}userErrors{message field}}}`,
+        { id: collId, productIds: [productId] }
+      );
+      if (r.collectionAddProducts.userErrors?.length) {
+        console.warn('collectionAddProducts:', r.collectionAddProducts.userErrors);
+        failed++;
+      } else {
+        added++;
+      }
+    } catch (e) {
+      console.warn('Erro a adicionar à coleção:', e.message);
+      failed++;
+    }
+    await sleep(150);
+  }
+  return { added, failed };
+}
+
 window.toCreateBulkCreate = async function() {
   const allActive = state.alerts.filter(a => a.type === 'new_product' && !a.dismissed);
   const filterSupp = toCreateState.suppFilter;
@@ -4180,12 +4372,22 @@ window.toCreateBulkCreate = async function() {
           withImageOk++;
         } catch (e) { console.warn('Imagem:', e.message); }
       }
-      // 7) Dismiss alerta (limpeza)
+      // 7) Coleções (se seleccionadas no picker) — adiciona produto via collectionAddProducts
+      let collOk = 0;
+      if (toCreateState.selectedCollectionIds.size > 0) {
+        const collIds = [...toCreateState.selectedCollectionIds];
+        const r = await addProductToCollections(product.id, collIds);
+        collOk = r.added;
+      }
+      // 8) Dismiss alerta (limpeza)
       const alertEl = state.alerts.find(a => a.id === alert.id);
       if (alertEl) alertEl.dismissed = true;
 
       ok++;
-      const logMsg = `${labelShort}${imageOk ? ' (+ imagem)' : ''}`;
+      const parts = [];
+      if (imageOk) parts.push('imagem');
+      if (collOk > 0) parts.push(`${collOk} coleção${collOk>1?'ões':''}`);
+      const logMsg = `${labelShort}${parts.length ? ' (+ ' + parts.join(' + ') + ')' : ''}`;
       ProgressPanel.update(idx, logMsg, 'ok');
     } catch (e) {
       fail++;
