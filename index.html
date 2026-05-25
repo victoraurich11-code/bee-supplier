@@ -3567,11 +3567,20 @@ function renderCreateTab(newProds) {
     g.totalSeen += a.seenCount || 1;
     if (a.price) g.prices.push(a.price);
   }
-  const groupsList = [...groups.values()].sort((a, b) => {
+  // Computa duplicados na loja para cada grupo (uma vez, cached em g._dups)
+  for (const g of groups.values()) {
+    g._dups = findShopifyDuplicatesForGroup(g);
+  }
+  const allGroupsList = [...groups.values()].sort((a, b) => {
     const sa = a.totalSeen * Math.log10(a.totalStock + 1);
     const sb = b.totalSeen * Math.log10(b.totalStock + 1);
     return sb - sa;
   });
+  // Aplica filtro de esconder duplicados (default ON)
+  const groupsList = toCreateState.hideDuplicates
+    ? allGroupsList.filter(g => !g._dups.length)
+    : allGroupsList;
+  const hiddenDuplicates = allGroupsList.length - groupsList.length;
   const groupTitle = (g) => (g.items[0].name || '').replace(/\s-\s.+$/, '').trim();
   const supplierOptions = [...supplierCounts.entries()]
     .sort((a, b) => b[1] - a[1])
@@ -3592,8 +3601,12 @@ function renderCreateTab(newProds) {
         <input type="checkbox" ${toCreateState.onlyWithImage?'checked':''} onchange="toCreateState.onlyWithImage=this.checked;alerts()">
         Só com imagem
       </label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:var(--text-sm);color:var(--ink-700);cursor:pointer" title="Esconde grupos que parecem já existir na Shopify (match por nome ≥75%, SKU exacto ou EAN)">
+        <input type="checkbox" ${toCreateState.hideDuplicates?'checked':''} onchange="toCreateState.hideDuplicates=this.checked;alerts()">
+        Esconder prováveis duplicados${hiddenDuplicates>0?` <span style="color:var(--warning-700);font-weight:600">(${hiddenDuplicates})</span>`:''}
+      </label>
       <div style="flex:1"></div>
-      <span style="font-size:var(--text-sm);color:var(--ink-500)">${filtered.length} variação(ões) · ${groupsList.length} modelo(s) · ${withImage} com imagem</span>
+      <span style="font-size:var(--text-sm);color:var(--ink-500)">${filtered.length} variações · ${groupsList.length} a criar${hiddenDuplicates>0?` · <span style="color:var(--warning-700)">${hiddenDuplicates} escondido(s)</span>`:''} · ${withImage} com imagem</span>
     </div>
 
     ${filtered.length > 0 ? `
@@ -3630,8 +3643,29 @@ function renderCreateTab(newProds) {
           ? `<span class="badge badge-green" style="background:var(--success-500);color:white;font-weight:700">🔥 ${g.totalSeen} aparições</span>`
           : g.totalSeen >= 2
           ? `<span class="badge badge-orange">${g.totalSeen}×</span>` : '';
+        const dupBadge = g._dups?.length
+          ? `<span class="badge badge-orange" title="Já podem existir na loja com SKU/EAN diferente. Revê antes de criar.">⚠ ${g._dups.length} na loja</span>`
+          : '';
+        const dupRowsHtml = g._dups?.length ? `
+          <div style="padding:var(--space-3) var(--space-4);background:var(--warning-50);border-top:1px solid oklch(88% 0.080 60)">
+            <div style="font-size:var(--text-sm);color:var(--warning-700);font-weight:600;margin-bottom:var(--space-2)">⚠ Possíveis duplicados na loja (${g._dups.length})</div>
+            <div style="display:flex;flex-direction:column;gap:6px">
+              ${g._dups.map(d => {
+                const matchLabel = { ean: 'EAN igual', sku: 'SKU igual', name: `nome ${d.score}%` }[d.matchType] || d.matchType;
+                const matchColor = d.matchType === 'ean' || d.matchType === 'sku' ? 'var(--danger-700)' : 'var(--warning-700)';
+                return `<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:white;border-radius:var(--radius-sm);border:1px solid var(--ink-200)">
+                  <div style="flex:1;font-size:var(--text-sm);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+                    <strong>${d.product.title}</strong>
+                    <div style="font-size:11px;color:var(--ink-500);font-family:var(--font-mono);margin-top:2px">SKU ${d.variant.sku||'—'} · EAN ${d.variant.barcode||'—'}</div>
+                  </div>
+                  <span style="font-size:11px;font-weight:600;color:${matchColor}">${matchLabel}</span>
+                  <button class="btn btn-primary btn-sm" onclick="toCreateAssociateGroup(${gi},'${d.product.id}','${d.variant.id}')" title="Associar este grupo ao produto existente (cria alias e dispensa o alerta)">Associar</button>
+                </div>`;
+              }).join('')}
+            </div>
+          </div>` : '';
         return `
-          <details class="card" style="padding:0;overflow:hidden">
+          <details class="card" style="padding:0;overflow:hidden${g._dups?.length?';border-color:oklch(88% 0.080 60)':''}">
             <summary style="padding:var(--space-3) var(--space-4);cursor:pointer;display:flex;align-items:center;gap:var(--space-3);list-style:none">
               ${g.items[0]?.attachedImage?.dataUrl
                 ? `<img src="${g.items[0].attachedImage.dataUrl}" style="width:44px;height:44px;object-fit:contain;border-radius:var(--radius-sm);border:1px solid var(--ink-200);background:white" />`
@@ -3642,8 +3676,9 @@ function renderCreateTab(newProds) {
                   ${g.items.length} variação(ões) · Stock <strong>${g.totalStock}</strong> · Média €${avgPrice.toFixed(2)} · ${supLabels}
                 </div>
               </div>
-              <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">${hotBadge}</div>
+              <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">${dupBadge}${hotBadge}</div>
             </summary>
+            ${dupRowsHtml}
             <div style="border-top:1px solid var(--ink-200);padding:0">
               <div class="table-wrap" style="border:none;border-radius:0;box-shadow:none;max-height:300px;overflow-y:auto">
                 <table style="font-size:var(--text-sm)">
@@ -3814,6 +3849,8 @@ const toCreateState = (window._toCreateState = window._toCreateState || {
   onlyWithImage: false,
   selectedCollectionIds: new Set(),   // Coleções a aplicar a TODOS os produtos do bulk
   autoSuggestCollections: true,        // Marca automaticamente as sugeridas
+  hideDuplicates: true,                // Esconde grupos com prováveis duplicados na loja
+  skipDuplicatesOnBulk: true,          // No bulk create, salta os grupos com duplicados
 });
 
 // Sugere coleções relevantes para um produto, baseado em vendor + category.
@@ -4146,6 +4183,69 @@ window.toCreateDismissGroup = function(gi) {
 // Status: DRAFT. Inclui vendor, productType, tags, sku, barcode, preço, stock + imagem (se anexada).
 // Abre modal com seleção de coleções para aplicar a todos os produtos do bulk.
 // Pré-seleciona coleções sugeridas pelo primeiro produto filtrado (exact match).
+// Associa um grupo "Para Criar" a um produto Shopify existente.
+// Cria alias canónico (para que o próximo upload bata directo, sem alertas)
+// e dispensa todos os alertas do grupo. Não cria produto novo.
+window.toCreateAssociateGroup = async function(gi, productId, variantId) {
+  // Recupera o grupo pelo índice (mesma ordenação que render)
+  const allActive = state.alerts.filter(a => a.type === 'new_product' && !a.dismissed);
+  const filterSupp = toCreateState.suppFilter;
+  const filtered = allActive.filter(a => {
+    if (filterSupp !== 'all' && a.suppId !== filterSupp) return false;
+    if (toCreateState.onlyWithImage && !a.attachedImage) return false;
+    return true;
+  });
+  const groups = new Map();
+  for (const a of filtered) {
+    const key = _toCreateGroupKey(a.name);
+    if (!groups.has(key)) groups.set(key, { key, items: [], totalSeen: 0, totalStock: 0 });
+    const g = groups.get(key);
+    g.items.push(a);
+    g.totalStock += a.stock || 0;
+    g.totalSeen += a.seenCount || 1;
+  }
+  for (const g of groups.values()) g._dups = findShopifyDuplicatesForGroup(g);
+  const allGroupsList = [...groups.values()].sort((a, b) => {
+    const sa = a.totalSeen * Math.log10(a.totalStock + 1);
+    const sb = b.totalSeen * Math.log10(b.totalStock + 1);
+    return sb - sa;
+  });
+  const groupsList = toCreateState.hideDuplicates
+    ? allGroupsList.filter(g => !g._dups.length)
+    : allGroupsList;
+  const target = groupsList[gi];
+  if (!target) { toast('Grupo não encontrado', 'error'); return; }
+
+  const product = state.shopifyProducts.find(p => p.id === productId);
+  const variant = product?.variants?.find(v => v.id === variantId);
+  if (!product || !variant) { toast('Produto Shopify não encontrado', 'error'); return; }
+  if (!confirm(`Associar ${target.items.length} variação(ões) ao produto existente "${product.title}"?\n\nCria alias canónico (futuros uploads batem directo) e dispensa os alertas. NÃO cria produto novo.`)) return;
+
+  // Cria alias canónico para cada variação do grupo (assim qualquer SKU/EAN
+  // futuro do mesmo fornecedor passa a matchar este produto)
+  const canonical = ensureCanonicalForVariant(productId, variantId);
+  if (!canonical) { toast('Erro a criar canónico', 'error'); return; }
+  let aliasesCreated = 0;
+  for (const a of target.items) {
+    addAlias({
+      canonicalId: canonical.id,
+      suppId: a.suppId,
+      sku: a.sku,
+      barcode: a.barcode,
+      source: 'tocreate-associate',
+      confidence: 100,
+      addedBy: 'user',
+    });
+    aliasesCreated++;
+    // Dismiss do alerta
+    const alertEl = state.alerts.find(x => x.id === a.id);
+    if (alertEl) alertEl.dismissed = true;
+  }
+  save();
+  toast(`✓ ${target.items.length} alertas associados a "${product.title.slice(0, 50)}" (${aliasesCreated} aliases criados)`, 'success');
+  alerts();
+};
+
 window.toCreateOpenCollectionsPicker = async function() {
   if (!colState.collections.length) {
     toast('A carregar coleções da Shopify...', 'info');
@@ -4281,12 +4381,46 @@ async function addProductToCollections(productId, collectionIds) {
 window.toCreateBulkCreate = async function() {
   const allActive = state.alerts.filter(a => a.type === 'new_product' && !a.dismissed);
   const filterSupp = toCreateState.suppFilter;
-  const active = allActive.filter(a => {
+  let candidates = allActive.filter(a => {
     if (filterSupp !== 'all' && a.suppId !== filterSupp) return false;
     if (toCreateState.onlyWithImage && !a.attachedImage) return false;
     return true;
   });
-  if (!active.length) { toast('Sem produtos a criar com os filtros actuais', 'info'); return; }
+  if (!candidates.length) { toast('Sem produtos a criar com os filtros actuais', 'info'); return; }
+
+  // ── Detecção de duplicados na loja ─────────────────────────────────
+  // Agrupa por modelo, computa duplicados por grupo, e marca cada alert
+  // do grupo com flag _hasShopifyDuplicate. Por defeito (skipDuplicatesOnBulk),
+  // salta esses alertas no bulk. User confirma antes.
+  const groupDupMap = new Map();
+  for (const a of candidates) {
+    const key = _toCreateGroupKey(a.name);
+    if (!groupDupMap.has(key)) {
+      const dups = findShopifyDuplicates(a);
+      groupDupMap.set(key, dups);
+    }
+  }
+  const withDups = candidates.filter(a => (groupDupMap.get(_toCreateGroupKey(a.name)) || []).length > 0);
+
+  if (withDups.length > 0 && toCreateState.skipDuplicatesOnBulk) {
+    const skip = confirm(
+      `Detectados ${withDups.length} alerta(s) com prováveis duplicados na loja ` +
+      `(SKU igual, EAN igual ou nome ≥75%).\n\n` +
+      `OK = saltar esses e criar só os ${candidates.length - withDups.length} restantes\n` +
+      `Cancelar = parar tudo (revê primeiro caso a caso)`
+    );
+    if (!skip) return;
+    candidates = candidates.filter(a => !(groupDupMap.get(_toCreateGroupKey(a.name)) || []).length);
+  } else if (withDups.length > 0) {
+    if (!confirm(
+      `Aviso: ${withDups.length} alerta(s) têm prováveis duplicados na loja.\n\n` +
+      `Vais criar mesmo assim (skipDuplicatesOnBulk está desactivado).\n` +
+      `Isto pode gerar produtos repetidos. Continuar?`
+    )) return;
+  }
+
+  if (!candidates.length) { toast('Após filtro de duplicados, não há produtos a criar', 'info'); return; }
+  const active = candidates;
 
   const supplierName = filterSupp === 'all'
     ? 'Todos os fornecedores'
@@ -4296,6 +4430,7 @@ window.toCreateBulkCreate = async function() {
     `Criar ${active.length} produto(s) na Shopify?\n\n` +
     `Fornecedor: ${supplierName}\n` +
     `Com imagem anexada: ${withImage}/${active.length}\n` +
+    `Coleções: ${toCreateState.selectedCollectionIds.size > 0 ? toCreateState.selectedCollectionIds.size + ' seleccionadas' : 'nenhuma'}\n` +
     `Status: DRAFT (vais validar e publicar manualmente)\n\n` +
     `Cada produto leva ~2-3 segundos. Tempo total estimado: ~${Math.ceil(active.length * 2.5 / 60)}min.`;
   if (!confirm(confirmMsg)) return;
@@ -6161,6 +6296,50 @@ const CATEGORY_TO_PRODUCT_TYPE = {
   accessory:   'Acessórios',
   generic:     '',
 };
+
+// Procura produtos Shopify (cache local) que possam ser duplicados deste alerta.
+// Estratégia em cascata:
+//   1) Match por EAN do alerta → variante Shopify com mesmo barcode (certeza absoluta)
+//   2) Match por SKU exacto
+//   3) Match por nome com nameSimilarity >= 75 (suspeita; user revê)
+// Devolve array ordenado por confiança: [{ product, variant, score, matchType }]
+function findShopifyDuplicates(alert, threshold = 75) {
+  const out = [];
+  const seen = new Set();
+  const alertSku = (alert.sku || '').trim().toLowerCase();
+  const alertBc  = (alert.barcode || '').toString().trim();
+  const alertName = (alert.name || '').trim();
+  if (!state.shopifyProducts?.length) return out;
+
+  for (const p of state.shopifyProducts) {
+    for (const v of (p.variants || [])) {
+      const vSku = (v.sku || '').trim().toLowerCase();
+      const vBc  = (v.barcode || '').toString().trim();
+      let matchType = null, score = 0;
+
+      if (alertBc && vBc && alertBc === vBc) { matchType = 'ean'; score = 100; }
+      else if (alertSku && vSku && alertSku === vSku) { matchType = 'sku'; score = 100; }
+      else {
+        const sim = nameSimilarity(alertName, p.title || '');
+        if (sim >= threshold) { matchType = 'name'; score = sim; }
+      }
+
+      if (matchType && !seen.has(p.id)) {
+        seen.add(p.id);
+        out.push({ product: p, variant: v, score, matchType });
+      }
+    }
+  }
+  return out.sort((a, b) => b.score - a.score).slice(0, 5);
+}
+
+// Agrega duplicados ao nível do grupo (vista "Criar Produtos").
+// Aplica findShopifyDuplicates ao primeiro alerta do grupo (suficiente porque
+// todos os alertas do grupo têm modelo+marca iguais por _toCreateGroupKey).
+function findShopifyDuplicatesForGroup(group) {
+  if (!group?.items?.length) return [];
+  return findShopifyDuplicates(group.items[0]);
+}
 
 // Compõe os dados completos para criar um produto Shopify a partir de um alerta new_product.
 // Devolve: { title, vendor, productType, tags, sku, barcode, cost, price, stock, suppId }
