@@ -10,7 +10,7 @@ nenhum lhe toca**. Menos automatismo cruzado, mais previsibilidade.
 | Falha reportada | Causa raiz confirmada |
 |---|---|
 | "Atualiza o stock mas não zera os produtos" | Teletech tinha `isInStockList: true`, portanto ausências NUNCA zeravam (39 produtos com 764 unidades fantasma à venda, validado por API + ficheiro de 02/07). Na Depau a zeragem exigia um modal manual diário que propunha os MESMOS ~70 produtos já a zero todos os dias. |
-| "Novos da DEPAU ficam esgotados" | Produtos novos **sem SKU nem EAN** → nenhum upload os encontra → stock congela no valor de criação (ex.: ASUS V16 a 0 no site com 89 unidades na Depau). Origem confirmada (assinatura título "base - cor" + variante única + descrições SEO): o fluxo **Separar Variantes** herdava silenciosamente o vazio quando a variante original não tinha códigos. Agravante: a app criava DRAFTs e o sync só puxava ACTIVE. |
+| "Novos da DEPAU ficam esgotados" | Produtos novos **sem SKU nem EAN** → nenhum upload os encontra → stock congela no valor de criação (ex.: ASUS V16 a 0 no site com 89 unidades na Depau). Origem confirmada pelo **event log da Shopify** (2026-07-09): criados à mão no Shopify Admin pela conta de staff "Poderoso Codigo" (nascem publicados e sem tags), NÃO pelos fluxos da app (produtos da app aparecem como "Price Updater" e nascem em rascunho com EAN+tag). Nota: o fluxo Separar Variantes tinha uma brecha equivalente (herdava o vazio de variantes sem códigos) — também fechada. Agravante: a app criava DRAFTs e o sync só puxava ACTIVE. |
 | "As listagens sobrepõem-se" | A tag `sup:` era substituída a cada upload: o último fornecedor a correr "roubava" o produto e o preço/stock alternava entre listagens. |
 
 ## O modelo (dono fixo)
@@ -45,6 +45,22 @@ nenhum lhe toca**. Menos automatismo cruzado, mais previsibilidade.
   confirmação única com exemplos.
 - **Mudança de EAN**: produto ausente cujo nome bate ≥95% numa linha "nova"
   do ficheiro NÃO é zerado — vai para o relatório para associação.
+
+## Garantia de identidade na criação (2026-07-09)
+
+Nenhum fluxo da app cria produto sem EAN/SKU em silêncio:
+
+- **Criar do alerta (individual)**: EAN/SKU pré-preenchidos; apagar os campos
+  exige confirmação explícita. No fim, ecrã de sucesso com botão "Abrir no
+  Admin" para fotos/descrição/publicação — a criação é na app, o acabamento
+  no Admin.
+- **Bulk create**: alerta sem EAN/SKU não cria produto (falha visível).
+- **Separar Variantes**: pré-verificação antes de criar; sem identidade nem
+  herança dos alertas, pede confirmação única com a lista.
+
+Fora da app (botão "Add product" / "Duplicate" do Shopify Admin) não há como
+impedir: esses produtos caem na Saúde → tab "Sem EAN" com sugestão de
+associação. Regra operacional: **produto novo cria-se sempre pela app**.
 
 ## Split de variantes herda identidade
 
