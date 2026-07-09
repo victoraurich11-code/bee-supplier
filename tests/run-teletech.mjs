@@ -71,15 +71,15 @@ console.log(`  AUTO_MERGE: ${AUTO_MERGE} (${AUTO_MERGE === '1' ? '"Todos iguais"
 
 const { rows, colMap } = loadXlsx(XLSX_PATH);
 const fixture = loadFixture(FIXTURE_PATH);
-// FIX SG#5: Teletech é in-stock list — não zerar ausentes.
-const supplier = { id: 'teletech', name: 'Teletech', isInStockList: true };
+// Motor V2: listagem é a verdade do dia — ausência = stock 0 nesse fornecedor.
+const supplier = { id: 'teletech', name: 'Teletech', active: true, absencePolicy: 'zero', priority: 10 };
 const productAliases = fixture.productAliases || [];
 const productCanonicals = fixture.productCanonicals || {};
 
 console.log(`  Linhas no ficheiro: ${rows.length}`);
 console.log(`  Produtos no fixture: ${fixture.products.length}`);
 console.log(`  Aliases no fixture: ${productAliases.length}`);
-console.log(`  Supplier isInStockList: ${supplier.isInStockList}`);
+console.log(`  Supplier absencePolicy: ${supplier.absencePolicy}`);
 
 // 5.1 Duplicados
 section('PASSO 1 — Detecção de duplicados');
@@ -265,37 +265,41 @@ if (suspeitos.length === 0) {
   });
 }
 
-// 5.5 Health check
-section('PASSO 5 — Health check (vai propor zerar?)');
+// 5.5 Health check (motor V2)
+section('PASSO 5 — Health check V2 (ausências → zero automático / handover)');
 const hc = runPostUploadHealthCheck({
   supplier,
+  suppliers: [supplier],
   shopifyProducts: fixture.products,
   processedSkus: { skus: result.knownSkus, barcodes: result.knownBarcodes, total: result.uploadTotal },
+  isNewRows: result.isNew,
   uploadHistory: [
     { supplierId: 'teletech', total: 340 },
     { supplierId: 'teletech', total: 330 },
     { supplierId: 'teletech', total: 345 },
   ],
 });
-console.log(`  Acção sugerida pelo sistema: ${BOLD(hc.action)}`);
+console.log(`  Acção do sistema: ${BOLD(hc.action)}`);
 console.log(`  coveragePct: ${hc.coveragePct}%   avgExpected: ${hc.avgExpected}   missing: ${hc.missing.length}`);
-if (hc.missing.length) {
-  console.log(`  Produtos que iriam para o modal de zerar:`);
-  hc.missing.forEach(m => {
-    const tagged = m.tags.includes('sup:teletech');
-    const inFile = result.found.some(f => f.shopifyVariantId === m.variants[0].id);
-    const flag = tagged ? '' : ' (NÃO tem sup:teletech — falso positivo grave)';
-    console.log(`    • ${m.title}  ·  EAN ${m.variants[0].barcode}${flag}`);
-    if (m._expect && !inFile) console.log(`        ${DIM(m._expect)}`);
+console.log(`  → zero automático: ${hc.toZero.length}  ·  handover: ${hc.toHandover.length}  ·  já a zero: ${hc.alreadyZero.length}  ·  mudança de EAN: ${hc.eanChange.length}  ·  travão de massa: ${hc.massBrake}`);
+if (hc.toZero.length) {
+  console.log(`  Produtos que seriam ZERADOS automaticamente:`);
+  hc.toZero.forEach(z => {
+    const m = z.product;
+    console.log(`    • ${m.title}  ·  EAN ${m.variants[0].barcode}  ·  stock atual ${m.variants[0].stock}`);
+    if (m._expect) console.log(`        ${DIM(m._expect)}`);
   });
+}
+if (hc.eanChange.length) {
+  console.log(`  Protegidos por deteção de mudança de EAN (não zerados):`);
+  hc.eanChange.forEach(e => console.log(`    • ${e.product.title} ≈ "${e.candidate.name.slice(0,50)}" (${e.score}%)`));
 }
 
 // 5.6 Verdicto global
 section('VERDICTO');
-const wantedMissingOnly = ['gid://shopify/Product/1011', 'gid://shopify/Product/1012', 'gid://shopify/Product/1013'];
-const actualMissing = hc.missing.map(m => m.id);
-const falseZeros = actualMissing.filter(id => {
-  // Produtos cujo barcode/sku ESTÁ no ficheiro mas foram para missing → falso positivo
+const zeroIds = hc.toZero.map(z => z.product.id);
+const falseZeros = zeroIds.filter(id => {
+  // Produtos cujo barcode/sku ESTÁ no ficheiro mas iam a zero → falso positivo grave
   const p = fixture.products.find(x => x.id === id);
   if (!p) return false;
   const v = p.variants[0];
@@ -303,13 +307,33 @@ const falseZeros = actualMissing.filter(id => {
 });
 
 if (falseZeros.length) {
-  console.log(`  ${FAIL} ${falseZeros.length} produto(s) iriam para zerar apesar de o seu EAN estar no ficheiro:`);
+  console.log(`  ${FAIL} ${falseZeros.length} produto(s) seriam zerados apesar de o seu EAN estar no ficheiro:`);
   falseZeros.forEach(id => {
     const p = fixture.products.find(x => x.id === id);
     console.log(`    • ${p.title}  ·  EAN ${p.variants[0].barcode}`);
   });
 } else {
   console.log(`  ${PASS} Nenhum produto seria zerado tendo o EAN no ficheiro.`);
+}
+
+// iPhone 16 ausentes (1011-1013) DEVEM agora ser zerados (antes: preservados p/ sempre = stock fantasma)
+const mustZero = ['gid://shopify/Product/1011', 'gid://shopify/Product/1012', 'gid://shopify/Product/1013'];
+const zeroSet = new Set(zeroIds);
+const staleFixed = mustZero.filter(id => {
+  const p = fixture.products.find(x => x.id === id);
+  if (!p) return true; // não está no fixture → ignora
+  const hasStock = p.variants.some(v => (v.stock || 0) > 0);
+  const protectedByEan = hc.eanChange.some(e => e.product.id === id);
+  return !hasStock || zeroSet.has(id) || protectedByEan;
+});
+if (staleFixed.length === mustZero.length) {
+  console.log(`  ${PASS} Produtos ausentes com stock são zerados automaticamente (fim do stock fantasma).`);
+} else {
+  console.log(`  ${FAIL} Há produtos ausentes com stock que NÃO seriam zerados nem protegidos:`);
+  mustZero.filter(id => !staleFixed.includes(id)).forEach(id => {
+    const p = fixture.products.find(x => x.id === id);
+    console.log(`    • ${p?.title}  ·  stock ${p?.variants[0]?.stock}`);
+  });
 }
 
 console.log(`\n  ${DIM('Re-correr com:')} node tests/run-teletech.mjs`);

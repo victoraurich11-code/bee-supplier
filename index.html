@@ -769,12 +769,16 @@ let state = {
   productAliases: DB.get('productAliases', []),       // [{ id, canonicalId, suppId, sku, barcode, source, confidence, addedAt, addedBy }]
   negativeMatches: DB.get('negativeMatches', []),     // [{ canonicalId, suppId, sku, barcode, rejectedAt }]
   pageUsage: DB.get('pageUsage', {}),                  // { [page]: { count, firstVisited, lastVisited } } — instrumentação para decidir consolidações
+  // ── Ofertas por fornecedor (motor multi-fornecedor) ──
+  // A verdade de "o que cada fornecedor tem AGORA" vive aqui, por variante Shopify.
+  // key = `${suppId}::${variantId}`. Absent do último upload → stock:0 + absentSince.
+  supplierOffers: DB.get('supplierOffers', {}),        // { [suppId::variantId]: { suppId, productId, variantId, invItemId, stock, cost, lastSeen, absentSince, absentCount } }
   parsedRows: [], uploadSuppId: null, colMap: {}, analysisResult: null,
 };
 
 function save() {
   // Dados críticos guardados primeiro — nunca devem ser perdidos
-  ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','kkCache','productCanonicals','productAliases','negativeMatches'].forEach(k => DB.set(k, state[k]));
+  ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','kkCache','productCanonicals','productAliases','negativeMatches','supplierOffers'].forEach(k => DB.set(k, state[k]));
   // Cache Shopify: pode ser grande (>5MB) e causar quota exceeded.
   // Guardado por último e de forma isolada para não bloquear os dados críticos acima.
   try {
@@ -843,7 +847,7 @@ async function saveToCloud() {
   const force = _cloudForceSync;
   _cloudForceSync = false;
   try {
-    const allKeys = ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','shopifyProducts','productCanonicals','productAliases','negativeMatches'];
+    const allKeys = ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','shopifyProducts','productCanonicals','productAliases','negativeMatches','supplierOffers'];
     // Avalia guards em paralelo para chaves críticas
     const guardChecks = await Promise.all(CLOUD_GUARDED_KEYS.map(async k => {
       if (force) return { k, allow: true };
@@ -902,7 +906,7 @@ async function loadFromCloud() {
     const map = Object.fromEntries(rows.map(r => [r.key, r.value]));
     // Aplicar com validação de tipo — garante que arrays são arrays e objetos são objetos
     const arrayKeys = ['suppliers','alerts','uploadHistory','matches','costAlerts','shopifyProducts','productAliases','negativeMatches'];
-    const objectKeys = ['skuHealth','costHistory','productCanonicals'];
+    const objectKeys = ['skuHealth','costHistory','productCanonicals','supplierOffers'];
     arrayKeys.forEach(k => { if (Array.isArray(map[k])) state[k] = map[k]; });
     objectKeys.forEach(k => { if (map[k] && typeof map[k]==='object' && !Array.isArray(map[k])) state[k] = map[k]; });
     // Restaura settings da cloud mas preserva as credenciais locais (supabase + shopify token)
@@ -911,7 +915,7 @@ async function loadFromCloud() {
       state.settings = { ...DEFAULT_SETTINGS, ...map.settings, ...keep };
     }
     // Persiste no localStorage para offline
-    ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','productCanonicals','productAliases','negativeMatches'].forEach(k => DB.set(k, state[k]));
+    ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','productCanonicals','productAliases','negativeMatches','supplierOffers'].forEach(k => DB.set(k, state[k]));
     try { localStorage.setItem('bsm3_shopifyProducts', JSON.stringify(state.shopifyProducts)); } catch {}
     // Restaura tek4life_mapping
     if (map.tek4life_mapping && typeof map.tek4life_mapping === 'object' && !Array.isArray(map.tek4life_mapping)) {
@@ -1040,13 +1044,14 @@ async function fetchShopifyProducts(opts = {}) {
   if (!silent) toast('A carregar produtos do Shopify...','info');
   let products=[], cursor=null, hasNext=true;
   while(hasNext) {
-    // Filtro `status:active`: exclui drafts e archived. Sem isto, produtos antigos
-    // arquivados continuam a poluir o cache e o matching apanha-os pelo EAN.
-    const q=`query($cursor:String){products(first:250,after:$cursor,query:"status:active"){pageInfo{hasNextPage endCursor}edges{node{id title vendor tags variants(first:5){edges{node{id sku barcode price inventoryQuantity inventoryItem{id}}}}}}}}`;
+    // Inclui ACTIVE + DRAFT (exclui archived). Drafts entram no matching para que
+    // produtos criados mas ainda não publicados continuem a receber stock/preço
+    // dos uploads (antes ficavam invisíveis e "esgotados" até alguém reparar).
+    const q=`query($cursor:String){products(first:250,after:$cursor,query:"status:active OR status:draft"){pageInfo{hasNextPage endCursor}edges{node{id title status vendor tags variants(first:5){edges{node{id sku barcode price inventoryQuantity inventoryItem{id}}}}}}}}`;
     const data = await shopifyGQL(q,{cursor});
     const page = data.products;
     products.push(...page.edges.map(e=>({
-      id:e.node.id, title:e.node.title, vendor:e.node.vendor, tags:e.node.tags||[],
+      id:e.node.id, title:e.node.title, status:e.node.status||'ACTIVE', vendor:e.node.vendor, tags:e.node.tags||[],
       variants:e.node.variants.edges.map(v=>({
         id:v.node.id, sku:v.node.sku, barcode:v.node.barcode,
         price:v.node.price, stock:v.node.inventoryQuantity,
@@ -1119,10 +1124,13 @@ const CAT_TAGS = ['cat:atualizado','cat:em-vigilancia','cat:critico','cat:sem-or
 const YYYYMM = () => new Date().toISOString().slice(0,7);
 
 function buildTagUpdate(existingTags, newTags, removeTags=[]) {
-  // Remove old cat: and specified tags, add new ones, keep everything else
+  // Remove old cat: and specified tags, add new ones, keep everything else.
+  // `sup:` é ADITIVA: um produto pode ser fornecido por vários fornecedores em
+  // simultâneo. Antes desta correção, cada upload substituía a tag sup: do outro
+  // fornecedor ("roubo" de ownership) e o preço/stock alternava entre listagens.
   const filtered = existingTags.filter(t => !removeTags.includes(t) && !CAT_TAGS.some(ct => t === ct) && !t.startsWith('last-seen:') && !newTags.some(nt => {
     const prefix = nt.split(':')[0]+':';
-    return t.startsWith(prefix) && prefix !== 'cat:' && prefix !== 'bsm:';
+    return t.startsWith(prefix) && prefix !== 'cat:' && prefix !== 'bsm:' && prefix !== 'sup:';
   }));
   return [...new Set([...filtered, ...newTags])];
 }
@@ -1155,69 +1163,337 @@ async function applyWatchTag(productId, existingTags, suppId, missedCount) {
 }
 
 // ═══════════════════════════════════════════
-// POST-UPLOAD HEALTH CHECK
-// Finds products tagged sup:<suppId> that were NOT in this upload
+// SUPPLIER OFFERS — motor multi-fornecedor
+// ═══════════════════════════════════════════
+// Cada fornecedor tem uma "oferta" por variante Shopify: o stock e custo que a
+// SUA última listagem trouxe. O stock/preço efetivo do produto resolve-se a
+// partir das ofertas atuais, por prioridade de fornecedor. Isto elimina o
+// flip-flop entre listagens e permite: ausente num fornecedor → passa ao
+// seguinte com stock; ausente em todos → zero.
+
+const OFFER_TTL_MS = 7 * 24 * 3600 * 1000; // oferta sem upload há >7 dias deixa de contar
+
+function offerKey(suppId, variantId) { return `${suppId}::${variantId}`; }
+
+function getSupplierPriority(suppId) {
+  const idx = state.suppliers.findIndex(s => s.id === suppId);
+  if (idx === -1) return 9999;
+  const s = state.suppliers[idx];
+  return (typeof s.priority === 'number' && !isNaN(s.priority)) ? s.priority : (idx + 1) * 10;
+}
+
+function offerIsCurrent(o) {
+  if (!o || !o.lastSeen) return false;
+  const supp = state.suppliers.find(s => s.id === o.suppId);
+  if (!supp || !supp.active) return false;
+  return (Date.now() - new Date(o.lastSeen).getTime()) <= OFFER_TTL_MS;
+}
+
+function upsertOffer({ suppId, productId, variantId, invItemId, stock, cost }) {
+  if (!suppId || !variantId) return;
+  const k = offerKey(suppId, variantId);
+  const prev = state.supplierOffers[k] || {};
+  state.supplierOffers[k] = {
+    suppId, productId, variantId,
+    invItemId: invItemId || prev.invItemId || null,
+    stock: Math.max(0, parseInt(stock) || 0),
+    cost: (cost === null || cost === undefined || isNaN(parseFloat(cost))) ? (prev.cost ?? null) : parseFloat(cost),
+    lastSeen: new Date().toISOString(),
+    absentSince: null,
+    absentCount: 0,
+  };
+}
+
+// Marca a oferta como ausente do último upload (stock passa a 0 nesse fornecedor).
+// Devolve true se foi uma TRANSIÇÃO (a oferta tinha stock > 0) — só transições
+// justificam ação; ausências repetidas de produtos já a zero são no-ops.
+function markOfferAbsent(suppId, variantId) {
+  const k = offerKey(suppId, variantId);
+  const o = state.supplierOffers[k];
+  if (!o) return false;
+  const hadStock = (o.stock || 0) > 0;
+  o.stock = 0;
+  o.absentCount = (o.absentCount || 0) + 1;
+  if (!o.absentSince) o.absentSince = new Date().toISOString();
+  return hadStock;
+}
+
+function offersForVariant(variantId) {
+  const out = [];
+  for (const k in state.supplierOffers) {
+    const o = state.supplierOffers[k];
+    if (o.variantId === variantId) out.push(o);
+  }
+  return out.sort((a, b) => getSupplierPriority(a.suppId) - getSupplierPriority(b.suppId));
+}
+
+// Melhor oferta ATUAL com stock > 0 para a variante, por prioridade.
+// `overrides` = { [suppId]: stockSimulado } permite simular "e se o fornecedor S
+// tivesse o stock de hoje" antes de gravar (usado no doAnalysis).
+function resolveEffectiveOffer(variantId, overrides = {}) {
+  const candidates = [];
+  for (const o of offersForVariant(variantId)) {
+    const stock = (o.suppId in overrides) ? overrides[o.suppId] : o.stock;
+    const current = (o.suppId in overrides) ? true : offerIsCurrent(o);
+    if (current && stock > 0) candidates.push({ ...o, stock });
+  }
+  // overrides de fornecedores sem oferta registada ainda
+  for (const suppId in overrides) {
+    if (overrides[suppId] > 0 && !candidates.some(c => c.suppId === suppId) &&
+        !offersForVariant(variantId).some(o => o.suppId === suppId)) {
+      candidates.push({ suppId, variantId, stock: overrides[suppId], cost: null });
+    }
+  }
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => getSupplierPriority(a.suppId) - getSupplierPriority(b.suppId));
+  return candidates[0];
+}
+
+// Preço de venda segundo as regras do fornecedor. null = não tocar no preço
+// (modo manual, ou custo desconhecido).
+function priceFromOffer(supp, cost) {
+  if (!supp || supp.pricingMode === 'manual') return null;
+  if (cost === null || cost === undefined || isNaN(parseFloat(cost))) return null;
+  const c = parseFloat(cost);
+  const raw = supp.priceType === 'pvp' ? c : c * (1 + (supp.margin || 0) / 100);
+  return applyPriceRounding(raw, supp.rounding);
+}
+
+// ── Migração one-shot: políticas de fornecedor + seed de ofertas ──
+// absencePolicy: 'zero'   → ausência da listagem = stock 0 nesse fornecedor (imediato)
+//                'manter' → ausência só marca vigilância; zero manual via Saúde
+function migrateSuppliersV2() {
+  let changed = false;
+  state.suppliers.forEach((s, idx) => {
+    if (!s.absencePolicy) {
+      // Todas as listagens atuais (Teletech, Depau, PcComponentes, Tek4life) são
+      // snapshots diários de disponibilidade: ausência significa "sem stock hoje".
+      s.absencePolicy = 'zero';
+      changed = true;
+    }
+    if (typeof s.priority !== 'number') { s.priority = (idx + 1) * 10; changed = true; }
+  });
+  return changed;
+}
+
+// Seed inicial: constrói ofertas a partir das tags sup: + stock atual da Shopify,
+// para o motor funcionar já no primeiro upload após o deploy (sem esperar que
+// todos os fornecedores façam upload). Corre uma vez (marker em settings).
+function seedOffersFromTags() {
+  if (state.settings.offersSeededAt) return 0;
+  let seeded = 0;
+  for (const p of state.shopifyProducts) {
+    const supTags = (p.tags || []).filter(t => t.startsWith('sup:')).map(t => t.slice(4));
+    if (!supTags.length) continue;
+    for (const suppId of supTags) {
+      const supp = state.suppliers.find(s => s.id === suppId);
+      if (!supp) continue;
+      for (const v of (p.variants || [])) {
+        const k = offerKey(suppId, v.id);
+        if (state.supplierOffers[k]) continue;
+        state.supplierOffers[k] = {
+          suppId, productId: p.id, variantId: v.id, invItemId: v.inventoryItemId || null,
+          stock: Math.max(0, v.stock || 0), cost: null,
+          lastSeen: supp.lastUpload || new Date().toISOString(),
+          absentSince: null, absentCount: 0,
+        };
+        seeded++;
+      }
+    }
+  }
+  state.settings.offersSeededAt = new Date().toISOString();
+  return seeded;
+}
+
+// ═══════════════════════════════════════════
+// POST-UPLOAD HEALTH CHECK (motor de ofertas)
+// Produtos tagged sup:<suppId> ausentes deste upload:
+//   1. oferta desse fornecedor passa a stock 0
+//   2. outro fornecedor com stock atual? → handover automático (stock/preço dele)
+//   3. senão, política 'zero' → stock zerado automaticamente (com travões)
+//   4. produtos já a zero → contador silencioso, sem ação nem alerta repetido
+// Devolve um relatório para o ecrã pós-upload; nenhum modal no fluxo diário.
 // ═══════════════════════════════════════════
 async function runPostUploadHealthCheck(suppId, processedSkus) {
   const supp = state.suppliers.find(s=>s.id===suppId);
-  if (!supp) return;
+  const report = { zeroed: [], handedOver: [], watched: [], alreadyZero: 0, skipped: [], eanChange: [], errors: [], coveragePct: 100, ok: 0 };
+  if (!supp) return report;
 
   const suppTag = `sup:${suppId}`;
-  // Find all Shopify products with this supplier tag
+  // Só produtos ACTIVE entram no ciclo de ausência (drafts não estão à venda)
   const taggedProducts = state.shopifyProducts.filter(p =>
-    p.tags && p.tags.includes(suppTag)
+    p.tags && p.tags.includes(suppTag) && (p.status || 'ACTIVE') === 'ACTIVE'
   );
+  if (!taggedProducts.length) return report;
 
-  if (!taggedProducts.length) return;
-
-  // Find which ones were NOT in this upload
-  const missing = taggedProducts.filter(p => {
-    return !p.variants.some(v => {
-      const sku = (v.sku||'').trim().toLowerCase();
-      const bc = (v.barcode||'').trim();
-      return (sku && processedSkus.skus.has(sku)) || (bc && processedSkus.barcodes.has(bc));
-    });
+  const matchedInUpload = (p) => p.variants.some(v => {
+    const sku = (v.sku||'').trim().toLowerCase();
+    const bc = (v.barcode||'').trim();
+    return (sku && processedSkus.skus.has(sku)) || (bc && processedSkus.barcodes.has(bc));
   });
 
+  const missing = taggedProducts.filter(p => !matchedInUpload(p));
+  report.ok = taggedProducts.length - missing.length;
   if (!missing.length) {
     toast(`✓ Todos os produtos ${supp.name} foram atualizados neste upload`, 'success');
-    return;
+    return report;
   }
 
-  // FIX SG#5: se o fornecedor está marcado como "in-stock list", ausência ≠ descontinuação.
-  // Apenas registamos contadores SEM escalar para crítico/zero, e mostramos info passiva.
-  if (supp.isInStockList) {
-    updateMissedCounters(missing, suppId, false);
-    toast(`${supp.name} (in-stock list): ${missing.length} produto(s) ausentes — preservados`, 'info');
-    return;
+  // TRAVÃO 1 — mapeamento partido: se NENHUM produto tagged bateu no ficheiro,
+  // o problema é do ficheiro/colunas, não do catálogo. Não fazer nada.
+  if (report.ok === 0 && taggedProducts.length > 10) {
+    report.errors.push(`Nenhum dos ${taggedProducts.length} produtos ${supp.name} bateu no ficheiro. Verifica o mapeamento de colunas (EAN/SKU) — nada foi alterado.`);
+    return report;
   }
 
-  // Coverage check: if upload is suspiciously small, warn but don't auto-escalate
+  // TRAVÃO 2 — upload suspeitosamente pequeno vs média: pede decisão única.
   const avgExpected = computeAvgUploadSize(suppId);
   const uploadSize = processedSkus.total;
   const coveragePct = avgExpected > 0 ? Math.round((uploadSize / avgExpected) * 100) : 100;
-
+  report.coveragePct = coveragePct;
   if (coveragePct < 70 && avgExpected > 50) {
-    // P0b: upload suspeitosamente pequeno — exigir decisão explícita do utilizador.
-    // Não escalamos automaticamente nem ignoramos: deixamos a escolha visível.
-    showPartialUploadModal({ suppId, suppName: supp.name, missing, coveragePct, avgExpected, uploadSize });
-    return;
+    const goOn = confirm(
+      `⚠ Upload pequeno: ${uploadSize} linhas vs média de ${avgExpected} (${coveragePct}%).\n\n` +
+      `${missing.length} produto(s) ${supp.name} ficaram ausentes.\n\n` +
+      `OK = ficheiro é mesmo a lista completa de hoje (processar ausências)\n` +
+      `Cancelar = ficheiro parcial/errado (não mexer em nada)`
+    );
+    if (!goOn) {
+      report.errors.push(`Upload tratado como parcial (${coveragePct}% da média). Ausências ignoradas.`);
+      return report;
+    }
   }
 
-  // Update missed counters
+  // Contadores skuHealth (alimentam a página Saúde)
   updateMissedCounters(missing, suppId, true);
 
-  // Build list needing attention
-  const toAlert = missing.map(p => {
-    const health = state.skuHealth[p.variants[0]?.sku?.toLowerCase()] || {};
-    const missed = (health.missedUploads||0);
-    // F4: candidatos a substituição vindos das linhas isNew do mesmo upload.
-    const candidates = findReplacementCandidates(p, suppId);
-    return { ...p, missed, v: p.variants[0], candidates };
-  });
+  const isNewRows = state.analysisResult?.isNew || [];
+  const canCheckEanChange = isNewRows.length > 0 && isNewRows.length <= 1500;
 
-  // Show confirmation modal
-  showZeroConfirmModal(toAlert, suppId, supp.name, coveragePct);
+  // Classificação de cada produto ausente
+  const toZero = [], toHandover = [];
+  for (const p of missing) {
+    // Oferta deste fornecedor passa a 0 em todas as variantes
+    let hadStockAtSupp = false;
+    for (const v of (p.variants||[])) {
+      if (markOfferAbsent(suppId, v.id)) hadStockAtSupp = true;
+    }
+    const v0 = p.variants[0];
+    const currentStock = p.variants.reduce((a,v)=>a+(v.stock||0),0);
+
+    if (currentStock <= 0) { report.alreadyZero++; continue; }
+
+    // Possível MUDANÇA DE EAN no fornecedor: mesma coisa com código novo veio
+    // como "novo". Zerar seria errado — vai para o relatório para associar.
+    if (canCheckEanChange) {
+      let best = null;
+      for (const row of isNewRows) {
+        if ((row.stockVal||0) <= 0) continue;
+        const score = nameSimilarity(p.title || '', row.name || '');
+        if (score >= 95 && (!best || score > best.score)) best = { row, score };
+      }
+      if (best) { report.eanChange.push({ product: p, candidate: best.row, score: best.score }); continue; }
+    }
+
+    // Outro fornecedor com oferta atual e stock? → handover
+    const eff = resolveEffectiveOffer(v0?.id);
+    if (eff && eff.suppId !== suppId && eff.stock > 0) {
+      toHandover.push({ product: p, offer: eff });
+      continue;
+    }
+
+    // Outro fornecedor tagged mas ainda sem oferta registada (motor novo, ainda
+    // não fez upload)? Conservador: não zerar até esse fornecedor correr.
+    const otherSup = (p.tags||[]).filter(t=>t.startsWith('sup:') && t!==suppTag).map(t=>t.slice(4))
+      .find(id => { const s = state.suppliers.find(x=>x.id===id); return s && s.active; });
+    if (otherSup && !offersForVariant(v0?.id).some(o => o.suppId === otherSup)) {
+      report.skipped.push({ product: p, reason: `aguarda upload de ${state.suppliers.find(s=>s.id===otherSup)?.name || otherSup}` });
+      continue;
+    }
+
+    if (supp.absencePolicy === 'manter') {
+      report.watched.push({ product: p });
+      continue;
+    }
+    toZero.push({ product: p });
+  }
+
+  // TRAVÃO 3 — zeragem em massa: acima do limiar exige confirmação única.
+  const taggedWithStock = taggedProducts.filter(p => p.variants.some(v=>(v.stock||0)>0)).length;
+  const massLimit = Math.max(15, Math.ceil(taggedWithStock * 0.4));
+  let zeroApproved = true;
+  if (toZero.length > massLimit) {
+    zeroApproved = confirm(
+      `🔴 ${supp.name} deixou de listar ${toZero.length} produto(s) que ainda têm stock no site.\n\n` +
+      `Exemplos:\n${toZero.slice(0,6).map(z=>`  • ${z.product.title.slice(0,55)}`).join('\n')}\n\n` +
+      `OK = zerar o stock destes ${toZero.length} produtos agora\n` +
+      `Cancelar = manter stock e marcar apenas para vigilância`
+    );
+  }
+
+  const locationId = await getLocationId().catch(()=>null);
+
+  // Execução: handovers
+  for (const h of toHandover) {
+    const p = h.product, off = h.offer;
+    const winner = state.suppliers.find(s=>s.id===off.suppId);
+    try {
+      const v = p.variants[0];
+      if (locationId && v?.inventoryItemId) await updateVariantStock(v.inventoryItemId, locationId, off.stock);
+      const newPrice = priceFromOffer(winner, off.cost);
+      if (newPrice !== null && v?.id) await updateVariantPrice(p.id, v.id, newPrice.toFixed(2));
+      const newTags = buildTagUpdate(p.tags||[], [`sup:${off.suppId}`, 'cat:atualizado', `last-seen:${YYYYMM()}`]);
+      await updateProductTags(p.id, newTags);
+      // cache local
+      p.tags = newTags;
+      if (v) { v.stock = off.stock; if (newPrice !== null) v.price = String(newPrice.toFixed(2)); }
+      report.handedOver.push({ title: p.title, from: supp.name, to: winner?.name || off.suppId, stock: off.stock, price: newPrice });
+    } catch(e) { report.errors.push(`Handover ${p.title.slice(0,40)}: ${e.message}`); }
+    await sleep(350);
+  }
+
+  // Execução: zeros automáticos (só transições stock>0 → 0)
+  if (zeroApproved) {
+    for (const z of toZero) {
+      const p = z.product;
+      try {
+        for (const v of p.variants) {
+          if ((v.stock||0) !== 0 && locationId && v.inventoryItemId) {
+            await updateVariantStock(v.inventoryItemId, locationId, 0);
+          }
+        }
+        const newTags = await applyZeroStockTag(p.id, p.tags||[]);
+        const prevStock = p.variants.reduce((a,v)=>a+(v.stock||0),0);
+        p.variants.forEach(v=>v.stock=0);
+        p.tags = newTags;
+        state.alerts.push({
+          id: 'alert_'+Date.now()+Math.random(), type: 'zero_stock',
+          title: 'Stock zerado automaticamente',
+          desc: `${p.title} — ausente da listagem ${supp.name} (tinha ${prevStock})`,
+          suppId, date: new Date().toISOString(), dismissed: false,
+        });
+        report.zeroed.push({ title: p.title, prevStock });
+      } catch(e) { report.errors.push(`Zero ${p.title.slice(0,40)}: ${e.message}`); }
+      await sleep(350);
+    }
+  } else {
+    toZero.forEach(z => report.watched.push({ product: z.product, note: 'zeragem em massa recusada' }));
+  }
+
+  // Execução: vigilância (política 'manter' ou zeragem recusada) — só tags
+  for (const w of report.watched) {
+    const p = w.product;
+    try {
+      const missed = state.skuHealth[(p.variants[0]?.sku||'').toLowerCase()]?.missedUploads || 1;
+      const newTags = await applyWatchTag(p.id, p.tags||[], suppId, missed);
+      p.tags = newTags;
+    } catch(e) { report.errors.push(`Tag ${p.title.slice(0,40)}: ${e.message}`); }
+    await sleep(200);
+  }
+
+  save();
+  updateBadges();
+  return report;
 }
 
 function computeAvgUploadSize(suppId) {
@@ -1239,64 +1515,24 @@ function updateMissedCounters(missingProducts, suppId, escalate) {
   save();
 }
 
-// P0b — Upload anormalmente pequeno: utilizador decide entre 3 caminhos.
-// Estado pendente é guardado em window porque o modal usa onclick inline.
-function showPartialUploadModal({ suppId, suppName, missing, coveragePct, avgExpected, uploadSize }) {
-  window._partialUploadCtx = { suppId, suppName, missing, coveragePct };
-  const sample = missing.slice(0, 8).map(p => `<li style="margin-bottom:3px">${(p.title||'').replace(/</g,'&lt;')} <span style="color:var(--text2);font-size:11px">— SKU ${p.variants?.[0]?.sku||'—'}</span></li>`).join('');
-  const moreCount = Math.max(0, missing.length - 8);
-  document.getElementById('modal-content').innerHTML = `
-    <div class="modal-title">⚠ Upload Incompleto Detetado: ${suppName}</div>
-    <div style="background:#FEF3C7;border:1px solid #FCD34D;border-radius:8px;padding:12px 14px;margin:12px 0;font-size:13px;line-height:1.5">
-      Este upload tem <strong>${uploadSize} linhas</strong>, mas a média dos últimos 5 uploads é <strong>${avgExpected}</strong>.<br>
-      Cobertura: <strong style="color:#B45309">${coveragePct}%</strong> · Produtos ausentes: <strong>${missing.length}</strong>.<br>
-      <span style="color:var(--text2)">Pode ser uma listagem parcial do fornecedor (recomendado: tratar como parcial) ou uma redução real do catálogo (continuar e escalar normalmente).</span>
-    </div>
-    <details style="margin-bottom:16px">
-      <summary style="cursor:pointer;font-size:12px;color:var(--text2);font-weight:600">Ver ${missing.length} produto(s) ausentes</summary>
-      <ul style="max-height:180px;overflow-y:auto;font-size:12px;margin:8px 0 0 18px;padding:0">
-        ${sample}${moreCount > 0 ? `<li style="color:var(--text2);font-style:italic">…e mais ${moreCount}</li>` : ''}
-      </ul>
-    </details>
-    <div class="modal-footer" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">
-      <button class="btn btn-ghost" onclick="cancelPartialUpload()">Cancelar (não fazer nada)</button>
-      <button class="btn btn-primary" onclick="treatAsPartial()">Tratar como upload parcial</button>
-      <button class="btn btn-danger" onclick="continueAnyway()">Continuar e escalar normalmente</button>
-    </div>
-    <div style="margin-top:10px;font-size:11px;color:var(--text2);text-align:right">
-      <em>Parcial</em>: contadores não avançam, nada é zerado · <em>Continuar</em>: escala como upload completo (pode levar a zerar produtos)
-    </div>`;
-  openModal();
-}
-
-window.cancelPartialUpload = function() {
-  window._partialUploadCtx = null;
-  closeModal();
-  toast('Upload mantido. Nenhuma ação aplicada à saúde do catálogo.', 'info');
-};
-
-window.treatAsPartial = function() {
-  const ctx = window._partialUploadCtx; if (!ctx) return;
-  closeModal();
-  // Mantém comportamento conservador anterior: não escala contadores nem propõe zero.
-  toast(`Upload tratado como parcial — ${ctx.missing.length} produto(s) preservados sem alterações`, 'success');
-  window._partialUploadCtx = null;
-};
-
-window.continueAnyway = function() {
-  const ctx = window._partialUploadCtx; if (!ctx) return;
-  const { suppId, suppName, missing, coveragePct } = ctx;
-  closeModal();
-  window._partialUploadCtx = null;
-  // Repete o caminho normal: incrementa contadores e abre modal de zero.
-  updateMissedCounters(missing, suppId, true);
-  const toAlert = missing.map(p => {
+// Revisão manual a partir da Saúde do Catálogo: produtos de um fornecedor com
+// política 'manter' (ou zeragens adiadas) que estão críticos/vigiados e ainda
+// têm stock. Reutiliza o modal de zero existente, agora fora do fluxo diário.
+window.reviewStaleStock = function(suppId) {
+  const supp = state.suppliers.find(s => s.id === suppId);
+  if (!supp) return;
+  const suppTag = `sup:${suppId}`;
+  const candidates = activeShopifyProducts().filter(p =>
+    (p.tags||[]).includes(suppTag) &&
+    p.variants.some(v => (v.stock||0) > 0) &&
+    (p.tags||[]).some(t => t === 'cat:critico' || t === 'cat:em-vigilancia')
+  );
+  if (!candidates.length) { toast(`Sem produtos ${supp.name} com stock em vigilância/crítico`, 'info'); return; }
+  const toAlert = candidates.map(p => {
     const health = state.skuHealth[p.variants[0]?.sku?.toLowerCase()] || {};
-    const missed = (health.missedUploads || 0);
-    const candidates = findReplacementCandidates(p, suppId);
-    return { ...p, missed, v: p.variants[0], candidates };
+    return { ...p, missed: health.missedUploads || 1, v: p.variants[0], candidates: findReplacementCandidates(p, suppId) };
   });
-  showZeroConfirmModal(toAlert, suppId, suppName, coveragePct);
+  showZeroConfirmModal(toAlert, suppId, supp.name, 0);
 };
 
 function showZeroConfirmModal(products, suppId, suppName, coveragePct) {
@@ -1469,7 +1705,7 @@ function addHealthAlerts(suppId, productIds) {
 // Detect products with NO supplier tag at all
 async function detectNoOriginProducts() {
   const knownSupTags = state.suppliers.map(s=>`sup:${s.id}`);
-  const noOrigin = state.shopifyProducts.filter(p => {
+  const noOrigin = activeShopifyProducts().filter(p => {
     if (!p.tags) return true;
     return !knownSupTags.some(t => p.tags.includes(t));
   });
@@ -1623,10 +1859,16 @@ function updateBadges() {
   else { d.className='dot err'; t.textContent='Não ligado'; }
 }
 
+// Produtos ativos (à venda). O cache inclui drafts para matching/criação,
+// mas contagens de saúde e dashboards referem-se ao que está publicado.
+function activeShopifyProducts() {
+  return state.shopifyProducts.filter(p => (p.status || 'ACTIVE') === 'ACTIVE');
+}
+
 function computeHealthCounts() {
   const ok=[], warn=[], crit=[], unknown=[], noTag=[];
   const knownSupTags = state.suppliers.map(s=>`sup:${s.id}`);
-  state.shopifyProducts.forEach(p => {
+  activeShopifyProducts().forEach(p => {
     const tags = p.tags||[];
     const hasAnyCatTag = tags.some(t=>t.startsWith('cat:'));
     const hasAnySupTag = knownSupTags.some(t=>tags.includes(t));
@@ -1647,10 +1889,10 @@ function computeHealthCounts() {
 function dashboard() {
   document.getElementById('topbar-actions').innerHTML=`<button class="btn btn-ghost btn-sm" onclick="fetchShopifyProducts().then(render)">↻ Sincronizar Shopify</button>`;
   const hc = computeHealthCounts();
-  const total = state.shopifyProducts.length;
+  const total = activeShopifyProducts().length;
   const suppCounts = state.suppliers.filter(s=>s.active).map(s=>{
     const tag = `sup:${s.id}`;
-    const prods = state.shopifyProducts.filter(p=>(p.tags||[]).includes(tag));
+    const prods = activeShopifyProducts().filter(p=>(p.tags||[]).includes(tag));
     const ok = prods.filter(p=>(p.tags||[]).includes('cat:atualizado')).length;
     const warn = prods.filter(p=>(p.tags||[]).includes('cat:em-vigilancia')).length;
     const crit = prods.filter(p=>(p.tags||[]).includes('cat:critico')).length;
@@ -1770,20 +2012,31 @@ function roundingLabel(mode) {
 // HEALTH DASHBOARD
 // ═══════════════════════════════════════════
 function health() {
+  const staleBtns = state.suppliers.filter(s=>s.active).map(s=>
+    `<button class="btn btn-ghost btn-sm" onclick="reviewStaleStock('${s.id}')" title="Rever produtos ${s.name} em vigilância/críticos que ainda têm stock">🧹 ${s.name}</button>`
+  ).join('');
   document.getElementById('topbar-actions').innerHTML=`
+    <span style="font-size:11px;color:var(--text3);margin-right:2px">Rever stock ausente:</span>${staleBtns}
     <button class="btn btn-ghost btn-sm" onclick="fetchShopifyProducts().then(render)">↻ Sincronizar</button>
     <button class="btn btn-purple btn-sm" onclick="detectNoOriginProducts()">🔍 Detectar sem origem</button>`;
 
   const hc = computeHealthCounts();
+  // Produtos (ativos ou rascunho) sem SKU nem EAN em nenhuma variante: invisíveis
+  // aos uploads — nunca recebem stock/preço. Normalmente criados à mão no Admin.
+  const noEanList = state.shopifyProducts.filter(p =>
+    (p.variants||[]).length > 0 &&
+    p.variants.every(v => !(v.sku||'').trim() && !(v.barcode||'').trim())
+  );
 
   function renderHealthTable(filter) {
     let list = [];
-    if(filter==='all') list = state.shopifyProducts.filter(p=>(p.tags||[]).some(t=>t.startsWith('cat:')));
+    if(filter==='all') list = activeShopifyProducts().filter(p=>(p.tags||[]).some(t=>t.startsWith('cat:')));
     if(filter==='ok') list = hc.okList;
     if(filter==='warn') list = hc.warnList;
     if(filter==='crit') list = hc.critList;
     if(filter==='unknown') list = hc.unknownList;
     if(filter==='notag') list = hc.noTagList;
+    if(filter==='noean') return renderNoEanPanel(noEanList);
 
     if(filter==='notag') return renderNoTagPanel(list);
 
@@ -1865,13 +2118,53 @@ function health() {
       </div>`;
   }
 
+  // Painel "Sem EAN": cura produtos invisíveis aos uploads. Para cada um,
+  // sugere o alerta de fornecedor com nome mais parecido (o EAN vem daí).
+  function renderNoEanPanel(list) {
+    if(!list.length) return `<div class="empty-state"><div class="empty-icon">🎉</div><p>Todos os produtos têm SKU ou EAN — os uploads conseguem atualizá-los.</p></div>`;
+    const activeAlerts = state.alerts.filter(a => a.type === 'new_product' && !a.dismissed && (a.barcode || a.sku));
+    const rows = list.map((p, i) => {
+      let best = null;
+      for (const a of activeAlerts) {
+        const score = nameSimilarity(p.title || '', a.name || '');
+        if (score >= 85 && (!best || score > best.score)) best = { a, score };
+      }
+      const v = p.variants[0] || {};
+      const suppName = best ? (state.suppliers.find(s=>s.id===best.a.suppId)?.name || best.a.suppId) : null;
+      return `<tr>
+        <td style="font-weight:600;max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.title}">
+          ${p.title}
+          ${(p.status||'ACTIVE')==='DRAFT'?'<span class="tag-pill tp-gray" style="margin-left:6px">rascunho</span>':''}
+        </td>
+        <td class="mono" style="color:${(v.stock||0)===0?'var(--red)':'var(--green)'}">${v.stock??'?'}</td>
+        <td style="max-width:260px">
+          ${best ? `<div style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${best.a.name}">${best.a.name}</div>
+            <div class="mono" style="font-size:10px;color:var(--text3)">EAN ${best.a.barcode||'—'} · ${suppName} · stock ${best.a.stock??'?'} · ${best.score}%</div>`
+          : '<span style="color:var(--text3);font-size:12px">sem correspondência nos alertas</span>'}
+        </td>
+        <td style="text-align:right;white-space:nowrap">
+          ${best ? `<button class="btn btn-primary btn-sm" onclick="healApplyEan('${p.id}','${v.id||''}','${v.inventoryItemId||''}','${best.a.id}')">✓ Aplicar EAN + fornecedor</button>` : ''}
+        </td>
+      </tr>`;
+    }).join('');
+    return `
+      <div style="background:var(--orange-bg);border:1px solid #FDE68A;border-radius:10px;padding:14px 16px;margin-bottom:14px;font-size:13px">
+        ⚠ Estes <strong>${list.length} produto(s)</strong> não têm SKU nem EAN em nenhuma variante, por isso <strong>nenhum upload consegue atualizá-los</strong> (ficam com stock congelado, muitas vezes "esgotado").
+        Ao aplicar o EAN sugerido, o produto passa a ser atualizado normalmente e recebe já o último stock conhecido do fornecedor.
+      </div>
+      <div style="overflow-x:auto;max-height:520px;overflow-y:auto">
+        <table><thead><tr><th>Produto</th><th>Stock</th><th>Sugestão (alertas dos fornecedores)</th><th style="text-align:right">Ação</th></tr></thead>
+        <tbody>${rows}</tbody></table>
+      </div>`;
+  }
+
   // Inject stats card for noTag
   const noTagCardStyle = hc.noTag > 0
     ? 'border-left:3px solid var(--purple);background:var(--purple-bg);'
     : 'border-left:3px solid var(--green);';
 
   document.getElementById('content').innerHTML=`
-    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:20px">
+    <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-bottom:20px">
       <div class="stat-card hc-ok" style="border-left:3px solid var(--green);cursor:pointer" onclick="setHealthFilter('ok')">
         <div class="stat-num" style="color:var(--green)">${hc.ok}</div>
         <div class="stat-lbl">✅ Atualizados</div>
@@ -1892,6 +2185,10 @@ function health() {
         <div class="stat-num" style="color:${hc.noTag>0?'var(--purple)':'var(--green)'}">${hc.noTag}</div>
         <div class="stat-lbl">🏷 Sem Tags</div>
       </div>
+      <div class="stat-card" style="border-left:3px solid ${noEanList.length>0?'var(--orange)':'var(--green)'};cursor:pointer;${noEanList.length>0?'background:var(--orange-bg)':''}" onclick="setHealthFilter('noean')">
+        <div class="stat-num" style="color:${noEanList.length>0?'var(--orange)':'var(--green)'}">${noEanList.length}</div>
+        <div class="stat-lbl">📛 Sem EAN/SKU</div>
+      </div>
     </div>
 
     <div class="table-wrap">
@@ -1903,6 +2200,7 @@ function health() {
           <button class="tab" id="htab-crit" onclick="setHealthFilter('crit')">Críticos</button>
           <button class="tab" id="htab-unknown" onclick="setHealthFilter('unknown')">Sem Origem</button>
           <button class="tab active" id="htab-notag" onclick="setHealthFilter('notag')">🏷 Sem Tags ${hc.noTag>0?`<span style="background:var(--purple);color:white;border-radius:10px;padding:1px 6px;font-size:10px;margin-left:4px">${hc.noTag}</span>`:''}</button>
+          <button class="tab" id="htab-noean" onclick="setHealthFilter('noean')">📛 Sem EAN ${noEanList.length>0?`<span style="background:var(--orange);color:white;border-radius:10px;padding:1px 6px;font-size:10px;margin-left:4px">${noEanList.length}</span>`:''}</button>
         </div>
       </div>
       <div id="health-table-body">${renderNoTagPanel(hc.noTagList)}</div>
@@ -1978,6 +2276,48 @@ function health() {
   };
 }
 
+// Cura de produto sem EAN/SKU: aplica o EAN+SKU do alerta sugerido, liga o
+// produto ao fornecedor (tag + oferta) e repõe já o último stock conhecido.
+// A partir daqui os uploads diários passam a encontrá-lo e a geri-lo.
+window.healApplyEan = async function(productId, variantId, invItemId, alertId) {
+  const a = state.alerts.find(x => x.id === alertId);
+  const p = state.shopifyProducts.find(x => x.id === productId);
+  if (!a || !p || !variantId) { toast('Alerta ou produto não encontrado', 'error'); return; }
+  const supp = state.suppliers.find(s => s.id === a.suppId);
+  const ean = String(a.barcode || '').trim();
+  const sku = String(a.sku || '').trim();
+  if (!ean && !sku) { toast('O alerta não tem EAN nem SKU', 'error'); return; }
+  if (!confirm(`Aplicar a "${p.title.slice(0,60)}":\n\nEAN: ${ean || '—'}\nSKU: ${sku || '—'}\nFornecedor: ${supp?.name || a.suppId}\nStock (última listagem): ${a.stock ?? '?'}\n\nO preço NÃO é alterado.`)) return;
+  try {
+    if (ean) {
+      await shopifyGQL(
+        `mutation($productId:ID!,$variants:[ProductVariantsBulkInput!]!){productVariantsBulkUpdate(productId:$productId,variants:$variants){userErrors{message}}}`,
+        { productId, variants: [{ id: variantId, barcode: ean }] }
+      );
+    }
+    if (sku && invItemId) await updateVariantSKU(invItemId, sku);
+    // stock imediato (tracked + activate + set) com o último valor do fornecedor
+    const stock = Math.max(0, parseInt(a.stock) || 0);
+    const locationId = await getLocationId().catch(() => null);
+    if (invItemId && locationId) {
+      await shopifyGQL(`mutation($id:ID!,$input:InventoryItemInput!){inventoryItemUpdate(id:$id,input:$input){userErrors{message}}}`, { id: invItemId, input: { tracked: true } });
+      await shopifyGQL(`mutation($inventoryItemId:ID!,$locationId:ID!){inventoryActivate(inventoryItemId:$inventoryItemId,locationId:$locationId){userErrors{message}}}`, { inventoryItemId: invItemId, locationId });
+      await updateVariantStock(invItemId, locationId, stock);
+    }
+    const newTags = buildTagUpdate(p.tags || [], [`sup:${a.suppId}`, 'cat:atualizado', `last-seen:${YYYYMM()}`]);
+    await updateProductTags(productId, newTags);
+    // cache + oferta + alerta
+    p.tags = newTags;
+    const v = p.variants.find(x => x.id === variantId);
+    if (v) { v.sku = sku || v.sku; v.barcode = ean || v.barcode; v.stock = stock; }
+    upsertOffer({ suppId: a.suppId, productId, variantId, invItemId, stock, cost: a.price });
+    a.dismissed = true;
+    save();
+    toast(`✓ ${p.title.slice(0,40)} ligado a ${supp?.name || a.suppId} — stock ${stock} aplicado`, 'success');
+    health();
+  } catch (e) { toast(`Erro: ${e.message}`, 'error'); }
+};
+
 function catBadge(catTag) {
   if (!catTag) return '<span class="badge badge-gray">sem estado</span>';
   if (catTag==='cat:atualizado') return '<span class="badge badge-green">✅ Atualizado</span>';
@@ -2051,9 +2391,9 @@ function supplierCard(s, pendingCostAlerts) {
   const isManual = s.pricingMode === 'manual';
   const priceLabel = s.priceType==='pvp' ? 'PVP Sugerido' : ('Custo + ' + (s.margin||0) + '% margem');
 
-  // Saúde dos produtos deste fornecedor
+  // Saúde dos produtos deste fornecedor (só ativos — drafts não estão à venda)
   const tag = 'sup:' + s.id;
-  const prods = state.shopifyProducts.filter(function(p){ return (p.tags||[]).includes(tag); });
+  const prods = activeShopifyProducts().filter(function(p){ return (p.tags||[]).includes(tag); });
   const ok   = prods.filter(function(p){ return (p.tags||[]).includes('cat:atualizado'); }).length;
   const warn = prods.filter(function(p){ return (p.tags||[]).includes('cat:em-vigilancia'); }).length;
   const crit = prods.filter(function(p){ return (p.tags||[]).includes('cat:critico'); }).length;
@@ -2086,6 +2426,10 @@ function supplierCard(s, pendingCostAlerts) {
       + '</div>'
       + '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:2px">'
         + '<span class="badge ' + (isManual?'badge-purple':'badge-blue') + '" style="font-size:10px">' + (isManual?'Preço Manual':'Preço Auto') + '</span>'
+        + '<span class="badge ' + (s.absencePolicy==='manter'?'badge-orange':'badge-green') + '" style="font-size:10px" title="' + (s.absencePolicy==='manter'?'Ausências só marcam vigilância; nada é zerado automaticamente':'Produto ausente da listagem → stock zerado (ou entregue a outro fornecedor com stock)') + '">'
+          + (s.absencePolicy==='manter'?'Ausente: vigiar':'Ausente: zerar')
+        + '</span>'
+        + '<span class="badge badge-gray" style="font-size:10px" title="Prioridade entre fornecedores (mais baixo ganha)">P' + (typeof s.priority==='number'?s.priority:10) + '</span>'
         + costAlertBadge
       + '</div>'
       + healthBar
@@ -2257,7 +2601,7 @@ function recoverSuppliersFromTags() {
   if (!confirm(`Foram encontrados ${missing.length} fornecedor(es) referenciado(s) nas tags Shopify mas em falta na lista:\n\n${missing.join(', ')}\n\nReconstruir com defaults (active:true, threshold:3)?`)) return;
   for (const id of missing) {
     const niceName = id.charAt(0).toUpperCase() + id.slice(1);
-    state.suppliers.push({ id, name: niceName, active: true, zeroThreshold: 3, lastUpload: null });
+    state.suppliers.push({ id, name: niceName, active: true, zeroThreshold: 3, lastUpload: null, absencePolicy: 'zero', priority: (state.suppliers.length + 1) * 10 });
   }
   save();
   suppliers();
@@ -2342,20 +2686,28 @@ function openSupplierModal(id=null) {
           <option value="ends4990" ${s?.rounding==='ends4990'?'selected':''}>Final 4,90 ou 9,90 (ex: 14,90 · 19,90 · 24,90)</option>
         </select>
       </div>
-      <div class="form-group">
-        <label>Uploads consecutivos sem aparecer para alerta crítico / zero</label>
-        <input type="number" id="s-zerothreshold" value="${s?.zeroThreshold||4}" min="1" max="20" step="1">
-        <span style="font-size:11px;color:var(--text2)">Recomendado: 2 para Teletech, 4 para outros. Após N uploads ausente, o produto passa a "crítico" e é proposto para zero de stock.</span>
-      </div>
-      <div class="form-group" style="background:var(--orange-bg);border:1px solid #FDE68A;border-radius:8px;padding:10px 12px">
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-          <input type="checkbox" id="s-instocklist" ${s?.isInStockList?'checked':''} style="width:16px;height:16px;accent-color:var(--orange)">
-          <span style="font-weight:600">Esta listagem é uma <em>in-stock list</em> (só produtos disponíveis no momento)</span>
+      <div class="form-group" style="background:var(--blue-bg,#EFF6FF);border:1px solid #BFDBFE;border-radius:8px;padding:10px 12px">
+        <label style="font-weight:600;margin-bottom:6px;display:block">Produto ausente da listagem — o que fazer?</label>
+        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;margin-bottom:6px">
+          <input type="radio" name="s-absence" value="zero" ${(!s || s.absencePolicy !== 'manter') ? 'checked' : ''} style="margin-top:2px;accent-color:var(--blue)">
+          <span><strong>Zerar stock automaticamente</strong> <span style="color:var(--text2);font-size:11px;display:block">A listagem diária é a verdade: se o produto não veio, o fornecedor não o tem. Se outro fornecedor tiver stock, o produto passa para esse em vez de zerar. Travões de segurança: uploads anormalmente pequenos ou zeragens em massa pedem confirmação.</span></span>
         </label>
-        <span style="font-size:11px;color:var(--text2);display:block;margin-top:6px">
-          Quando activo, produtos ausentes deste fornecedor <strong>nunca</strong> são propostos para zerar — apenas marcados como "não listado hoje".
-          Útil para fornecedores que só publicam stock disponível (Teletech, Depau parcial, etc.). Não usar para catálogos completos.
-        </span>
+        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
+          <input type="radio" name="s-absence" value="manter" ${s?.absencePolicy === 'manter' ? 'checked' : ''} style="margin-top:2px;accent-color:var(--blue)">
+          <span><strong>Manter stock e vigiar</strong> <span style="color:var(--text2);font-size:11px;display:block">Para listagens parciais/incompletas por natureza. Ausências só marcam o produto para revisão na Saúde do Catálogo; nada é zerado automaticamente.</span></span>
+        </label>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Prioridade entre fornecedores</label>
+          <input type="number" id="s-priority" value="${typeof s?.priority==='number'?s.priority:10}" min="1" max="999" step="1">
+          <span style="font-size:11px;color:var(--text2)">Número mais baixo = mais prioritário. Quando dois fornecedores têm o mesmo produto com stock, o mais prioritário gere o stock e o preço.</span>
+        </div>
+        <div class="form-group">
+          <label>Uploads ausente até marcar "crítico"</label>
+          <input type="number" id="s-zerothreshold" value="${s?.zeroThreshold||4}" min="1" max="20" step="1">
+          <span style="font-size:11px;color:var(--text2)">Só afeta as tags de saúde (vigilância/crítico), não o stock.</span>
+        </div>
       </div>
       <div style="border-top:1px solid var(--border);padding-top:14px">
         <div class="card-title">Mapeamento de Colunas</div>
@@ -2400,7 +2752,8 @@ function saveSupplier(id) {
     colPrice: document.getElementById('s-colprice').value.trim(),
     colStatus: document.getElementById('s-colstatus').value.trim(),
     pricingMode: document.getElementById('s-pricingmode')?.value || 'automatico',
-    isInStockList: !!document.getElementById('s-instocklist')?.checked,
+    absencePolicy: document.querySelector('input[name="s-absence"]:checked')?.value || 'zero',
+    priority: parseInt(document.getElementById('s-priority')?.value) || 10,
     lastUpload: id ? state.suppliers.find(s=>s.id===id)?.lastUpload : null,
   };
   if(id) state.suppliers = state.suppliers.map(s=>s.id===id?data:s);
@@ -2470,6 +2823,7 @@ function upload() {
             <div style="font-size:56px;margin-bottom:16px">🎉</div>
             <div style="font-family:var(--font-sans);font-size:22px;font-weight:800;color:var(--green);margin-bottom:10px">Concluído com sucesso!</div>
             <div id="prog-summary-cards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;max-width:500px;margin:20px auto"></div>
+            <div id="prog-report" style="max-width:680px;margin:0 auto;text-align:left"></div>
             <button class="btn btn-ghost" style="margin-top:20px" onclick="resetUpload()">↩ Novo Upload</button>
           </div>
         </div>
@@ -2678,6 +3032,15 @@ function runAnalysis() {
 
         const priceChanged = currentShopifyPrice.toFixed(2) !== effectiveFinalPrice.toFixed(2);
         const stockChanged = (match.variant.stock ?? 0) !== stockVal;
+
+        // Motor de ofertas: este fornecedor só gere stock/preço da variante se,
+        // com o stock de hoje, for a melhor oferta atual (por prioridade).
+        // Senão a linha fica visível mas sem aplicar nada (a oferta é registada
+        // na mesma no applyChanges) — fim do flip-flop entre listagens.
+        const winner = resolveEffectiveOffer(match.variant.id, { [supp.id]: stockVal });
+        const managedBy = (winner && winner.suppId !== supp.id) ? winner.suppId : null;
+        const managedByName = managedBy ? (state.suppliers.find(s=>s.id===managedBy)?.name || managedBy) : null;
+
         const rowData = { name, sku, barcode, stockVal, costRaw, rawPrice: effectiveRawPrice, finalPrice: effectiveFinalPrice, suppId: supp.id, suppName: supp.name, histKey };
         found.push({
           ...rowData,
@@ -2687,8 +3050,10 @@ function runAnalysis() {
           currentPrice: currentShopifyPrice,
           currentStock: match.variant.stock ?? 0,
           matchedBy,
-          applyPrice: isManual ? false : priceChanged, // manual: false por defeito, ativado ao editar com ✏
-          applyStock: stockChanged,
+          managedBy, managedByName,
+          isDraft: (match.product.status || 'ACTIVE') === 'DRAFT',
+          applyPrice: managedBy ? false : (isManual ? false : priceChanged), // manual: false por defeito, ativado ao editar com ✏
+          applyStock: managedBy ? false : stockChanged,
           _selected: true,
           costChange,
         });
@@ -3130,9 +3495,13 @@ function renderAnalysis(found, notFound, isNew, supp) {
                 <span style="color:var(--text2)">${p.currentStock??'?'}</span>
                 ${stockChanged?`<span style="color:var(--text3)"> → </span><strong style="color:var(--blue)">${p.stockVal}</strong>`:'<span style="color:var(--text3);font-size:11px"> (igual)</span>'}
               </td>
-              <td><span class="badge ${p.matchedBy==='SKU'?'badge-blue':'badge-orange'}" style="font-size:10px">${p.matchedBy}</span></td>
-              <td style="text-align:center"><input type="checkbox" class="chk-price" data-idx="${i}" ${priceChanged?'checked':''} ${!priceChanged?'disabled':''} onchange="state.analysisResult.found[${i}].applyPrice=this.checked;updateApplySummary()"></td>
-              <td style="text-align:center"><input type="checkbox" class="chk-stock" data-idx="${i}" ${stockChanged?'checked':''} ${!stockChanged?'disabled':''} onchange="state.analysisResult.found[${i}].applyStock=this.checked;updateApplySummary()"></td>
+              <td>
+                <span class="badge ${p.matchedBy==='SKU'?'badge-blue':'badge-orange'}" style="font-size:10px">${p.matchedBy}</span>
+                ${p.managedBy?`<span class="badge badge-gray" style="font-size:10px;margin-left:4px" title="Outro fornecedor tem prioridade e stock para este produto. Stock/preço não serão alterados por este upload (podes forçar com as checkboxes).">🔒 ${p.managedByName}</span>`:''}
+                ${p.isDraft?`<span class="badge badge-gray" style="font-size:10px;margin-left:4px" title="Produto em rascunho — recebe stock/preço mas não está publicado">rascunho</span>`:''}
+              </td>
+              <td style="text-align:center"><input type="checkbox" class="chk-price" data-idx="${i}" ${p.applyPrice?'checked':''} ${!priceChanged?'disabled':''} onchange="state.analysisResult.found[${i}].applyPrice=this.checked;updateApplySummary()"></td>
+              <td style="text-align:center"><input type="checkbox" class="chk-stock" data-idx="${i}" ${p.applyStock?'checked':''} ${!stockChanged?'disabled':''} onchange="state.analysisResult.found[${i}].applyStock=this.checked;updateApplySummary()"></td>
             </tr>`;
           }).join('')}
         </tbody></table>
@@ -3423,16 +3792,65 @@ async function applyChanges() {
     });
   }
 
-  state.uploadHistory.unshift({ id:'upl_'+Date.now(), supplierId:state.uploadSuppId, supplierName:supp.name, date:new Date().toISOString(), total:uploadTotal, updated, errors, newProducts:isNew.length });
+  // Motor de ofertas: regista a oferta de HOJE deste fornecedor para TODAS as
+  // linhas encontradas (mesmo as que não aplicaram nada — a listagem é a verdade
+  // do fornecedor, independentemente de quem gere o produto).
+  const managedNeedingTag = [];
+  found.filter(p => p._selected !== false).forEach(p => {
+    upsertOffer({
+      suppId: state.uploadSuppId,
+      productId: p.shopifyProduct.id,
+      variantId: p.shopifyVariant.id,
+      invItemId: p.shopifyVariant.inventoryItemId,
+      stock: p.stockVal,
+      cost: p.costRaw,
+    });
+    // O produto voltou a aparecer: limpa o contador de ausências da saúde
+    const hkey = (p.sku || p.barcode || '').toLowerCase();
+    if (hkey && state.skuHealth[hkey]) delete state.skuHealth[hkey];
+    // Proveniência: produto gerido por outro fornecedor mas também listado por
+    // este → garante a tag sup: deste (sem tocar em stock/preço).
+    if (p.managedBy && !(p.shopifyProduct.tags || []).includes(`sup:${state.uploadSuppId}`)) {
+      managedNeedingTag.push(p);
+    }
+  });
+  for (const p of managedNeedingTag) {
+    try {
+      const newTags = buildTagUpdate(p.shopifyProduct.tags || [], [`sup:${state.uploadSuppId}`]);
+      await updateProductTags(p.shopifyProduct.id, newTags);
+      p.shopifyProduct.tags = newTags;
+      await sleep(250);
+    } catch(e) { console.warn('Tag proveniência:', e.message); }
+  }
+
+  const histEntry = { id:'upl_'+Date.now(), supplierId:state.uploadSuppId, supplierName:supp.name, date:new Date().toISOString(), total:uploadTotal, updated, errors, newProducts:isNew.length };
+  state.uploadHistory.unshift(histEntry);
   state.suppliers = state.suppliers.map(s=>s.id===state.uploadSuppId?{...s,lastUpload:new Date().toISOString()}:s);
   save();
 
+  let healthReport = null;
   try {
     setUI('🔍', 'A verificar saúde do catálogo...', '', 90, `A comparar produtos ${supp.name}...`);
     if(state.shopifyProducts.length>0) {
-      await runPostUploadHealthCheck(state.uploadSuppId, { skus: knownSkus, barcodes: knownBarcodes, total: uploadTotal });
+      healthReport = await runPostUploadHealthCheck(state.uploadSuppId, { skus: knownSkus, barcodes: knownBarcodes, total: uploadTotal });
     }
   } catch(e) { console.warn('Health check falhou:', e.message); }
+
+  // Relatório persistido no histórico (para auditoria posterior)
+  const managedElsewhere = found.filter(p => p._selected !== false && p.managedBy).length;
+  if (healthReport) {
+    histEntry.report = {
+      zeroed: healthReport.zeroed.slice(0,100),
+      handedOver: healthReport.handedOver.slice(0,100),
+      watched: healthReport.watched.length,
+      alreadyZero: healthReport.alreadyZero,
+      skipped: healthReport.skipped.map(s=>({title:s.product.title, reason:s.reason})).slice(0,50),
+      eanChange: healthReport.eanChange.map(e=>({title:e.product.title, candidate:e.candidate.name, score:e.score})).slice(0,50),
+      errors: healthReport.errors.slice(0,50),
+      coveragePct: healthReport.coveragePct,
+      managedElsewhere,
+    };
+  }
 
   // SHOW SUCCESS STATE
   const f=document.getElementById('progress-fill'); if(f) f.style.width='100%';
@@ -3450,19 +3868,48 @@ async function applyChanges() {
       {n:updated, lbl:'Atualizados', color:'var(--green)'},
       {n:priceUpdated, lbl:'Preços', color:'var(--blue)'},
       {n:stockUpdated, lbl:'Stocks', color:'var(--blue)'},
-      {n:tagsApplied, lbl:'Tags', color:'var(--purple)'},
+      ...(healthReport && healthReport.zeroed.length>0?[{n:healthReport.zeroed.length, lbl:'Zerados (ausentes)', color:'var(--red)'}]:[]),
+      ...(healthReport && healthReport.handedOver.length>0?[{n:healthReport.handedOver.length, lbl:'Passaram de fornecedor', color:'var(--blue)'}]:[]),
+      ...(managedElsewhere>0?[{n:managedElsewhere, lbl:'Geridos por outro forn.', color:'var(--text2)'}]:[]),
       ...(alertsCreated>0?[{n:alertsCreated, lbl:'Novos alertas', color:'var(--orange)'}]:[]),
-      ...(alertsUpdated>0?[{n:alertsUpdated, lbl:'Alertas refrescados', color:'var(--text2)'}]:[]),
       ...(costChangesRegistered.length>0?[{n:costChangesRegistered.length, lbl:'Alertas custo', color:'var(--purple)'}]:[]),
       ...(errors>0?[{n:errors, lbl:'Erros', color:'var(--red)'}]:[]),
     ].map(x=>`<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px;text-align:center">
       <div style="font-family:var(--font-sans);font-size:22px;font-weight:800;color:${x.color}">${x.n}</div>
       <div style="font-size:11px;color:var(--text2);margin-top:2px">${x.lbl}</div>
     </div>`).join('');
+    // Relatório detalhado por baixo dos cartões
+    const repEl = document.getElementById('prog-report');
+    if (repEl && healthReport) repEl.innerHTML = renderUploadReport(healthReport, supp);
   }
 
   toast(`Upload concluído: ${updated} produto(s) atualizados`,'success');
   save(); updateBadges();
+}
+
+// Relatório pós-upload legível: o que aconteceu e o que (se algo) precisa de olho.
+function renderUploadReport(rep, supp) {
+  const esc = (s) => (s||'').toString().replace(/</g,'&lt;');
+  const section = (title, color, items) => items.length ? `
+    <div style="margin-top:14px">
+      <div style="font-family:var(--font-sans);font-size:12px;font-weight:700;color:${color};text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">${title}</div>
+      <div style="max-height:220px;overflow-y:auto;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-size:12.5px;line-height:1.7">
+        ${items.join('')}
+      </div>
+    </div>` : '';
+
+  return [
+    rep.errors.length ? section('⚠ Atenção', 'var(--red)', rep.errors.map(e=>`<div>• ${esc(e)}</div>`)) : '',
+    section(`🔴 Stock zerado automaticamente (ausentes da listagem ${esc(supp.name)})`, 'var(--red)',
+      rep.zeroed.map(z=>`<div>• ${esc(z.title)} <span style="color:var(--text3)">(tinha ${z.prevStock})</span></div>`)),
+    section('⇄ Entregues a outro fornecedor (continuam à venda)', 'var(--blue)',
+      rep.handedOver.map(h=>`<div>• ${esc(h.title)} <span style="color:var(--text3)">→ ${esc(h.to)}, stock ${h.stock}${h.price!==null&&h.price!==undefined?', €'+Number(h.price).toFixed(2):''}</span></div>`)),
+    section('🔎 Possível mudança de código no fornecedor (revê e associa — NÃO foram zerados)', 'var(--orange)',
+      rep.eanChange.map(e=>`<div>• ${esc(e.product?.title || e.title)} <span style="color:var(--text3)">≈ ${esc(e.candidate?.name || e.candidate)} (${e.score}%)</span></div>`)),
+    section('⏸ Adiados por segurança', 'var(--text2)',
+      rep.skipped.map(s=>`<div>• ${esc(s.product?.title || s.title)} <span style="color:var(--text3)">(${esc(s.reason)})</span></div>`)),
+    rep.alreadyZero > 0 ? `<div style="margin-top:12px;font-size:12px;color:var(--text3)">${rep.alreadyZero} produto(s) ausentes já estavam a zero — nenhuma ação necessária.</div>` : '',
+  ].join('');
 }
 
 function resetUpload() {
@@ -3553,6 +4000,7 @@ function renderCreateTab(newProds) {
   const filtered = newProds.filter(a => {
     if (filterSupp !== 'all' && a.suppId !== filterSupp) return false;
     if (toCreateState.onlyWithImage && !a.attachedImage) return false;
+    if (toCreateState.onlyWithStock && (a.stock || 0) <= 0) return false;
     return true;
   });
 
@@ -3600,6 +4048,10 @@ function renderCreateTab(newProds) {
       <label style="display:flex;align-items:center;gap:6px;font-size:var(--text-sm);color:var(--ink-700);cursor:pointer">
         <input type="checkbox" ${toCreateState.onlyWithImage?'checked':''} onchange="toCreateState.onlyWithImage=this.checked;alerts()">
         Só com imagem
+      </label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:var(--text-sm);color:var(--ink-700);cursor:pointer" title="Esconde sugestões que o fornecedor tem a 0 — não vale a pena criar o que não se pode vender">
+        <input type="checkbox" ${toCreateState.onlyWithStock?'checked':''} onchange="toCreateState.onlyWithStock=this.checked;alerts()">
+        Só com stock
       </label>
       <label style="display:flex;align-items:center;gap:6px;font-size:var(--text-sm);color:var(--ink-700);cursor:pointer" title="Esconde grupos que parecem já existir na Shopify (match por nome ≥75%, SKU exacto ou EAN)">
         <input type="checkbox" ${toCreateState.hideDuplicates?'checked':''} onchange="toCreateState.hideDuplicates=this.checked;alerts()">
@@ -3963,8 +4415,9 @@ async function createFromAlert(alertId) {
     }
     if (invId && sku) await updateVariantSKU(invId, sku);
 
-    // 3) Stock no location
-    if (invId && stock > 0) {
+    // 3) Stock no location — SEMPRE (mesmo 0), senão o produto nasce com
+    // inventário por ativar e aparece "esgotado" sem razão visível.
+    if (invId) {
       try {
         const locationId = await getLocationId();
         await shopifyGQL(
@@ -3975,8 +4428,16 @@ async function createFromAlert(alertId) {
           `mutation($inventoryItemId:ID!,$locationId:ID!){inventoryActivate(inventoryItemId:$inventoryItemId,locationId:$locationId){userErrors{message}}}`,
           { inventoryItemId: invId, locationId }
         );
-        await updateVariantStock(invId, locationId, stock);
-      } catch (e) { console.warn('Stock:', e.message); }
+        await updateVariantStock(invId, locationId, stock || 0);
+      } catch (e) { toast(`⚠ Produto criado mas o stock falhou: ${e.message}. Corrige no Shopify Admin ou reaplica no próximo upload.`, 'error'); }
+    }
+    // 3b) Oferta + cache local: o próximo upload já reconhece este produto
+    if (variantId) {
+      upsertOffer({ suppId: a.suppId, productId: product.id, variantId, invItemId: invId, stock: stock || 0, cost: inferProductDataFromAlert(a).cost });
+      state.shopifyProducts.push({
+        id: product.id, title, status: 'DRAFT', vendor: vendor || '', tags: productInput.tags,
+        variants: [{ id: variantId, sku: sku || '', barcode: barcode || '', price: String(price), stock: stock || 0, inventoryItemId: invId }],
+      });
     }
 
     // 4) Histórico de custo (baseline para futuras variações)
@@ -4042,6 +4503,7 @@ function _toCreateGroupKey(name) {
 const toCreateState = (window._toCreateState = window._toCreateState || {
   suppFilter: 'all',
   onlyWithImage: false,
+  onlyWithStock: true,                 // Esconde sugestões que o fornecedor tem a 0 (não dá para vender)
   selectedCollectionIds: new Set(),   // Coleções a aplicar a TODOS os produtos do bulk
   autoSuggestCollections: true,        // Marca automaticamente as sugeridas
   hideDuplicates: true,                // Esconde grupos com prováveis duplicados na loja
@@ -4122,6 +4584,7 @@ function toCreate() {
   const active = allActive.filter(a => {
     if (filterSupp !== 'all' && a.suppId !== filterSupp) return false;
     if (toCreateState.onlyWithImage && !a.attachedImage) return false;
+    if (toCreateState.onlyWithStock && (a.stock || 0) <= 0) return false;
     return true;
   });
 
@@ -4201,6 +4664,10 @@ function toCreate() {
         <label style="display:flex;align-items:center;gap:6px;font-size:var(--text-sm);color:var(--ink-700);cursor:pointer;margin-left:var(--space-3)">
           <input type="checkbox" ${toCreateState.onlyWithImage?'checked':''} onchange="toCreateState.onlyWithImage=this.checked;toCreate()">
           Só com imagem
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:var(--text-sm);color:var(--ink-700);cursor:pointer;margin-left:var(--space-3)" title="Esconde sugestões que o fornecedor tem a 0">
+          <input type="checkbox" ${toCreateState.onlyWithStock?'checked':''} onchange="toCreateState.onlyWithStock=this.checked;toCreate()">
+          Só com stock
         </label>
       </div>
       <div style="flex:1"></div>
@@ -4388,6 +4855,7 @@ window.toCreateAssociateGroup = async function(gi, productId, variantId) {
   const filtered = allActive.filter(a => {
     if (filterSupp !== 'all' && a.suppId !== filterSupp) return false;
     if (toCreateState.onlyWithImage && !a.attachedImage) return false;
+    if (toCreateState.onlyWithStock && (a.stock || 0) <= 0) return false;
     return true;
   });
   const groups = new Map();
@@ -4579,6 +5047,7 @@ window.toCreateBulkCreate = async function() {
   let candidates = allActive.filter(a => {
     if (filterSupp !== 'all' && a.suppId !== filterSupp) return false;
     if (toCreateState.onlyWithImage && !a.attachedImage) return false;
+    if (toCreateState.onlyWithStock && (a.stock || 0) <= 0) return false;
     return true;
   });
   if (!candidates.length) { toast('Sem produtos a criar com os filtros actuais', 'info'); return; }
@@ -4667,23 +5136,31 @@ window.toCreateBulkCreate = async function() {
           { productId: product.id, variants: [variantInput] }
         );
       }
-      // 3) SKU via inventoryItemUpdate
+      // 3) SKU via inventoryItemUpdate — falha aqui é falha do produto inteiro:
+      // um produto sem SKU/EAN nunca mais bate nos uploads e fica órfão/esgotado.
       if (invId && data.sku) {
-        try { await updateVariantSKU(invId, data.sku); } catch (e) { console.warn('SKU update:', e.message); }
+        await updateVariantSKU(invId, data.sku);
       }
-      // 4) Stock no location (com tracked + activate + set)
-      if (invId && locationId && data.stock > 0) {
-        try {
-          await shopifyGQL(
-            `mutation($id:ID!,$input:InventoryItemInput!){inventoryItemUpdate(id:$id,input:$input){userErrors{message}}}`,
-            { id: invId, input: { tracked: true } }
-          );
-          await shopifyGQL(
-            `mutation($inventoryItemId:ID!,$locationId:ID!){inventoryActivate(inventoryItemId:$inventoryItemId,locationId:$locationId){userErrors{message}}}`,
-            { inventoryItemId: invId, locationId }
-          );
-          await updateVariantStock(invId, locationId, data.stock);
-        } catch (e) { console.warn('Stock activate:', e.message); }
+      // 4) Stock no location (com tracked + activate + set) — SEMPRE, mesmo com
+      // stock 0, para o inventário nascer correto e rastreado na location.
+      if (invId && locationId) {
+        await shopifyGQL(
+          `mutation($id:ID!,$input:InventoryItemInput!){inventoryItemUpdate(id:$id,input:$input){userErrors{message}}}`,
+          { id: invId, input: { tracked: true } }
+        );
+        await shopifyGQL(
+          `mutation($inventoryItemId:ID!,$locationId:ID!){inventoryActivate(inventoryItemId:$inventoryItemId,locationId:$locationId){userErrors{message}}}`,
+          { inventoryItemId: invId, locationId }
+        );
+        await updateVariantStock(invId, locationId, data.stock || 0);
+      }
+      // 4b) Regista a oferta + cache local para o próximo upload já o conhecer
+      if (variantId) {
+        upsertOffer({ suppId: data.suppId, productId: product.id, variantId, invItemId: invId, stock: data.stock || 0, cost: data.cost });
+        state.shopifyProducts.push({
+          id: product.id, title: data.title, status: 'DRAFT', vendor: data.vendor || '', tags: data.tags || [],
+          variants: [{ id: variantId, sku: data.sku || '', barcode: data.barcode || '', price: String(data.price.toFixed(2)), stock: data.stock || 0, inventoryItemId: invId }],
+        });
       }
       // 5) Histórico de custo (para futura detecção de variações)
       if (data.histKey && data.cost) {
@@ -9585,6 +10062,14 @@ async function boot() {
     DB.set('suppliers', state.suppliers);
   }
   await runMigrationIfNeeded();
+  // Motor de ofertas: garante políticas/prioridades nos fornecedores e faz o
+  // seed inicial de ofertas a partir das tags sup: + stock atual (one-shot).
+  const polChanged = migrateSuppliersV2();
+  const seeded = seedOffersFromTags();
+  if (polChanged || seeded > 0) {
+    save();
+    if (seeded > 0) toast(`Motor multi-fornecedor inicializado: ${seeded} oferta(s) registadas`, 'info');
+  }
   restoreNavGroupsState();
   navigate('dashboard');
 

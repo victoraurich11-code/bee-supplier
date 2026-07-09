@@ -237,37 +237,145 @@ export function doAnalysis({ parsedRows, colMap, supplier, shopifyProducts, deci
   };
 }
 
-// ─── Health check pós-upload (index.html:836-888) ─────────────────────────────
-// FIX SG#5: respeita supplier.isInStockList — quando true, NUNCA escala para zerar,
-// apenas marca contadores sem agravar.
-export function runPostUploadHealthCheck({ supplier, shopifyProducts, processedSkus, uploadHistory = [] }) {
-  const supplierId = supplier.id;
-  const suppTag = `sup:${supplierId}`;
-  const taggedProducts = shopifyProducts.filter(p => p.tags && p.tags.includes(suppTag));
-  if (!taggedProducts.length) return { missing: [], coveragePct: 100, avgExpected: 0, action: 'no-tagged' };
+// ─── Motor de ofertas (espelho de index.html: SUPPLIER OFFERS) ─────────────────
+// Cada fornecedor tem uma "oferta" por variante: stock/custo da última listagem.
+// O stock/preço efetivo resolve-se por prioridade entre ofertas atuais.
+export const OFFER_TTL_MS = 7 * 24 * 3600 * 1000;
 
-  const missing = taggedProducts.filter(p => {
-    return !p.variants.some(v => {
-      const sku = (v.sku || '').trim().toLowerCase();
-      const bc = (v.barcode || '').trim();
-      return (sku && processedSkus.skus.has(sku)) || (bc && processedSkus.barcodes.has(bc));
-    });
+export function makeOfferEngine(suppliers, offers = {}, now = Date.now()) {
+  const priorityOf = (suppId) => {
+    const idx = suppliers.findIndex(s => s.id === suppId);
+    if (idx === -1) return 9999;
+    const s = suppliers[idx];
+    return (typeof s.priority === 'number' && !isNaN(s.priority)) ? s.priority : (idx + 1) * 10;
+  };
+  const offerKey = (suppId, variantId) => `${suppId}::${variantId}`;
+  const offerIsCurrent = (o) => {
+    if (!o || !o.lastSeen) return false;
+    const supp = suppliers.find(s => s.id === o.suppId);
+    if (!supp || !supp.active) return false;
+    return (now - new Date(o.lastSeen).getTime()) <= OFFER_TTL_MS;
+  };
+  const upsertOffer = ({ suppId, productId, variantId, invItemId, stock, cost }) => {
+    const k = offerKey(suppId, variantId);
+    const prev = offers[k] || {};
+    offers[k] = {
+      suppId, productId, variantId,
+      invItemId: invItemId || prev.invItemId || null,
+      stock: Math.max(0, parseInt(stock) || 0),
+      cost: (cost === null || cost === undefined || isNaN(parseFloat(cost))) ? (prev.cost ?? null) : parseFloat(cost),
+      lastSeen: new Date(now).toISOString(),
+      absentSince: null, absentCount: 0,
+    };
+  };
+  const markOfferAbsent = (suppId, variantId) => {
+    const o = offers[offerKey(suppId, variantId)];
+    if (!o) return false;
+    const hadStock = (o.stock || 0) > 0;
+    o.stock = 0;
+    o.absentCount = (o.absentCount || 0) + 1;
+    if (!o.absentSince) o.absentSince = new Date(now).toISOString();
+    return hadStock;
+  };
+  const offersForVariant = (variantId) =>
+    Object.values(offers).filter(o => o.variantId === variantId)
+      .sort((a, b) => priorityOf(a.suppId) - priorityOf(b.suppId));
+  const resolveEffectiveOffer = (variantId, overrides = {}) => {
+    const candidates = [];
+    for (const o of offersForVariant(variantId)) {
+      const stock = (o.suppId in overrides) ? overrides[o.suppId] : o.stock;
+      const current = (o.suppId in overrides) ? true : offerIsCurrent(o);
+      if (current && stock > 0) candidates.push({ ...o, stock });
+    }
+    for (const suppId in overrides) {
+      if (overrides[suppId] > 0 && !candidates.some(c => c.suppId === suppId) &&
+          !offersForVariant(variantId).some(o => o.suppId === suppId)) {
+        candidates.push({ suppId, variantId, stock: overrides[suppId], cost: null });
+      }
+    }
+    if (!candidates.length) return null;
+    candidates.sort((a, b) => priorityOf(a.suppId) - priorityOf(b.suppId));
+    return candidates[0];
+  };
+  return { offers, priorityOf, offerIsCurrent, upsertOffer, markOfferAbsent, offersForVariant, resolveEffectiveOffer };
+}
+
+// ─── Health check pós-upload V2 (espelho de index.html: runPostUploadHealthCheck)
+// Classificação PURA (sem side-effects Shopify): a UI executa o que isto decide.
+// Devolve guards em vez de abrir modals — os testes verificam os travões.
+export function classifyAbsences({ supplier, suppliers, shopifyProducts, processedSkus, engine, isNewRows = [], uploadHistory = [], nameSim = nameSimilarity }) {
+  const suppTag = `sup:${supplier.id}`;
+  const out = { ok: 0, missing: [], coveragePct: 100, avgExpected: 0, guard: null,
+                toZero: [], toHandover: [], watched: [], alreadyZero: [], skipped: [], eanChange: [], massBrake: false };
+
+  const tagged = shopifyProducts.filter(p => p.tags && p.tags.includes(suppTag) && (p.status || 'ACTIVE') === 'ACTIVE');
+  if (!tagged.length) return out;
+
+  const matched = (p) => p.variants.some(v => {
+    const sku = (v.sku || '').trim().toLowerCase();
+    const bc = (v.barcode || '').trim();
+    return (sku && processedSkus.skus.has(sku)) || (bc && processedSkus.barcodes.has(bc));
   });
+  out.missing = tagged.filter(p => !matched(p));
+  out.ok = tagged.length - out.missing.length;
+  if (!out.missing.length) return out;
 
-  if (!missing.length) return { missing: [], coveragePct: 100, avgExpected: 0, action: 'all-updated' };
+  // TRAVÃO 1: mapeamento partido (nada bateu)
+  if (out.ok === 0 && tagged.length > 10) { out.guard = 'broken-mapping'; return out; }
 
-  // FIX SG#5
-  if (supplier.isInStockList) {
-    return { missing, coveragePct: 0, avgExpected: 0, action: 'in-stock-list-preserve' };
+  // TRAVÃO 2: cobertura anormal
+  const hist = uploadHistory.filter(h => h.supplierId === supplier.id).slice(0, 5);
+  out.avgExpected = hist.length ? Math.round(hist.reduce((a, h) => a + (h.total || 0), 0) / hist.length) : 0;
+  out.coveragePct = out.avgExpected > 0 ? Math.round((processedSkus.total / out.avgExpected) * 100) : 100;
+  if (out.coveragePct < 70 && out.avgExpected > 50) { out.guard = 'low-coverage-confirm'; }
+
+  const canCheckEan = isNewRows.length > 0 && isNewRows.length <= 1500;
+
+  for (const p of out.missing) {
+    for (const v of (p.variants || [])) engine.markOfferAbsent(supplier.id, v.id);
+    const v0 = p.variants[0];
+    const currentStock = p.variants.reduce((a, v) => a + (v.stock || 0), 0);
+    if (currentStock <= 0) { out.alreadyZero.push(p); continue; }
+
+    if (canCheckEan) {
+      let best = null;
+      for (const row of isNewRows) {
+        if ((row.stockVal || 0) <= 0) continue;
+        const score = nameSim(p.title || '', row.name || '');
+        if (score >= 95 && (!best || score > best.score)) best = { row, score };
+      }
+      if (best) { out.eanChange.push({ product: p, candidate: best.row, score: best.score }); continue; }
+    }
+
+    const eff = engine.resolveEffectiveOffer(v0?.id);
+    if (eff && eff.suppId !== supplier.id && eff.stock > 0) { out.toHandover.push({ product: p, offer: eff }); continue; }
+
+    const otherSup = (p.tags || []).filter(t => t.startsWith('sup:') && t !== suppTag).map(t => t.slice(4))
+      .find(id => { const s = suppliers.find(x => x.id === id); return s && s.active; });
+    if (otherSup && !engine.offersForVariant(v0?.id).some(o => o.suppId === otherSup)) {
+      out.skipped.push({ product: p, reason: `aguarda upload de ${otherSup}` });
+      continue;
+    }
+
+    if (supplier.absencePolicy === 'manter') { out.watched.push({ product: p }); continue; }
+    out.toZero.push({ product: p });
   }
 
-  const hist = uploadHistory.filter(h => h.supplierId === supplierId).slice(0, 5);
-  const avgExpected = hist.length ? Math.round(hist.reduce((a, h) => a + (h.total || 0), 0) / hist.length) : 0;
-  const uploadSize = processedSkus.total;
-  const coveragePct = avgExpected > 0 ? Math.round((uploadSize / avgExpected) * 100) : 100;
+  const taggedWithStock = tagged.filter(p => p.variants.some(v => (v.stock || 0) > 0)).length;
+  const massLimit = Math.max(15, Math.ceil(taggedWithStock * 0.4));
+  out.massBrake = out.toZero.length > massLimit;
+  return out;
+}
 
-  if (coveragePct < 70 && avgExpected > 50) {
-    return { missing, coveragePct, avgExpected, action: 'partial-modal' };
-  }
-  return { missing, coveragePct, avgExpected, action: 'zero-modal' };
+// Compat: assinatura antiga usada pelo run-teletech.mjs (mantém verificação de
+// falsos-missing). Traduz para o motor novo com política do supplier.
+export function runPostUploadHealthCheck({ supplier, suppliers = null, shopifyProducts, processedSkus, uploadHistory = [], offers = {}, isNewRows = [] }) {
+  const supps = suppliers || [supplier];
+  const engine = makeOfferEngine(supps, offers);
+  const supp = { absencePolicy: 'zero', ...supplier };
+  const r = classifyAbsences({ supplier: supp, suppliers: supps, shopifyProducts, processedSkus, engine, isNewRows, uploadHistory });
+  const action = r.guard === 'broken-mapping' ? 'abort-broken-mapping'
+    : r.guard === 'low-coverage-confirm' ? 'confirm-low-coverage'
+    : r.toZero.length ? 'auto-zero' : (r.missing.length ? 'no-action-needed' : 'all-updated');
+  return { ...r, action };
 }
