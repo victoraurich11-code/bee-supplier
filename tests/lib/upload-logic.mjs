@@ -98,7 +98,8 @@ export function detectDuplicates(rows, colMap) {
 // FIX SG#2: merge preserva TODOS os barcodes/SKUs do grupo em _altBarcodes/_altSkus.
 // FIX SG#1: lookup consulta findCanonicalForRow se direct lookup falha.
 // Aliases passados como argumento porque o módulo é puro (sem state global).
-export function doAnalysis({ parsedRows, colMap, supplier, shopifyProducts, decisions = [], productAliases = [], productCanonicals = {} }) {
+export function doAnalysis({ parsedRows, colMap, supplier, suppliers = null, shopifyProducts, decisions = [], productAliases = [], productCanonicals = {} }) {
+  const knownSuppliers = suppliers || [supplier];
   const { name: nc, sku: sc, barcode: bc, stock: stc, price: pc } = colMap;
 
   // Apply merges (FIX SG#2 — preserva todos os EANs/SKUs)
@@ -213,9 +214,16 @@ export function doAnalysis({ parsedRows, colMap, supplier, shopifyProducts, deci
       mergedFrom: row._mergedFrom || null,
     };
     if (match) {
+      // DONO FIXO (espelho de index.html): o produto pertence ao fornecedor da
+      // tag sup:; uploads de outros fornecedores veem a linha mas não aplicam.
+      const ownerId = (match.product.tags || [])
+        .filter(t => t.startsWith('sup:')).map(t => t.slice(4))
+        .find(id => knownSuppliers.some(s => s.id === id)) || null;
+      const managedBy = (ownerId && ownerId !== supplier.id) ? ownerId : null;
       found.push({
         ...rec,
         matchedBy,
+        managedBy,
         shopifyProductId: match.product.id,
         shopifyVariantId: match.variant.id,
         shopifyTitle: match.product.title,
@@ -237,69 +245,6 @@ export function doAnalysis({ parsedRows, colMap, supplier, shopifyProducts, deci
   };
 }
 
-// ─── Motor de ofertas (espelho de index.html: SUPPLIER OFFERS) ─────────────────
-// Cada fornecedor tem uma "oferta" por variante: stock/custo da última listagem.
-// O stock/preço efetivo resolve-se por prioridade entre ofertas atuais.
-export const OFFER_TTL_MS = 7 * 24 * 3600 * 1000;
-
-export function makeOfferEngine(suppliers, offers = {}, now = Date.now()) {
-  const priorityOf = (suppId) => {
-    const idx = suppliers.findIndex(s => s.id === suppId);
-    if (idx === -1) return 9999;
-    const s = suppliers[idx];
-    return (typeof s.priority === 'number' && !isNaN(s.priority)) ? s.priority : (idx + 1) * 10;
-  };
-  const offerKey = (suppId, variantId) => `${suppId}::${variantId}`;
-  const offerIsCurrent = (o) => {
-    if (!o || !o.lastSeen) return false;
-    const supp = suppliers.find(s => s.id === o.suppId);
-    if (!supp || !supp.active) return false;
-    return (now - new Date(o.lastSeen).getTime()) <= OFFER_TTL_MS;
-  };
-  const upsertOffer = ({ suppId, productId, variantId, invItemId, stock, cost }) => {
-    const k = offerKey(suppId, variantId);
-    const prev = offers[k] || {};
-    offers[k] = {
-      suppId, productId, variantId,
-      invItemId: invItemId || prev.invItemId || null,
-      stock: Math.max(0, parseInt(stock) || 0),
-      cost: (cost === null || cost === undefined || isNaN(parseFloat(cost))) ? (prev.cost ?? null) : parseFloat(cost),
-      lastSeen: new Date(now).toISOString(),
-      absentSince: null, absentCount: 0,
-    };
-  };
-  const markOfferAbsent = (suppId, variantId) => {
-    const o = offers[offerKey(suppId, variantId)];
-    if (!o) return false;
-    const hadStock = (o.stock || 0) > 0;
-    o.stock = 0;
-    o.absentCount = (o.absentCount || 0) + 1;
-    if (!o.absentSince) o.absentSince = new Date(now).toISOString();
-    return hadStock;
-  };
-  const offersForVariant = (variantId) =>
-    Object.values(offers).filter(o => o.variantId === variantId)
-      .sort((a, b) => priorityOf(a.suppId) - priorityOf(b.suppId));
-  const resolveEffectiveOffer = (variantId, overrides = {}) => {
-    const candidates = [];
-    for (const o of offersForVariant(variantId)) {
-      const stock = (o.suppId in overrides) ? overrides[o.suppId] : o.stock;
-      const current = (o.suppId in overrides) ? true : offerIsCurrent(o);
-      if (current && stock > 0) candidates.push({ ...o, stock });
-    }
-    for (const suppId in overrides) {
-      if (overrides[suppId] > 0 && !candidates.some(c => c.suppId === suppId) &&
-          !offersForVariant(variantId).some(o => o.suppId === suppId)) {
-        candidates.push({ suppId, variantId, stock: overrides[suppId], cost: null });
-      }
-    }
-    if (!candidates.length) return null;
-    candidates.sort((a, b) => priorityOf(a.suppId) - priorityOf(b.suppId));
-    return candidates[0];
-  };
-  return { offers, priorityOf, offerIsCurrent, upsertOffer, markOfferAbsent, offersForVariant, resolveEffectiveOffer };
-}
-
 // ─── Identidade a partir de alertas (espelho de index.html: suggestIdentityFromAlerts)
 // Para produtos criados sem EAN/SKU (ex.: split de variantes cujo original não
 // tinha códigos): procura o alerta de fornecedor com nome mais parecido e
@@ -317,34 +262,14 @@ export function suggestIdentityFromAlerts(title, alerts, { minScore = 90, nameSi
   return best; // { alert, score } | null
 }
 
-// ─── Política de preço (espelho de index.html: decidePriceAction) ──────────────
-// O preço tem um DONO: o fornecedor cujas regras o definiram, ou 'manual'
-// (humano). Troca de fornecedor por disponibilidade NUNCA reprecifica sozinha:
-// um fornecedor automático só aplica preço se for o gestor E o dono; caso
-// contrário propõe (conflito visível, aceitação transfere a posse).
-//   → 'apply'   aplica automaticamente (e define a posse)
-//   → 'propose' mostra sugestão sem aplicar (conflito de posse)
-//   → 'none'    não mexe (modo manual, sem alteração, ou gerido por outro)
-export function decidePriceAction({ supplier, managedBy, priceOwner, priceChanged }) {
-  if (!priceChanged) return 'none';
-  if (supplier.pricingMode === 'manual') return 'none'; // manual: só por ✏ humano
-  if (managedBy) return 'none';                          // outro fornecedor gere
-  if (!priceOwner || priceOwner === supplier.id) return 'apply';
-  return 'propose';
-}
-
-// Posse resultante de uma aplicação de preço por upload/aceitação.
-export function priceOwnerAfterApply(supplier) {
-  return supplier.pricingMode === 'manual' ? 'manual' : supplier.id;
-}
-
 // ─── Health check pós-upload V2 (espelho de index.html: runPostUploadHealthCheck)
-// Classificação PURA (sem side-effects Shopify): a UI executa o que isto decide.
-// Devolve guards em vez de abrir modals — os testes verificam os travões.
-export function classifyAbsences({ supplier, suppliers, shopifyProducts, processedSkus, engine, isNewRows = [], uploadHistory = [], nameSim = nameSimilarity }) {
+// Modelo DONO FIXO: o produto pertence ao fornecedor da tag sup:. Ausências do
+// dono → zero automático (com travões) / vigilância / proteção de mudança de
+// EAN. Classificação PURA (sem side-effects Shopify).
+export function classifyAbsences({ supplier, shopifyProducts, processedSkus, isNewRows = [], uploadHistory = [], nameSim = nameSimilarity }) {
   const suppTag = `sup:${supplier.id}`;
   const out = { ok: 0, missing: [], coveragePct: 100, avgExpected: 0, guard: null,
-                toZero: [], toHandover: [], watched: [], alreadyZero: [], skipped: [], eanChange: [], massBrake: false };
+                toZero: [], watched: [], alreadyZero: [], eanChange: [], massBrake: false };
 
   const tagged = shopifyProducts.filter(p => p.tags && p.tags.includes(suppTag) && (p.status || 'ACTIVE') === 'ACTIVE');
   if (!tagged.length) return out;
@@ -370,8 +295,6 @@ export function classifyAbsences({ supplier, suppliers, shopifyProducts, process
   const canCheckEan = isNewRows.length > 0 && isNewRows.length <= 1500;
 
   for (const p of out.missing) {
-    for (const v of (p.variants || [])) engine.markOfferAbsent(supplier.id, v.id);
-    const v0 = p.variants[0];
     const currentStock = p.variants.reduce((a, v) => a + (v.stock || 0), 0);
     if (currentStock <= 0) { out.alreadyZero.push(p); continue; }
 
@@ -385,16 +308,6 @@ export function classifyAbsences({ supplier, suppliers, shopifyProducts, process
       if (best) { out.eanChange.push({ product: p, candidate: best.row, score: best.score }); continue; }
     }
 
-    const eff = engine.resolveEffectiveOffer(v0?.id);
-    if (eff && eff.suppId !== supplier.id && eff.stock > 0) { out.toHandover.push({ product: p, offer: eff }); continue; }
-
-    const otherSup = (p.tags || []).filter(t => t.startsWith('sup:') && t !== suppTag).map(t => t.slice(4))
-      .find(id => { const s = suppliers.find(x => x.id === id); return s && s.active; });
-    if (otherSup && !engine.offersForVariant(v0?.id).some(o => o.suppId === otherSup)) {
-      out.skipped.push({ product: p, reason: `aguarda upload de ${otherSup}` });
-      continue;
-    }
-
     if (supplier.absencePolicy === 'manter') { out.watched.push({ product: p }); continue; }
     out.toZero.push({ product: p });
   }
@@ -405,13 +318,10 @@ export function classifyAbsences({ supplier, suppliers, shopifyProducts, process
   return out;
 }
 
-// Compat: assinatura antiga usada pelo run-teletech.mjs (mantém verificação de
-// falsos-missing). Traduz para o motor novo com política do supplier.
-export function runPostUploadHealthCheck({ supplier, suppliers = null, shopifyProducts, processedSkus, uploadHistory = [], offers = {}, isNewRows = [] }) {
-  const supps = suppliers || [supplier];
-  const engine = makeOfferEngine(supps, offers);
+// Compat: assinatura usada pelo run-teletech.mjs.
+export function runPostUploadHealthCheck({ supplier, shopifyProducts, processedSkus, uploadHistory = [], isNewRows = [] }) {
   const supp = { absencePolicy: 'zero', ...supplier };
-  const r = classifyAbsences({ supplier: supp, suppliers: supps, shopifyProducts, processedSkus, engine, isNewRows, uploadHistory });
+  const r = classifyAbsences({ supplier: supp, shopifyProducts, processedSkus, isNewRows, uploadHistory });
   const action = r.guard === 'broken-mapping' ? 'abort-broken-mapping'
     : r.guard === 'low-coverage-confirm' ? 'confirm-low-coverage'
     : r.toZero.length ? 'auto-zero' : (r.missing.length ? 'no-action-needed' : 'all-updated');

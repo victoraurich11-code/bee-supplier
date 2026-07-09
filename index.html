@@ -769,20 +769,12 @@ let state = {
   productAliases: DB.get('productAliases', []),       // [{ id, canonicalId, suppId, sku, barcode, source, confidence, addedAt, addedBy }]
   negativeMatches: DB.get('negativeMatches', []),     // [{ canonicalId, suppId, sku, barcode, rejectedAt }]
   pageUsage: DB.get('pageUsage', {}),                  // { [page]: { count, firstVisited, lastVisited } } — instrumentação para decidir consolidações
-  // ── Ofertas por fornecedor (motor multi-fornecedor) ──
-  // A verdade de "o que cada fornecedor tem AGORA" vive aqui, por variante Shopify.
-  // key = `${suppId}::${variantId}`. Absent do último upload → stock:0 + absentSince.
-  supplierOffers: DB.get('supplierOffers', {}),        // { [suppId::variantId]: { suppId, productId, variantId, invItemId, stock, cost, lastSeen, absentSince, absentCount } }
-  // Posse do preço por variante: quem definiu o preço atual ('manual' = humano,
-  // senão suppId). Troca de fornecedor por disponibilidade nunca reprecifica:
-  // um fornecedor automático só aplica preço se for gestor E dono; senão propõe.
-  priceOwners: DB.get('priceOwners', {}),              // { [variantId]: { owner: suppId|'manual', setAt } }
   parsedRows: [], uploadSuppId: null, colMap: {}, analysisResult: null,
 };
 
 function save() {
   // Dados críticos guardados primeiro — nunca devem ser perdidos
-  ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','kkCache','productCanonicals','productAliases','negativeMatches','supplierOffers','priceOwners'].forEach(k => DB.set(k, state[k]));
+  ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','kkCache','productCanonicals','productAliases','negativeMatches'].forEach(k => DB.set(k, state[k]));
   // Cache Shopify: pode ser grande (>5MB) e causar quota exceeded.
   // Guardado por último e de forma isolada para não bloquear os dados críticos acima.
   try {
@@ -851,7 +843,7 @@ async function saveToCloud() {
   const force = _cloudForceSync;
   _cloudForceSync = false;
   try {
-    const allKeys = ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','shopifyProducts','productCanonicals','productAliases','negativeMatches','supplierOffers','priceOwners'];
+    const allKeys = ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','shopifyProducts','productCanonicals','productAliases','negativeMatches'];
     // Avalia guards em paralelo para chaves críticas
     const guardChecks = await Promise.all(CLOUD_GUARDED_KEYS.map(async k => {
       if (force) return { k, allow: true };
@@ -910,7 +902,7 @@ async function loadFromCloud() {
     const map = Object.fromEntries(rows.map(r => [r.key, r.value]));
     // Aplicar com validação de tipo — garante que arrays são arrays e objetos são objetos
     const arrayKeys = ['suppliers','alerts','uploadHistory','matches','costAlerts','shopifyProducts','productAliases','negativeMatches'];
-    const objectKeys = ['skuHealth','costHistory','productCanonicals','supplierOffers','priceOwners'];
+    const objectKeys = ['skuHealth','costHistory','productCanonicals'];
     arrayKeys.forEach(k => { if (Array.isArray(map[k])) state[k] = map[k]; });
     objectKeys.forEach(k => { if (map[k] && typeof map[k]==='object' && !Array.isArray(map[k])) state[k] = map[k]; });
     // Restaura settings da cloud mas preserva as credenciais locais (supabase + shopify token)
@@ -919,7 +911,7 @@ async function loadFromCloud() {
       state.settings = { ...DEFAULT_SETTINGS, ...map.settings, ...keep };
     }
     // Persiste no localStorage para offline
-    ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','productCanonicals','productAliases','negativeMatches','supplierOffers','priceOwners'].forEach(k => DB.set(k, state[k]));
+    ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','productCanonicals','productAliases','negativeMatches'].forEach(k => DB.set(k, state[k]));
     try { localStorage.setItem('bsm3_shopifyProducts', JSON.stringify(state.shopifyProducts)); } catch {}
     // Restaura tek4life_mapping
     if (map.tek4life_mapping && typeof map.tek4life_mapping === 'object' && !Array.isArray(map.tek4life_mapping)) {
@@ -1129,12 +1121,12 @@ const YYYYMM = () => new Date().toISOString().slice(0,7);
 
 function buildTagUpdate(existingTags, newTags, removeTags=[]) {
   // Remove old cat: and specified tags, add new ones, keep everything else.
-  // `sup:` é ADITIVA: um produto pode ser fornecido por vários fornecedores em
-  // simultâneo. Antes desta correção, cada upload substituía a tag sup: do outro
-  // fornecedor ("roubo" de ownership) e o preço/stock alternava entre listagens.
+  // Modelo DONO FIXO: um produto tem exatamente UMA tag sup: (o dono). O apply
+  // só chega aqui para produtos do próprio fornecedor ou sem dono, por isso a
+  // substituição por prefixo nunca "rouba" produtos de outra listagem.
   const filtered = existingTags.filter(t => !removeTags.includes(t) && !CAT_TAGS.some(ct => t === ct) && !t.startsWith('last-seen:') && !newTags.some(nt => {
     const prefix = nt.split(':')[0]+':';
-    return t.startsWith(prefix) && prefix !== 'cat:' && prefix !== 'bsm:' && prefix !== 'sup:';
+    return t.startsWith(prefix) && prefix !== 'cat:' && prefix !== 'bsm:';
   }));
   return [...new Set([...filtered, ...newTags])];
 }
@@ -1166,172 +1158,6 @@ async function applyWatchTag(productId, existingTags, suppId, missedCount) {
   return finalTags;
 }
 
-// ═══════════════════════════════════════════
-// SUPPLIER OFFERS — motor multi-fornecedor
-// ═══════════════════════════════════════════
-// Cada fornecedor tem uma "oferta" por variante Shopify: o stock e custo que a
-// SUA última listagem trouxe. O stock/preço efetivo do produto resolve-se a
-// partir das ofertas atuais, por prioridade de fornecedor. Isto elimina o
-// flip-flop entre listagens e permite: ausente num fornecedor → passa ao
-// seguinte com stock; ausente em todos → zero.
-
-const OFFER_TTL_MS = 7 * 24 * 3600 * 1000; // oferta sem upload há >7 dias deixa de contar
-
-function offerKey(suppId, variantId) { return `${suppId}::${variantId}`; }
-
-function getSupplierPriority(suppId) {
-  const idx = state.suppliers.findIndex(s => s.id === suppId);
-  if (idx === -1) return 9999;
-  const s = state.suppliers[idx];
-  return (typeof s.priority === 'number' && !isNaN(s.priority)) ? s.priority : (idx + 1) * 10;
-}
-
-function offerIsCurrent(o) {
-  if (!o || !o.lastSeen) return false;
-  const supp = state.suppliers.find(s => s.id === o.suppId);
-  if (!supp || !supp.active) return false;
-  return (Date.now() - new Date(o.lastSeen).getTime()) <= OFFER_TTL_MS;
-}
-
-function upsertOffer({ suppId, productId, variantId, invItemId, stock, cost }) {
-  if (!suppId || !variantId) return;
-  const k = offerKey(suppId, variantId);
-  const prev = state.supplierOffers[k] || {};
-  state.supplierOffers[k] = {
-    suppId, productId, variantId,
-    invItemId: invItemId || prev.invItemId || null,
-    stock: Math.max(0, parseInt(stock) || 0),
-    cost: (cost === null || cost === undefined || isNaN(parseFloat(cost))) ? (prev.cost ?? null) : parseFloat(cost),
-    lastSeen: new Date().toISOString(),
-    absentSince: null,
-    absentCount: 0,
-  };
-}
-
-// Marca a oferta como ausente do último upload (stock passa a 0 nesse fornecedor).
-// Devolve true se foi uma TRANSIÇÃO (a oferta tinha stock > 0) — só transições
-// justificam ação; ausências repetidas de produtos já a zero são no-ops.
-function markOfferAbsent(suppId, variantId) {
-  const k = offerKey(suppId, variantId);
-  const o = state.supplierOffers[k];
-  if (!o) return false;
-  const hadStock = (o.stock || 0) > 0;
-  o.stock = 0;
-  o.absentCount = (o.absentCount || 0) + 1;
-  if (!o.absentSince) o.absentSince = new Date().toISOString();
-  return hadStock;
-}
-
-function offersForVariant(variantId) {
-  const out = [];
-  for (const k in state.supplierOffers) {
-    const o = state.supplierOffers[k];
-    if (o.variantId === variantId) out.push(o);
-  }
-  return out.sort((a, b) => getSupplierPriority(a.suppId) - getSupplierPriority(b.suppId));
-}
-
-// Melhor oferta ATUAL com stock > 0 para a variante, por prioridade.
-// `overrides` = { [suppId]: stockSimulado } permite simular "e se o fornecedor S
-// tivesse o stock de hoje" antes de gravar (usado no doAnalysis).
-function resolveEffectiveOffer(variantId, overrides = {}) {
-  const candidates = [];
-  for (const o of offersForVariant(variantId)) {
-    const stock = (o.suppId in overrides) ? overrides[o.suppId] : o.stock;
-    const current = (o.suppId in overrides) ? true : offerIsCurrent(o);
-    if (current && stock > 0) candidates.push({ ...o, stock });
-  }
-  // overrides de fornecedores sem oferta registada ainda
-  for (const suppId in overrides) {
-    if (overrides[suppId] > 0 && !candidates.some(c => c.suppId === suppId) &&
-        !offersForVariant(variantId).some(o => o.suppId === suppId)) {
-      candidates.push({ suppId, variantId, stock: overrides[suppId], cost: null });
-    }
-  }
-  if (!candidates.length) return null;
-  candidates.sort((a, b) => getSupplierPriority(a.suppId) - getSupplierPriority(b.suppId));
-  return candidates[0];
-}
-
-// Preço de venda segundo as regras do fornecedor. null = não tocar no preço
-// (modo manual, ou custo desconhecido).
-function priceFromOffer(supp, cost) {
-  if (!supp || supp.pricingMode === 'manual') return null;
-  if (cost === null || cost === undefined || isNaN(parseFloat(cost))) return null;
-  const c = parseFloat(cost);
-  const raw = supp.priceType === 'pvp' ? c : c * (1 + (supp.margin || 0) / 100);
-  return applyPriceRounding(raw, supp.rounding);
-}
-
-// ── Migração one-shot: políticas de fornecedor + seed de ofertas ──
-// absencePolicy: 'zero'   → ausência da listagem = stock 0 nesse fornecedor (imediato)
-//                'manter' → ausência só marca vigilância; zero manual via Saúde
-function migrateSuppliersV2() {
-  let changed = false;
-  state.suppliers.forEach((s, idx) => {
-    if (!s.absencePolicy) {
-      // Todas as listagens atuais (Teletech, Depau, PcComponentes, Tek4life) são
-      // snapshots diários de disponibilidade: ausência significa "sem stock hoje".
-      s.absencePolicy = 'zero';
-      changed = true;
-    }
-    if (typeof s.priority !== 'number') { s.priority = (idx + 1) * 10; changed = true; }
-  });
-  return changed;
-}
-
-// Seed inicial: constrói ofertas a partir das tags sup: + stock atual da Shopify,
-// para o motor funcionar já no primeiro upload após o deploy (sem esperar que
-// todos os fornecedores façam upload). Corre uma vez (marker em settings).
-function seedOffersFromTags() {
-  if (state.settings.offersSeededAt) return 0;
-  let seeded = 0;
-  for (const p of state.shopifyProducts) {
-    const supTags = (p.tags || []).filter(t => t.startsWith('sup:')).map(t => t.slice(4));
-    if (!supTags.length) continue;
-    for (const suppId of supTags) {
-      const supp = state.suppliers.find(s => s.id === suppId);
-      if (!supp) continue;
-      for (const v of (p.variants || [])) {
-        const k = offerKey(suppId, v.id);
-        if (state.supplierOffers[k]) continue;
-        state.supplierOffers[k] = {
-          suppId, productId: p.id, variantId: v.id, invItemId: v.inventoryItemId || null,
-          stock: Math.max(0, v.stock || 0), cost: null,
-          lastSeen: supp.lastUpload || new Date().toISOString(),
-          absentSince: null, absentCount: 0,
-        };
-        seeded++;
-      }
-    }
-  }
-  state.settings.offersSeededAt = new Date().toISOString();
-  return seeded;
-}
-
-// ── POLÍTICA DE PREÇO (posse) ───────────────────────────────
-// O preço tem um DONO: 'manual' (definido à mão) ou o fornecedor cujas regras
-// o calcularam. Troca de fornecedor por disponibilidade NUNCA reprecifica
-// sozinha: um fornecedor automático só APLICA preço se for o gestor E o dono;
-// sobre posse alheia apenas PROPÕE (aceitar transfere a posse).
-function decidePriceAction({ supplier, managedBy, priceOwner, priceChanged }) {
-  if (!priceChanged) return 'none';
-  if (supplier.pricingMode === 'manual') return 'none'; // manual: só por ✏ humano
-  if (managedBy) return 'none';                          // outro fornecedor gere
-  if (!priceOwner || priceOwner === supplier.id) return 'apply';
-  return 'propose';
-}
-function priceOwnerAfterApply(supplier) {
-  return supplier.pricingMode === 'manual' ? 'manual' : supplier.id;
-}
-function setPriceOwner(variantId, owner) {
-  if (!variantId || !owner) return;
-  state.priceOwners[variantId] = { owner, setAt: new Date().toISOString() };
-}
-function getPriceOwner(variantId) {
-  return state.priceOwners[variantId]?.owner || null;
-}
-
 // ── IDENTIDADE A PARTIR DE ALERTAS ──────────────────────────
 // Para produtos criados sem EAN/SKU (ex.: split de variantes cujo original não
 // tinha códigos por variante): procura o alerta de fornecedor com o nome mais
@@ -1349,58 +1175,19 @@ function suggestIdentityFromAlerts(title, { minScore = 90 } = {}) {
   return best; // { alert, score } | null
 }
 
-// Alerta de revisão de preço (dedup por variante+fornecedor sugerente).
-// Criado quando um fornecedor propõe preço sobre posse alheia, ou num handover
-// em que o novo fornecedor tem regra de preço própria.
-function upsertPriceReviewAlert({ productId, variantId, title, current, suggested, fromOwner, suppId }) {
-  const supp = state.suppliers.find(s => s.id === suppId);
-  const existing = state.alerts.find(a => a.type === 'price_review' && !a.dismissed && a.variantId === variantId && a.suppId === suppId);
-  const payload = {
-    type: 'price_review',
-    title: 'Preço a rever (troca de fornecedor)',
-    desc: `${title} — preço atual €${Number(current).toFixed(2)} (posse: ${fromOwner === 'manual' ? 'manual' : (state.suppliers.find(s=>s.id===fromOwner)?.name || fromOwner || 'n/d')}); regra ${supp?.name || suppId} daria €${Number(suggested).toFixed(2)}`,
-    productId, variantId, suppId,
-    currentPrice: Number(current), suggestedPrice: Number(suggested),
-  };
-  if (existing) {
-    Object.assign(existing, payload);
-    existing.seenCount = (existing.seenCount || 1) + 1;
-    existing.lastSeen = new Date().toISOString();
-  } else {
-    state.alerts.push({ ...payload, id: 'alert_' + Date.now() + Math.random(), date: new Date().toISOString(), lastSeen: new Date().toISOString(), seenCount: 1, dismissed: false });
-  }
-}
-
-// Aceitar a sugestão de preço de um alerta price_review: aplica o preço,
-// transfere a posse para o fornecedor sugerente e dispensa o alerta.
-window.applyPriceReview = async function(alertId) {
-  const a = state.alerts.find(x => x.id === alertId);
-  if (!a || a.type !== 'price_review') return;
-  const p = state.shopifyProducts.find(x => x.id === a.productId);
-  try {
-    await updateVariantPrice(a.productId, a.variantId, a.suggestedPrice.toFixed(2));
-    const v = p?.variants.find(x => x.id === a.variantId);
-    if (v) v.price = a.suggestedPrice.toFixed(2);
-    setPriceOwner(a.variantId, a.suppId);
-    a.dismissed = true;
-    save(); updateBadges();
-    toast(`✓ Preço €${a.suggestedPrice.toFixed(2)} aplicado — posse passa a ${state.suppliers.find(s=>s.id===a.suppId)?.name || a.suppId}`, 'success');
-    document.getElementById('alert-' + alertId)?.remove();
-  } catch (e) { toast(`Erro ao aplicar preço: ${e.message}`, 'error'); }
-};
-
 // ═══════════════════════════════════════════
-// POST-UPLOAD HEALTH CHECK (motor de ofertas)
-// Produtos tagged sup:<suppId> ausentes deste upload:
-//   1. oferta desse fornecedor passa a stock 0
-//   2. outro fornecedor com stock atual? → handover automático (stock/preço dele)
-//   3. senão, política 'zero' → stock zerado automaticamente (com travões)
-//   4. produtos já a zero → contador silencioso, sem ação nem alerta repetido
+// POST-UPLOAD HEALTH CHECK (dono fixo)
+// O produto pertence ao fornecedor da sua tag sup: e só esse upload lhe toca.
+// Produtos do fornecedor ausentes deste upload:
+//   - com stock e política 'zero' → stock zerado automaticamente (com travões)
+//   - possível mudança de EAN (nome ≥95% numa linha nova) → protegido, relatório
+//   - já a zero → silêncio (sem ação nem alerta repetido)
+//   - política 'manter' → só tags de vigilância
 // Devolve um relatório para o ecrã pós-upload; nenhum modal no fluxo diário.
 // ═══════════════════════════════════════════
 async function runPostUploadHealthCheck(suppId, processedSkus) {
   const supp = state.suppliers.find(s=>s.id===suppId);
-  const report = { zeroed: [], handedOver: [], watched: [], alreadyZero: 0, skipped: [], eanChange: [], errors: [], coveragePct: 100, ok: 0 };
+  const report = { zeroed: [], watched: [], alreadyZero: 0, eanChange: [], errors: [], coveragePct: 100, ok: 0 };
   if (!supp) return report;
 
   const suppTag = `sup:${suppId}`;
@@ -1455,14 +1242,8 @@ async function runPostUploadHealthCheck(suppId, processedSkus) {
   const canCheckEanChange = isNewRows.length > 0 && isNewRows.length <= 1500;
 
   // Classificação de cada produto ausente
-  const toZero = [], toHandover = [];
+  const toZero = [];
   for (const p of missing) {
-    // Oferta deste fornecedor passa a 0 em todas as variantes
-    let hadStockAtSupp = false;
-    for (const v of (p.variants||[])) {
-      if (markOfferAbsent(suppId, v.id)) hadStockAtSupp = true;
-    }
-    const v0 = p.variants[0];
     const currentStock = p.variants.reduce((a,v)=>a+(v.stock||0),0);
 
     if (currentStock <= 0) { report.alreadyZero++; continue; }
@@ -1477,22 +1258,6 @@ async function runPostUploadHealthCheck(suppId, processedSkus) {
         if (score >= 95 && (!best || score > best.score)) best = { row, score };
       }
       if (best) { report.eanChange.push({ product: p, candidate: best.row, score: best.score }); continue; }
-    }
-
-    // Outro fornecedor com oferta atual e stock? → handover
-    const eff = resolveEffectiveOffer(v0?.id);
-    if (eff && eff.suppId !== suppId && eff.stock > 0) {
-      toHandover.push({ product: p, offer: eff });
-      continue;
-    }
-
-    // Outro fornecedor tagged mas ainda sem oferta registada (motor novo, ainda
-    // não fez upload)? Conservador: não zerar até esse fornecedor correr.
-    const otherSup = (p.tags||[]).filter(t=>t.startsWith('sup:') && t!==suppTag).map(t=>t.slice(4))
-      .find(id => { const s = state.suppliers.find(x=>x.id===id); return s && s.active; });
-    if (otherSup && !offersForVariant(v0?.id).some(o => o.suppId === otherSup)) {
-      report.skipped.push({ product: p, reason: `aguarda upload de ${state.suppliers.find(s=>s.id===otherSup)?.name || otherSup}` });
-      continue;
     }
 
     if (supp.absencePolicy === 'manter') {
@@ -1516,37 +1281,6 @@ async function runPostUploadHealthCheck(suppId, processedSkus) {
   }
 
   const locationId = await getLocationId().catch(()=>null);
-
-  // Execução: handovers — SÓ STOCK. O preço nunca muda por troca de fornecedor:
-  // se o novo fornecedor tem regra de preço própria e o valor diverge, fica uma
-  // sugestão no relatório + alerta "Preço a rever" (aceitar transfere a posse).
-  for (const h of toHandover) {
-    const p = h.product, off = h.offer;
-    const winner = state.suppliers.find(s=>s.id===off.suppId);
-    try {
-      const v = p.variants[0];
-      if (locationId && v?.inventoryItemId) await updateVariantStock(v.inventoryItemId, locationId, off.stock);
-      const newTags = buildTagUpdate(p.tags||[], [`sup:${off.suppId}`, 'cat:atualizado', `last-seen:${YYYYMM()}`]);
-      await updateProductTags(p.id, newTags);
-      // cache local
-      p.tags = newTags;
-      if (v) v.stock = off.stock;
-      // Sugestão de preço do novo fornecedor (não aplicada)
-      let suggested = null;
-      const currentPrice = parseFloat(v?.price) || 0;
-      const target = priceFromOffer(winner, off.cost);
-      if (target !== null && currentPrice > 0 && target.toFixed(2) !== currentPrice.toFixed(2)) {
-        suggested = target;
-        upsertPriceReviewAlert({
-          productId: p.id, variantId: v.id, title: p.title,
-          current: currentPrice, suggested: target,
-          fromOwner: getPriceOwner(v.id), suppId: off.suppId,
-        });
-      }
-      report.handedOver.push({ title: p.title, from: supp.name, to: winner?.name || off.suppId, stock: off.stock, price: null, suggested, current: currentPrice });
-    } catch(e) { report.errors.push(`Handover ${p.title.slice(0,40)}: ${e.message}`); }
-    await sleep(350);
-  }
 
   // Execução: zeros automáticos (só transições stock>0 → 0)
   if (zeroApproved) {
@@ -2406,7 +2140,6 @@ window.healApplyEan = async function(productId, variantId, invItemId, alertId) {
     p.tags = newTags;
     const v = p.variants.find(x => x.id === variantId);
     if (v) { v.sku = sku || v.sku; v.barcode = ean || v.barcode; v.stock = stock; }
-    upsertOffer({ suppId: a.suppId, productId, variantId, invItemId, stock, cost: a.price });
     a.dismissed = true;
     save();
     toast(`✓ ${p.title.slice(0,40)} ligado a ${supp?.name || a.suppId} — stock ${stock} aplicado`, 'success');
@@ -2525,7 +2258,6 @@ function supplierCard(s, pendingCostAlerts) {
         + '<span class="badge ' + (s.absencePolicy==='manter'?'badge-orange':'badge-green') + '" style="font-size:10px" title="' + (s.absencePolicy==='manter'?'Ausências só marcam vigilância; nada é zerado automaticamente':'Produto ausente da listagem → stock zerado (ou entregue a outro fornecedor com stock)') + '">'
           + (s.absencePolicy==='manter'?'Ausente: vigiar':'Ausente: zerar')
         + '</span>'
-        + '<span class="badge badge-gray" style="font-size:10px" title="Prioridade entre fornecedores (mais baixo ganha)">P' + (typeof s.priority==='number'?s.priority:10) + '</span>'
         + costAlertBadge
       + '</div>'
       + healthBar
@@ -2697,7 +2429,7 @@ function recoverSuppliersFromTags() {
   if (!confirm(`Foram encontrados ${missing.length} fornecedor(es) referenciado(s) nas tags Shopify mas em falta na lista:\n\n${missing.join(', ')}\n\nReconstruir com defaults (active:true, threshold:3)?`)) return;
   for (const id of missing) {
     const niceName = id.charAt(0).toUpperCase() + id.slice(1);
-    state.suppliers.push({ id, name: niceName, active: true, zeroThreshold: 3, lastUpload: null, absencePolicy: 'zero', priority: (state.suppliers.length + 1) * 10 });
+    state.suppliers.push({ id, name: niceName, active: true, zeroThreshold: 3, lastUpload: null, absencePolicy: 'zero' });
   }
   save();
   suppliers();
@@ -2793,17 +2525,10 @@ function openSupplierModal(id=null) {
           <span><strong>Manter stock e vigiar</strong> <span style="color:var(--text2);font-size:11px;display:block">Para listagens parciais/incompletas por natureza. Ausências só marcam o produto para revisão na Saúde do Catálogo; nada é zerado automaticamente.</span></span>
         </label>
       </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label>Prioridade entre fornecedores</label>
-          <input type="number" id="s-priority" value="${typeof s?.priority==='number'?s.priority:10}" min="1" max="999" step="1">
-          <span style="font-size:11px;color:var(--text2)">Número mais baixo = mais prioritário. Quando dois fornecedores têm o mesmo produto com stock, o mais prioritário gere o stock e o preço.</span>
-        </div>
-        <div class="form-group">
-          <label>Uploads ausente até marcar "crítico"</label>
-          <input type="number" id="s-zerothreshold" value="${s?.zeroThreshold||4}" min="1" max="20" step="1">
-          <span style="font-size:11px;color:var(--text2)">Só afeta as tags de saúde (vigilância/crítico), não o stock.</span>
-        </div>
+      <div class="form-group">
+        <label>Uploads ausente até marcar "crítico"</label>
+        <input type="number" id="s-zerothreshold" value="${s?.zeroThreshold||4}" min="1" max="20" step="1">
+        <span style="font-size:11px;color:var(--text2)">Só afeta as tags de saúde (vigilância/crítico), não o stock.</span>
       </div>
       <div style="border-top:1px solid var(--border);padding-top:14px">
         <div class="card-title">Mapeamento de Colunas</div>
@@ -2849,7 +2574,6 @@ function saveSupplier(id) {
     colStatus: document.getElementById('s-colstatus').value.trim(),
     pricingMode: document.getElementById('s-pricingmode')?.value || 'automatico',
     absencePolicy: document.querySelector('input[name="s-absence"]:checked')?.value || 'zero',
-    priority: parseInt(document.getElementById('s-priority')?.value) || 10,
     lastUpload: id ? state.suppliers.find(s=>s.id===id)?.lastUpload : null,
   };
   if(id) state.suppliers = state.suppliers.map(s=>s.id===id?data:s);
@@ -3129,20 +2853,15 @@ function runAnalysis() {
         const priceChanged = currentShopifyPrice.toFixed(2) !== effectiveFinalPrice.toFixed(2);
         const stockChanged = (match.variant.stock ?? 0) !== stockVal;
 
-        // Motor de ofertas: este fornecedor só gere stock/preço da variante se,
-        // com o stock de hoje, for a melhor oferta atual (por prioridade).
-        // Senão a linha fica visível mas sem aplicar nada (a oferta é registada
-        // na mesma no applyChanges) — fim do flip-flop entre listagens.
-        const winner = resolveEffectiveOffer(match.variant.id, { [supp.id]: stockVal });
-        const managedBy = (winner && winner.suppId !== supp.id) ? winner.suppId : null;
+        // DONO FIXO: o produto pertence ao fornecedor da sua tag sup: e só o
+        // upload desse fornecedor lhe mexe. Linhas de produtos de OUTRO
+        // fornecedor ficam visíveis ("pertence a X") mas nada é aplicado.
+        // Produtos sem dono são reclamados por este upload ao aplicar.
+        const ownerId = (match.product.tags || [])
+          .filter(t => t.startsWith('sup:')).map(t => t.slice(4))
+          .find(id => state.suppliers.some(s => s.id === id)) || null;
+        const managedBy = (ownerId && ownerId !== supp.id) ? ownerId : null;
         const managedByName = managedBy ? (state.suppliers.find(s=>s.id===managedBy)?.name || managedBy) : null;
-
-        // Posse do preço: automático só aplica se for gestor E dono; sobre posse
-        // alheia (ex.: preço manual do Victor num produto que passou p/ Depau)
-        // apenas propõe — a linha aparece com aviso e checkbox desmarcada.
-        const priceOwner = getPriceOwner(match.variant.id);
-        const priceAction = decidePriceAction({ supplier: supp, managedBy, priceOwner, priceChanged });
-        const priceOwnerName = priceOwner === 'manual' ? 'manual' : (priceOwner ? (state.suppliers.find(s=>s.id===priceOwner)?.name || priceOwner) : null);
 
         const rowData = { name, sku, barcode, stockVal, costRaw, rawPrice: effectiveRawPrice, finalPrice: effectiveFinalPrice, suppId: supp.id, suppName: supp.name, histKey };
         found.push({
@@ -3154,10 +2873,8 @@ function runAnalysis() {
           currentStock: match.variant.stock ?? 0,
           matchedBy,
           managedBy, managedByName,
-          priceOwner, priceOwnerName,
-          priceConflict: priceAction === 'propose',
           isDraft: (match.product.status || 'ACTIVE') === 'DRAFT',
-          applyPrice: priceAction === 'apply',
+          applyPrice: managedBy ? false : (isManual ? false : priceChanged), // manual: false por defeito, ativado ao editar com ✏
           applyStock: managedBy ? false : stockChanged,
           _selected: true,
           costChange,
@@ -3602,8 +3319,7 @@ function renderAnalysis(found, notFound, isNew, supp) {
               </td>
               <td>
                 <span class="badge ${p.matchedBy==='SKU'?'badge-blue':'badge-orange'}" style="font-size:10px">${p.matchedBy}</span>
-                ${p.managedBy?`<span class="badge badge-gray" style="font-size:10px;margin-left:4px" title="Outro fornecedor tem prioridade e stock para este produto. Stock/preço não serão alterados por este upload (podes forçar com as checkboxes).">🔒 ${p.managedByName}</span>`:''}
-                ${p.priceConflict?`<span class="badge badge-orange" style="font-size:10px;margin-left:4px" title="O preço atual foi definido por ${p.priceOwnerName==='manual'?'edição manual':p.priceOwnerName}. A regra deste fornecedor daria €${p.finalPrice.toFixed(2)}. Marca a checkbox 💶 para aceitar (a posse do preço passa para este fornecedor).">💶 rever (posse: ${p.priceOwnerName})</span>`:''}
+                ${p.managedBy?`<span class="badge badge-gray" style="font-size:10px;margin-left:4px" title="Este produto pertence ao fornecedor ${p.managedByName}. Este upload não lhe mexe (stock e preço são geridos pela listagem desse fornecedor). Para trocar o dono, muda a tag sup: do produto.">🔒 pertence a ${p.managedByName}</span>`:''}
                 ${p.isDraft?`<span class="badge badge-gray" style="font-size:10px;margin-left:4px" title="Produto em rascunho — recebe stock/preço mas não está publicado">rascunho</span>`:''}
               </td>
               <td style="text-align:center"><input type="checkbox" class="chk-price" data-idx="${i}" ${p.applyPrice?'checked':''} ${!priceChanged?'disabled':''} onchange="state.analysisResult.found[${i}].applyPrice=this.checked;updateApplySummary()"></td>
@@ -3730,7 +3446,7 @@ function editPrice(idx) {
   input.style.cssText='width:80px;padding:3px 6px;font-family:"DM Mono",monospace;font-size:12px;border:1px solid var(--blue);border-radius:5px;color:var(--text);background:var(--surface);outline:none;';
   const confirmBtn=document.createElement('button'); confirmBtn.textContent='✓'; confirmBtn.style.cssText='background:var(--green);color:white;border:none;border-radius:5px;padding:3px 7px;cursor:pointer;font-size:12px;margin-left:4px;';
   const cancelBtn=document.createElement('button'); cancelBtn.textContent='✕'; cancelBtn.style.cssText='background:var(--panel);color:var(--text2);border:1px solid var(--border);border-radius:5px;padding:3px 7px;cursor:pointer;font-size:12px;margin-left:3px;';
-  const save=()=>{ const newVal=parseFloat(input.value); if(isNaN(newVal)||newVal<=0){toast('Preço inválido','error');return;} p.finalPrice=newVal; p.applyPrice=true; p._manualPriceEdit=true; displayEl.textContent='€'+newVal.toFixed(2); displayEl.style.display=''; if(editBtn) editBtn.style.display=''; input.remove(); confirmBtn.remove(); cancelBtn.remove(); const priceChk=document.querySelector(`.chk-price[data-idx="${idx}"]`); if(priceChk){priceChk.disabled=false;priceChk.checked=true;} updateApplySummary(); toast('Preço atualizado','success'); };
+  const save=()=>{ const newVal=parseFloat(input.value); if(isNaN(newVal)||newVal<=0){toast('Preço inválido','error');return;} p.finalPrice=newVal; p.applyPrice=true; displayEl.textContent='€'+newVal.toFixed(2); displayEl.style.display=''; if(editBtn) editBtn.style.display=''; input.remove(); confirmBtn.remove(); cancelBtn.remove(); const priceChk=document.querySelector(`.chk-price[data-idx="${idx}"]`); if(priceChk){priceChk.disabled=false;priceChk.checked=true;} updateApplySummary(); toast('Preço atualizado','success'); };
   const cancel=()=>{ displayEl.style.display=''; if(editBtn) editBtn.style.display=''; input.remove(); confirmBtn.remove(); cancelBtn.remove(); };
   confirmBtn.onclick=save; cancelBtn.onclick=cancel; input.onkeydown=(e)=>{if(e.key==='Enter')save();if(e.key==='Escape')cancel();};
   parent.appendChild(input); parent.appendChild(confirmBtn); parent.appendChild(cancelBtn); input.focus(); input.select();
@@ -3817,13 +3533,7 @@ async function applyChanges() {
     setUI(undefined, undefined, undefined, Math.round((i/total)*85), shortTitle);
     setCount(i+1);
     try {
-      if(p.applyPrice) {
-        await updateVariantPrice(p.shopifyProduct.id, p.shopifyVariant.id, p.finalPrice.toFixed(2));
-        // Posse do preço: edição ✏ = humano; aplicação por regra = fornecedor.
-        // Aceitar um conflito (marcar 💶 numa linha "rever") também transfere posse.
-        setPriceOwner(p.shopifyVariant.id, p._manualPriceEdit ? 'manual' : priceOwnerAfterApply(supp));
-        priceUpdated++;
-      }
+      if(p.applyPrice) { await updateVariantPrice(p.shopifyProduct.id, p.shopifyVariant.id, p.finalPrice.toFixed(2)); priceUpdated++; }
       if(p.applyStock&&locationId&&p.shopifyVariant.inventoryItemId) {
         try {
           await shopifyGQL(`mutation($id:ID!,$input:InventoryItemInput!){inventoryItemUpdate(id:$id,input:$input){inventoryItem{id tracked}userErrors{message}}}`,{id:p.shopifyVariant.inventoryItemId,input:{tracked:true}});
@@ -3832,10 +3542,15 @@ async function applyChanges() {
           stockUpdated++;
         } catch(se){ addError(`Stock — ${shortTitle}: ${se.message}`); }
       }
-      const existingTags = p.shopifyProduct.tags||[];
-      await applyTagsToProduct(p.shopifyProduct.id, existingTags, state.uploadSuppId, 'cat:atualizado');
-      p.shopifyProduct.tags = buildTagUpdate(existingTags, [`sup:${state.uploadSuppId}`, 'cat:atualizado', `last-seen:${YYYYMM()}`]);
-      tagsApplied++; updated++;
+      // Tags só em produtos deste fornecedor (ou sem dono — este upload reclama-os).
+      // Linhas "pertence a X" forçadas à mão atualizam valores sem mudar o dono.
+      if (!p.managedBy) {
+        const existingTags = p.shopifyProduct.tags||[];
+        await applyTagsToProduct(p.shopifyProduct.id, existingTags, state.uploadSuppId, 'cat:atualizado');
+        p.shopifyProduct.tags = buildTagUpdate(existingTags, [`sup:${state.uploadSuppId}`, 'cat:atualizado', `last-seen:${YYYYMM()}`]);
+        tagsApplied++;
+      }
+      updated++;
     } catch(e){ addError(`${shortTitle}: ${e.message}`); errors++; }
     await sleep(320);
   }
@@ -3907,51 +3622,11 @@ async function applyChanges() {
     });
   }
 
-  // Motor de ofertas: regista a oferta de HOJE deste fornecedor para TODAS as
-  // linhas encontradas (mesmo as que não aplicaram nada — a listagem é a verdade
-  // do fornecedor, independentemente de quem gere o produto).
-  const managedNeedingTag = [];
-  found.filter(p => p._selected !== false).forEach(p => {
-    upsertOffer({
-      suppId: state.uploadSuppId,
-      productId: p.shopifyProduct.id,
-      variantId: p.shopifyVariant.id,
-      invItemId: p.shopifyVariant.inventoryItemId,
-      stock: p.stockVal,
-      cost: p.costRaw,
-    });
-    // O produto voltou a aparecer: limpa o contador de ausências da saúde
+  // O produto voltou a aparecer na listagem do seu fornecedor: limpa o
+  // contador de ausências da saúde (senão acumulava para sempre).
+  found.filter(p => p._selected !== false && !p.managedBy).forEach(p => {
     const hkey = (p.sku || p.barcode || '').toLowerCase();
     if (hkey && state.skuHealth[hkey]) delete state.skuHealth[hkey];
-    // Proveniência: produto gerido por outro fornecedor mas também listado por
-    // este → garante a tag sup: deste (sem tocar em stock/preço).
-    if (p.managedBy && !(p.shopifyProduct.tags || []).includes(`sup:${state.uploadSuppId}`)) {
-      managedNeedingTag.push(p);
-    }
-  });
-  for (const p of managedNeedingTag) {
-    try {
-      const newTags = buildTagUpdate(p.shopifyProduct.tags || [], [`sup:${state.uploadSuppId}`]);
-      await updateProductTags(p.shopifyProduct.id, newTags);
-      p.shopifyProduct.tags = newTags;
-      await sleep(250);
-    } catch(e) { console.warn('Tag proveniência:', e.message); }
-  }
-
-  // Conflitos de preço não aceites nesta análise → alerta de revisão (dedup),
-  // para a decisão não se perder quando o relatório fechar.
-  let priceReviews = 0;
-  found.filter(p => p._selected !== false && p.priceConflict && !p.applyPrice).forEach(p => {
-    upsertPriceReviewAlert({
-      productId: p.shopifyProduct.id,
-      variantId: p.shopifyVariant.id,
-      title: p.shopifyTitle,
-      current: p.currentPrice,
-      suggested: p.finalPrice,
-      fromOwner: p.priceOwner,
-      suppId: state.uploadSuppId,
-    });
-    priceReviews++;
   });
 
   const histEntry = { id:'upl_'+Date.now(), supplierId:state.uploadSuppId, supplierName:supp.name, date:new Date().toISOString(), total:uploadTotal, updated, errors, newProducts:isNew.length };
@@ -3972,10 +3647,8 @@ async function applyChanges() {
   if (healthReport) {
     histEntry.report = {
       zeroed: healthReport.zeroed.slice(0,100),
-      handedOver: healthReport.handedOver.slice(0,100),
       watched: healthReport.watched.length,
       alreadyZero: healthReport.alreadyZero,
-      skipped: healthReport.skipped.map(s=>({title:s.product.title, reason:s.reason})).slice(0,50),
       eanChange: healthReport.eanChange.map(e=>({title:e.product.title, candidate:e.candidate.name, score:e.score})).slice(0,50),
       errors: healthReport.errors.slice(0,50),
       coveragePct: healthReport.coveragePct,
@@ -4000,9 +3673,7 @@ async function applyChanges() {
       {n:priceUpdated, lbl:'Preços', color:'var(--blue)'},
       {n:stockUpdated, lbl:'Stocks', color:'var(--blue)'},
       ...(healthReport && healthReport.zeroed.length>0?[{n:healthReport.zeroed.length, lbl:'Zerados (ausentes)', color:'var(--red)'}]:[]),
-      ...(healthReport && healthReport.handedOver.length>0?[{n:healthReport.handedOver.length, lbl:'Passaram de fornecedor', color:'var(--blue)'}]:[]),
-      ...(priceReviews>0?[{n:priceReviews, lbl:'Preços a rever', color:'var(--orange)'}]:[]),
-      ...(managedElsewhere>0?[{n:managedElsewhere, lbl:'Geridos por outro forn.', color:'var(--text2)'}]:[]),
+      ...(managedElsewhere>0?[{n:managedElsewhere, lbl:'Doutro fornecedor (não tocados)', color:'var(--text2)'}]:[]),
       ...(alertsCreated>0?[{n:alertsCreated, lbl:'Novos alertas', color:'var(--orange)'}]:[]),
       ...(costChangesRegistered.length>0?[{n:costChangesRegistered.length, lbl:'Alertas custo', color:'var(--purple)'}]:[]),
       ...(errors>0?[{n:errors, lbl:'Erros', color:'var(--red)'}]:[]),
@@ -4034,12 +3705,8 @@ function renderUploadReport(rep, supp) {
     rep.errors.length ? section('⚠ Atenção', 'var(--red)', rep.errors.map(e=>`<div>• ${esc(e)}</div>`)) : '',
     section(`🔴 Stock zerado automaticamente (ausentes da listagem ${esc(supp.name)})`, 'var(--red)',
       rep.zeroed.map(z=>`<div>• ${esc(z.title)} <span style="color:var(--text3)">(tinha ${z.prevStock})</span></div>`)),
-    section('⇄ Entregues a outro fornecedor (continuam à venda, preço mantido)', 'var(--blue)',
-      rep.handedOver.map(h=>`<div>• ${esc(h.title)} <span style="color:var(--text3)">→ ${esc(h.to)}, stock ${h.stock}${h.suggested!==null&&h.suggested!==undefined?` · preço mantido €${Number(h.current).toFixed(2)}; regra ${esc(h.to)} daria €${Number(h.suggested).toFixed(2)} (alerta "Preço a rever" criado)`:''}</span></div>`)),
     section('🔎 Possível mudança de código no fornecedor (revê e associa — NÃO foram zerados)', 'var(--orange)',
       rep.eanChange.map(e=>`<div>• ${esc(e.product?.title || e.title)} <span style="color:var(--text3)">≈ ${esc(e.candidate?.name || e.candidate)} (${e.score}%)</span></div>`)),
-    section('⏸ Adiados por segurança', 'var(--text2)',
-      rep.skipped.map(s=>`<div>• ${esc(s.product?.title || s.title)} <span style="color:var(--text3)">(${esc(s.reason)})</span></div>`)),
     rep.alreadyZero > 0 ? `<div style="margin-top:12px;font-size:12px;color:var(--text3)">${rep.alreadyZero} produto(s) ausentes já estavam a zero — nenhuma ação necessária.</div>` : '',
   ].join('');
 }
@@ -4105,7 +3772,6 @@ function renderIssuesTab(issues) {
   el.innerHTML = `
     <div style="display:flex;gap:var(--space-2);margin-bottom:var(--space-3);flex-wrap:wrap">
       <button class="btn btn-ghost btn-sm" onclick="filterIssueAlerts('all',this)" data-filter="all">Todos (${issues.length})</button>
-      <button class="btn btn-ghost btn-sm" onclick="filterIssueAlerts('price_review',this)" data-filter="price_review">💶 Preços a Rever (${byType('price_review').length})</button>
       <button class="btn btn-ghost btn-sm" onclick="filterIssueAlerts('no_update',this)" data-filter="no_update">Sem Update (${byType('no_update').length})</button>
       <button class="btn btn-ghost btn-sm" onclick="filterIssueAlerts('zero_stock',this)" data-filter="zero_stock">Stock Zerado (${byType('zero_stock').length})</button>
       <button class="btn btn-ghost btn-sm" onclick="filterIssueAlerts('no_origin',this)" data-filter="no_origin">Sem Origem (${byType('no_origin').length})</button>
@@ -4300,7 +3966,7 @@ window.dismissAllIssueAlerts = function() {
   save(); alerts(); updateBadges();
 };
 
-const alertIcon = { new_product:'🆕', no_update:'⚠', zero_stock:'🔴', no_origin:'🔍', price_review:'💶' };
+const alertIcon = { new_product:'🆕', no_update:'⚠', zero_stock:'🔴', no_origin:'🔍' };
 
 function renderAlertList(list) {
   if(!list.length) return `<div class="empty-state"><div class="empty-icon">🔔</div><p>Sem alertas ativos</p></div>`;
@@ -4323,8 +3989,7 @@ function renderAlertList(list) {
         <div class="alert-actions">
           ${a.type==='new_product'?`<button class="btn btn-success btn-sm" onclick="suggestCreate('${a.id}')">+ Criar no Shopify</button>`:''}
           ${a.type==='no_origin'?`<button class="btn btn-purple btn-sm" onclick="navigate('health')">Ver no Catálogo</button>`:''}
-          ${a.type==='price_review'?`<button class="btn btn-primary btn-sm" onclick="applyPriceReview('${a.id}')">✓ Aplicar €${Number(a.suggestedPrice).toFixed(2)}</button>`:''}
-          <button class="btn btn-ghost btn-sm" onclick="dismissAlert('${a.id}')">${a.type==='price_review'?'Manter preço atual':'Dispensar'}</button>
+          <button class="btn btn-ghost btn-sm" onclick="dismissAlert('${a.id}')">Dispensar</button>
         </div>
       </div>
     </div>`;
@@ -4565,9 +4230,8 @@ async function createFromAlert(alertId) {
         await updateVariantStock(invId, locationId, stock || 0);
       } catch (e) { toast(`⚠ Produto criado mas o stock falhou: ${e.message}. Corrige no Shopify Admin ou reaplica no próximo upload.`, 'error'); }
     }
-    // 3b) Oferta + cache local: o próximo upload já reconhece este produto
+    // 3b) Cache local: o próximo upload já reconhece este produto
     if (variantId) {
-      upsertOffer({ suppId: a.suppId, productId: product.id, variantId, invItemId: invId, stock: stock || 0, cost: inferProductDataFromAlert(a).cost });
       state.shopifyProducts.push({
         id: product.id, title, status: 'DRAFT', vendor: vendor || '', tags: productInput.tags,
         variants: [{ id: variantId, sku: sku || '', barcode: barcode || '', price: String(price), stock: stock || 0, inventoryItemId: invId }],
@@ -5288,9 +4952,8 @@ window.toCreateBulkCreate = async function() {
         );
         await updateVariantStock(invId, locationId, data.stock || 0);
       }
-      // 4b) Regista a oferta + cache local para o próximo upload já o conhecer
+      // 4b) Cache local para o próximo upload já o conhecer
       if (variantId) {
-        upsertOffer({ suppId: data.suppId, productId: product.id, variantId, invItemId: invId, stock: data.stock || 0, cost: data.cost });
         state.shopifyProducts.push({
           id: product.id, title: data.title, status: 'DRAFT', vendor: data.vendor || '', tags: data.tags || [],
           variants: [{ id: variantId, sku: data.sku || '', barcode: data.barcode || '', price: String(data.price.toFixed(2)), stock: data.stock || 0, inventoryItemId: invId }],
@@ -6054,9 +5717,8 @@ async function svExecuteCreate() {
             catch (stockErr) { log(`  ⚠ stock falhou: ${stockErr.message}`, '#fbbf24'); }
           }
 
-          // 4b) identidade herdada: oferta + alerta consumido; sem identidade: aviso
+          // 4b) identidade herdada: alerta consumido; sem identidade: aviso
           if (inherited) {
-            upsertOffer({ suppId: inherited.alert.suppId, productId: newProd.id, variantId: newVariantId, invItemId: newInvId, stock: inherited.alert.stock || 0, cost: inherited.alert.price });
             inherited.alert.dismissed = true;
             log(`  🔗 identidade herdada do alerta "${(inherited.alert.name||'').slice(0,45)}" (${inherited.score}%) — EAN ${effBarcode||'—'}`, '#93c5fd');
           } else if (!effBarcode && !effSku) {
@@ -10221,14 +9883,10 @@ async function boot() {
     DB.set('suppliers', state.suppliers);
   }
   await runMigrationIfNeeded();
-  // Motor de ofertas: garante políticas/prioridades nos fornecedores e faz o
-  // seed inicial de ofertas a partir das tags sup: + stock atual (one-shot).
-  const polChanged = migrateSuppliersV2();
-  const seeded = seedOffersFromTags();
-  if (polChanged || seeded > 0) {
-    save();
-    if (seeded > 0) toast(`Motor multi-fornecedor inicializado: ${seeded} oferta(s) registadas`, 'info');
-  }
+  // Política de ausência por fornecedor (default: zerar). Idempotente.
+  let polChanged = false;
+  state.suppliers.forEach(s => { if (!s.absencePolicy) { s.absencePolicy = 'zero'; polChanged = true; } });
+  if (polChanged) save();
   restoreNavGroupsState();
   navigate('dashboard');
 

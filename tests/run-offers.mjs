@@ -1,14 +1,15 @@
 #!/usr/bin/env node
-// Harness do motor multi-fornecedor (supplierOffers) — cenários sintéticos.
+// Harness do modelo DONO FIXO — cenários sintéticos.
 //
-// Cobre as 3 falhas reportadas em produção (2026-07):
-//   A. "atualiza stock mas não zera" → ausência agora zera automaticamente
-//   B. "novos DEPAU ficam esgotados" → drafts entram no matching (testado via status)
-//   C. "listagens sobrepõem-se"      → prioridade entre ofertas, sem flip-flop
+// Cobre as falhas reportadas em produção (jul 2026), na versão simplificada
+// pedida pelo Victor (2026-07-09): um produto pertence a UM fornecedor (tag
+// sup:) e só esse upload lhe mexe. Sem handover, sem posse de preço, sem
+// alertas de troca. O que fica: zero automático de ausentes com travões,
+// proteção de mudança de EAN, drafts no matching e herança de identidade.
 //
 // Uso: node tests/run-offers.mjs
 
-import { makeOfferEngine, classifyAbsences, doAnalysis, decidePriceAction, priceOwnerAfterApply, suggestIdentityFromAlerts } from './lib/upload-logic.mjs';
+import { classifyAbsences, doAnalysis, suggestIdentityFromAlerts } from './lib/upload-logic.mjs';
 
 const PASS = '\x1b[32m✓\x1b[0m';
 const FAIL = '\x1b[31m✗\x1b[0m';
@@ -21,95 +22,73 @@ function check(name, cond, detail = '') {
 function section(t) { console.log('\n' + BOLD('── ' + t + ' ' + '─'.repeat(Math.max(0, 70 - t.length)))); }
 
 // ─── Cenário base ──────────────────────────────────────────────────────────────
-const TELETECH = { id: 'teletech', name: 'Teletech', active: true, priority: 10, absencePolicy: 'zero', pricingMode: 'manual' };
-const DEPAU    = { id: 'depau',    name: 'Depau',    active: true, priority: 20, absencePolicy: 'zero', pricingMode: 'automatico', priceType: 'pvp', rounding: 'none' };
+const TELETECH = { id: 'teletech', name: 'Teletech', active: true, absencePolicy: 'zero', pricingMode: 'manual' };
+const DEPAU    = { id: 'depau',    name: 'Depau',    active: true, absencePolicy: 'zero', pricingMode: 'automatico', priceType: 'pvp', rounding: 'none' };
 const SUPPLIERS = [TELETECH, DEPAU];
 
-const mkProduct = (n, { tags = [], stock = 0, sku = '', barcode = '', status = 'ACTIVE' } = {}) => ({
+const mkProduct = (n, { tags = [], stock = 0, sku = '', barcode = '', status = 'ACTIVE', title = null } = {}) => ({
   id: `gid://shopify/Product/${n}`,
-  title: `Produto ${n}`,
+  title: title || `Produto ${n}`,
   status, tags,
   variants: [{ id: `gid://shopify/ProductVariant/${n}`, sku, barcode, stock, price: '100.00', inventoryItemId: `gid://shopify/InventoryItem/${n}` }],
 });
 const VID = (n) => `gid://shopify/ProductVariant/${n}`;
-const nowISO = new Date().toISOString();
 
-// ─── A. Ausência zera (era o bug "não zera") ──────────────────────────────────
-section('A. Ausência da listagem → zero automático');
+// ─── A. Ausência da listagem do DONO → zero automático ────────────────────────
+section('A. Ausência da listagem do dono → zero automático (era o "não zera")');
 {
-  const engine = makeOfferEngine(SUPPLIERS, {
-    [`teletech::${VID(1)}`]: { suppId: 'teletech', variantId: VID(1), stock: 9, cost: 50, lastSeen: nowISO },
-  });
   const products = [
     mkProduct(1, { tags: ['sup:teletech'], stock: 9, barcode: '111' }),   // ausente, com stock → ZERO
     mkProduct(2, { tags: ['sup:teletech'], stock: 5, barcode: '222' }),   // presente no upload → ok
     mkProduct(3, { tags: ['sup:teletech'], stock: 0, barcode: '333' }),   // ausente, já a zero → no-op
+    mkProduct(4, { tags: ['sup:depau'],    stock: 7, barcode: '444' }),   // doutro dono → upload Teletech ignora
   ];
   const r = classifyAbsences({
-    supplier: TELETECH, suppliers: SUPPLIERS, shopifyProducts: products, engine,
+    supplier: TELETECH, shopifyProducts: products,
     processedSkus: { skus: new Set(), barcodes: new Set(['222']), total: 100 },
   });
   check('produto ausente com stock vai para zero automático', r.toZero.length === 1 && r.toZero[0].product.id === 'gid://shopify/Product/1', JSON.stringify(r.toZero.map(z=>z.product.id)));
   check('produto presente não é tocado', !r.missing.some(m => m.id === 'gid://shopify/Product/2'));
   check('produto já a zero é no-op (sem repetição diária de alertas)', r.alreadyZero.length === 1 && r.toZero.every(z => z.product.id !== 'gid://shopify/Product/3'));
-  check('oferta do fornecedor ficou a 0 após ausência', engine.offers[`teletech::${VID(1)}`].stock === 0);
+  check('produto doutro fornecedor NUNCA entra no ciclo deste', !r.missing.some(m => m.id === 'gid://shopify/Product/4'));
 }
 
-// ─── B. Handover: outro fornecedor tem stock ───────────────────────────────────
-section('B. Ausente na Teletech mas Depau tem stock → handover (não zera)');
+// ─── B. Dono fixo no upload: outro fornecedor não toca nem reclama ────────────
+section('B. Dono fixo: upload de outro fornecedor não mexe no produto');
 {
-  const engine = makeOfferEngine(SUPPLIERS, {
-    [`teletech::${VID(1)}`]: { suppId: 'teletech', variantId: VID(1), stock: 4, cost: 50, lastSeen: nowISO },
-    [`depau::${VID(1)}`]:    { suppId: 'depau',    variantId: VID(1), stock: 7, cost: 60, lastSeen: nowISO },
+  const owned = mkProduct(1, { tags: ['sup:teletech'], stock: 5, barcode: '111' });
+  const orphan = mkProduct(2, { tags: [], stock: 3, barcode: '222' });
+  const result = doAnalysis({
+    parsedRows: [
+      { Nome: 'Produto 1', EAN: '111', Stock: '9', Preco: '60' },
+      { Nome: 'Produto 2', EAN: '222', Stock: '4', Preco: '30' },
+    ],
+    colMap: { name: 'Nome', sku: '__SKU__', barcode: 'EAN', stock: 'Stock', price: 'Preco' },
+    supplier: DEPAU,
+    suppliers: SUPPLIERS,
+    shopifyProducts: [owned, orphan],
+    decisions: [],
   });
-  const products = [mkProduct(1, { tags: ['sup:teletech', 'sup:depau'], stock: 4, barcode: '111' })];
-  const r = classifyAbsences({
-    supplier: TELETECH, suppliers: SUPPLIERS, shopifyProducts: products, engine,
-    processedSkus: { skus: new Set(), barcodes: new Set(), total: 100 },
-  });
-  check('não zera: entrega ao Depau', r.toZero.length === 0 && r.toHandover.length === 1);
-  check('handover leva o stock do Depau (7)', r.toHandover[0]?.offer.stock === 7 && r.toHandover[0]?.offer.suppId === 'depau');
+  const r1 = result.found.find(f => f.shopifyVariantId === VID(1));
+  const r2 = result.found.find(f => f.shopifyVariantId === VID(2));
+  check('produto da Teletech aparece marcado "pertence a teletech" no upload Depau', r1?.managedBy === 'teletech');
+  check('produto sem dono fica livre para este fornecedor reclamar', r2 && !r2.managedBy);
 }
 
-// ─── C. Prioridade no upload: Depau não rouba produto gerido pela Teletech ────
-section('C. Upload Depau de produto gerido pela Teletech → não aplica (sem flip-flop)');
+// ─── C. Travões de segurança ───────────────────────────────────────────────────
+section('C. Travões: mapeamento partido, cobertura baixa, zeragem em massa');
 {
-  const offers = {
-    [`teletech::${VID(1)}`]: { suppId: 'teletech', variantId: VID(1), stock: 5, cost: 50, lastSeen: nowISO },
-  };
-  const engine = makeOfferEngine(SUPPLIERS, offers);
-  // Simula o doAnalysis: quem ganharia se o Depau tivesse 9 hoje?
-  const winner = engine.resolveEffectiveOffer(VID(1), { depau: 9 });
-  check('Teletech (prioridade 10) continua a gerir contra Depau (20)', winner?.suppId === 'teletech');
-
-  // Teletech esgota (oferta 0) → agora o Depau ganha
-  engine.markOfferAbsent('teletech', VID(1));
-  const winner2 = engine.resolveEffectiveOffer(VID(1), { depau: 9 });
-  check('Teletech a 0 → Depau assume', winner2?.suppId === 'depau' && winner2.stock === 9);
-
-  // Oferta Teletech velha (>7 dias sem upload) não conta
-  const engine3 = makeOfferEngine(SUPPLIERS, {
-    [`teletech::${VID(2)}`]: { suppId: 'teletech', variantId: VID(2), stock: 5, cost: 50, lastSeen: new Date(Date.now() - 9 * 86400000).toISOString() },
-  });
-  const winner3 = engine3.resolveEffectiveOffer(VID(2), { depau: 3 });
-  check('oferta com mais de 7 dias deixa de contar (fornecedor parado)', winner3?.suppId === 'depau');
-}
-
-// ─── D. Travões de segurança ───────────────────────────────────────────────────
-section('D. Travões: mapeamento partido, cobertura baixa, zeragem em massa');
-{
-  const engine = makeOfferEngine(SUPPLIERS, {});
   const products = Array.from({ length: 20 }, (_, i) => mkProduct(i + 1, { tags: ['sup:teletech'], stock: 3, barcode: `b${i + 1}` }));
   // Nada bateu → broken mapping
   const r1 = classifyAbsences({
-    supplier: TELETECH, suppliers: SUPPLIERS, shopifyProducts: products, engine: makeOfferEngine(SUPPLIERS, {}),
+    supplier: TELETECH, shopifyProducts: products,
     processedSkus: { skus: new Set(), barcodes: new Set(), total: 300 },
   });
   check('0 matches em 20 tagged → aborta (broken-mapping), nada vai a zero', r1.guard === 'broken-mapping' && r1.toZero.length === 0);
 
   // Cobertura baixa → exige confirmação
   const r2 = classifyAbsences({
-    supplier: TELETECH, suppliers: SUPPLIERS, shopifyProducts: products, engine: makeOfferEngine(SUPPLIERS, {}),
+    supplier: TELETECH, shopifyProducts: products,
     processedSkus: { skus: new Set(), barcodes: new Set(['b1']), total: 100 },
     uploadHistory: [{ supplierId: 'teletech', total: 400 }, { supplierId: 'teletech', total: 380 }],
   });
@@ -117,23 +96,21 @@ section('D. Travões: mapeamento partido, cobertura baixa, zeragem em massa');
 
   // Zeragem em massa → massBrake
   const r3 = classifyAbsences({
-    supplier: TELETECH, suppliers: SUPPLIERS, shopifyProducts: products, engine: makeOfferEngine(SUPPLIERS, {}),
+    supplier: TELETECH, shopifyProducts: products,
     processedSkus: { skus: new Set(), barcodes: new Set(['b1']), total: 100 },
   });
   check(`19 zeros de 20 com stock → massBrake ativo`, r3.massBrake === true && r3.toZero.length === 19);
 }
 
-// ─── E. Mudança de EAN protege de zero ─────────────────────────────────────────
-section('E. Produto ausente mas ficheiro traz o mesmo nome com EAN novo → protegido');
+// ─── D. Mudança de EAN protege de zero ─────────────────────────────────────────
+section('D. Produto ausente mas ficheiro traz o mesmo nome com EAN novo → protegido');
 {
-  const engine = makeOfferEngine(SUPPLIERS, {});
   const products = [
-    mkProduct(1, { tags: ['sup:teletech'], stock: 6, barcode: '111' }),
+    mkProduct(1, { tags: ['sup:teletech'], stock: 6, barcode: '111', title: 'Apple iPhone 17 Pro Max 256GB - Deep Blue' }),
     mkProduct(2, { tags: ['sup:teletech'], stock: 2, barcode: '221' }),
   ];
-  products[0].title = 'Apple iPhone 17 Pro Max 256GB - Deep Blue';
   const r = classifyAbsences({
-    supplier: TELETECH, suppliers: SUPPLIERS, shopifyProducts: products, engine,
+    supplier: TELETECH, shopifyProducts: products,
     processedSkus: { skus: new Set(), barcodes: new Set(['999']), total: 100 },
     isNewRows: [{ name: 'Apple iPhone 17 Pro Max 256GB - Deep Blue', barcode: '112', stockVal: 31 }],
   });
@@ -143,7 +120,19 @@ section('E. Produto ausente mas ficheiro traz o mesmo nome com EAN novo → prot
   check('o outro produto (sem candidato) vai a zero normalmente', r.toZero.some(z => z.product.id === 'gid://shopify/Product/2'));
 }
 
-// ─── F. Drafts entram no matching (novos DEPAU deixam de ficar órfãos) ────────
+// ─── E. Política 'manter' só vigia ─────────────────────────────────────────────
+section('E. Política "manter e vigiar" nunca zera');
+{
+  const MANTER = { ...TELETECH, absencePolicy: 'manter' };
+  const products = [mkProduct(1, { tags: ['sup:teletech'], stock: 9, barcode: '111' }), mkProduct(2, { tags: ['sup:teletech'], stock: 1, barcode: '222' })];
+  const r = classifyAbsences({
+    supplier: MANTER, shopifyProducts: products,
+    processedSkus: { skus: new Set(), barcodes: new Set(['222']), total: 100 },
+  });
+  check('ausente com política manter → vigilância, zero vazio', r.watched.length === 1 && r.toZero.length === 0);
+}
+
+// ─── F. Drafts entram no matching mas não no ciclo de ausências ────────────────
 section('F. Draft criado pela app é encontrado pelo upload seguinte');
 {
   const draft = mkProduct(9, { tags: ['sup:depau'], stock: 0, barcode: '777', status: 'DRAFT' });
@@ -151,68 +140,22 @@ section('F. Draft criado pela app é encontrado pelo upload seguinte');
     parsedRows: [{ Nome: 'Portátil HP 250R G10', EAN: '777', Stock: '12', Preco: '576,87' }],
     colMap: { name: 'Nome', sku: '__SKU__', barcode: 'EAN', stock: 'Stock', price: 'Preco' },
     supplier: DEPAU,
+    suppliers: SUPPLIERS,
     shopifyProducts: [draft],
     decisions: [],
   });
   check('linha do ficheiro bate no draft pelo EAN', result.found.length === 1 && result.found[0].shopifyVariantId === VID(9));
   check('draft NÃO entra no ciclo de ausências (health check só ACTIVE)', (() => {
     const r = classifyAbsences({
-      supplier: DEPAU, suppliers: SUPPLIERS, shopifyProducts: [draft], engine: makeOfferEngine(SUPPLIERS, {}),
+      supplier: DEPAU, shopifyProducts: [draft],
       processedSkus: { skus: new Set(), barcodes: new Set(), total: 10 },
     });
     return r.missing.length === 0;
   })());
 }
 
-// ─── G. Política de preço na troca de fornecedor ───────────────────────────────
-// O caso levantado pelo Victor: Teletech (preço manual) esgota, Depau (PVP
-// automático) assume a disponibilidade. O preço de venda foi decidido à mão e
-// NÃO pode saltar para o PVP da Depau sem alguém dizer que sim.
-section('G. Preço: troca de fornecedor nunca reprecifica sozinha');
-{
-  // G1: cenário completo Teletech → Depau → Teletech
-  // Dia 0: produto gerido pela Teletech, preço manual 299€ (owner: manual)
-  let owner = 'manual';
-
-  // Dia 1: Teletech esgota → handover para Depau (stock apenas)
-  // O handover não mexe no preço nem na posse:
-  check('G1a: handover não muda a posse do preço', owner === 'manual');
-
-  // Dia 2: upload Depau. Depau agora é o gestor (managedBy = null p/ Depau),
-  // PVP da Depau daria 329,90 ≠ 299 → priceChanged = true
-  const g2 = decidePriceAction({ supplier: DEPAU, managedBy: null, priceOwner: owner, priceChanged: true });
-  check('G1b: upload Depau PROPÕE (não aplica) preço sobre posse manual', g2 === 'propose');
-
-  // Dia 2, alternativa: assistente aceita a sugestão → posse passa à Depau
-  owner = priceOwnerAfterApply(DEPAU);
-  check('G1c: aceitar a sugestão transfere a posse para a Depau', owner === 'depau');
-
-  // Dia 3: próximo upload Depau já aplica automaticamente (posse dela)
-  const g3 = decidePriceAction({ supplier: DEPAU, managedBy: null, priceOwner: owner, priceChanged: true });
-  check('G1d: com posse da Depau, uploads Depau aplicam preço normalmente', g3 === 'apply');
-
-  // Dia 4: Teletech volta a ter stock → volta a gerir. Upload Teletech (manual):
-  const g4 = decidePriceAction({ supplier: TELETECH, managedBy: null, priceOwner: owner, priceChanged: true });
-  check('G1e: Teletech (manual) nunca aplica preço automaticamente', g4 === 'none');
-
-  // Dia 4: upload Depau com produto gerido pela Teletech → nem propõe
-  const g5 = decidePriceAction({ supplier: DEPAU, managedBy: 'teletech', priceOwner: owner, priceChanged: true });
-  check('G1f: fornecedor não-gestor não aplica nem propõe', g5 === 'none');
-}
-{
-  // G2: produtos nativos Depau (posse nunca definida) — comportamento de sempre
-  const r1 = decidePriceAction({ supplier: DEPAU, managedBy: null, priceOwner: undefined, priceChanged: true });
-  check('G2a: produto sem posse → fornecedor automático aplica (regressão ok)', r1 === 'apply');
-  const r2 = decidePriceAction({ supplier: DEPAU, managedBy: null, priceOwner: 'depau', priceChanged: false });
-  check('G2b: sem alteração de preço → nada acontece', r2 === 'none');
-  // ✏ edição manual num produto Depau → posse manual → Depau passa a propor
-  const ownerAfterEdit = 'manual';
-  const r3 = decidePriceAction({ supplier: DEPAU, managedBy: null, priceOwner: ownerAfterEdit, priceChanged: true });
-  check('G2c: depois de ✏ manual, Depau propõe em vez de sobrescrever', r3 === 'propose');
-}
-
-// ─── H. Split de variantes herda identidade dos alertas ───────────────────────
-section('H. Produto criado sem EAN herda identidade do alerta do fornecedor');
+// ─── G. Split de variantes herda identidade dos alertas ───────────────────────
+section('G. Produto criado sem EAN herda identidade do alerta do fornecedor');
 {
   const alerts = [
     { type: 'new_product', dismissed: false, suppId: 'teletech', name: 'Samsung Galaxy Fit 3 40mm - Grey', barcode: '8806095362151', sku: '8806095362151', stock: 9, price: 39.9 },
@@ -220,19 +163,19 @@ section('H. Produto criado sem EAN herda identidade do alerta do fornecedor');
     { type: 'new_product', dismissed: true,  suppId: 'teletech', name: 'Samsung Galaxy Fit 3 40mm - Pink', barcode: '8806095362222', sku: '8806095362222', stock: 2, price: 39.9 },
   ];
   const hit = suggestIdentityFromAlerts('Samsung Galaxy Fit 3 40mm - Grey', alerts);
-  check('H1: split "Fit 3 Grey" herda o EAN do alerta certo (não o Silver)', hit?.alert.barcode === '8806095362151' && hit.score === 100);
+  check('G1: split "Fit 3 Grey" herda o EAN do alerta certo (não o Silver)', hit?.alert.barcode === '8806095362151' && hit.score === 100);
   const miss = suggestIdentityFromAlerts('Produto Completamente Diferente XYZ', alerts);
-  check('H2: sem correspondência forte → não inventa identidade', miss === null);
+  check('G2: sem correspondência forte → não inventa identidade', miss === null);
   const colorGuard = suggestIdentityFromAlerts('Samsung Galaxy Fit 3 40mm - Gold', alerts);
-  check('H3: cor diferente não herda EAN de outra cor', colorGuard === null);
+  check('G3: cor diferente não herda EAN de outra cor', colorGuard === null);
   const dismissed = suggestIdentityFromAlerts('Samsung Galaxy Fit 3 40mm - Pink', alerts);
-  check('H4: alertas dispensados não são fonte de identidade', dismissed === null);
+  check('G4: alertas dispensados não são fonte de identidade', dismissed === null);
 }
 
 // ─── Resultado ─────────────────────────────────────────────────────────────────
 console.log('\n' + BOLD('═'.repeat(74)));
 if (failures === 0) {
-  console.log(`${PASS} ${BOLD('Todos os cenários do motor multi-fornecedor passaram.')}`);
+  console.log(`${PASS} ${BOLD('Todos os cenários do modelo dono fixo passaram.')}`);
 } else {
   console.log(`${FAIL} ${BOLD(failures + ' cenário(s) falharam.')}`);
   process.exitCode = 1;

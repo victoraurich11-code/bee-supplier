@@ -1,11 +1,12 @@
 # Harness de Testes — Bee-Supplier
 
-> **2026-07-09 — Motor multi-fornecedor (V2).** O health check passou a motor de
-> ofertas com zero automático, handover entre fornecedores e travões (ver
-> [MOTOR-OFERTAS.md](../MOTOR-OFERTAS.md)). Novos testes em `run-offers.mjs`
-> (cenários A-F). O `run-teletech.mjs` foi atualizado para a API nova; os
-> checks do PASSO 3 continuam presos ao ficheiro de 14/05/2026 — com ficheiros
-> mais recentes valem os veredictos finais, não os stocks exactos.
+> **2026-07-09 — Modelo dono fixo (V2 simplificada).** Um produto pertence a UM
+> fornecedor (tag sup:) e só esse upload lhe mexe; ausências do dono zeram
+> automaticamente com travões (ver [MOTOR-OFERTAS.md](../MOTOR-OFERTAS.md)).
+> Testes em `run-offers.mjs` (cenários A-G). O `run-teletech.mjs` foi
+> atualizado para a API nova; os checks do PASSO 3 continuam presos ao
+> ficheiro de 14/05/2026 — com ficheiros mais recentes valem os veredictos
+> finais, não os stocks exactos.
 
 Testes automatizados que reproduzem os bugs do pipeline de upload **sem browser e sem Shopify real**.
 Servem para:

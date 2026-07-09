@@ -269,7 +269,6 @@ if (suspeitos.length === 0) {
 section('PASSO 5 — Health check V2 (ausências → zero automático / handover)');
 const hc = runPostUploadHealthCheck({
   supplier,
-  suppliers: [supplier],
   shopifyProducts: fixture.products,
   processedSkus: { skus: result.knownSkus, barcodes: result.knownBarcodes, total: result.uploadTotal },
   isNewRows: result.isNew,
@@ -281,7 +280,7 @@ const hc = runPostUploadHealthCheck({
 });
 console.log(`  Acção do sistema: ${BOLD(hc.action)}`);
 console.log(`  coveragePct: ${hc.coveragePct}%   avgExpected: ${hc.avgExpected}   missing: ${hc.missing.length}`);
-console.log(`  → zero automático: ${hc.toZero.length}  ·  handover: ${hc.toHandover.length}  ·  já a zero: ${hc.alreadyZero.length}  ·  mudança de EAN: ${hc.eanChange.length}  ·  travão de massa: ${hc.massBrake}`);
+console.log(`  → zero automático: ${hc.toZero.length}  ·  já a zero: ${hc.alreadyZero.length}  ·  mudança de EAN: ${hc.eanChange.length}  ·  travão de massa: ${hc.massBrake}`);
 if (hc.toZero.length) {
   console.log(`  Produtos que seriam ZERADOS automaticamente:`);
   hc.toZero.forEach(z => {

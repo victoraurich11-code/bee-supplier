@@ -1,75 +1,39 @@
-# Motor Multi-Fornecedor (supplierOffers) — 2026-07-09
+# Modelo Dono Fixo — 2026-07-09 (v2 simplificada)
 
-Redesenho do pipeline de stock em resposta às 3 falhas reportadas em produção
-(julho 2026). Este documento é a referência rápida; detalhe de diagnóstico no
-fim.
+Redesenho do pipeline de stock em resposta às falhas de produção de julho 2026.
+A v1 (motor de ofertas com handover e posse de preço) foi simplificada no
+mesmo dia a pedido do Victor: **um produto pertence a UM fornecedor e mais
+nenhum lhe toca**. Menos automatismo cruzado, mais previsibilidade.
 
-## As 3 falhas e a causa raiz
+## As falhas originais e a causa raiz
 
 | Falha reportada | Causa raiz confirmada |
 |---|---|
-| "Atualiza o stock mas não zera os produtos" | Teletech tinha `isInStockList: true` → ausências NUNCA zeravam (39 produtos com 764 unidades fantasma à venda, validado por API + ficheiro de 02/07). Na Depau a zeragem exigia modal manual diário, que propunha os MESMOS ~70 produtos já a zero todos os dias. |
-| "Novos da DEPAU ficam esgotados" | Produtos novos **sem SKU nem EAN** → nenhum upload os encontra → stock congela no valor de criação (ex.: ASUS V16 a 0 no site com 89 unidades na Depau). Origem confirmada (2.ª análise, assinatura título "base - cor" + variante única + descrições SEO): o fluxo **Separar Variantes** da própria app herdava silenciosamente o vazio quando a variante original não tinha códigos. Agravante: a app criava DRAFTs e o sync só puxava ACTIVE, portanto ficavam invisíveis até publicar. |
-| "As listagens sobrepõem-se" | A tag `sup:` era substituída a cada upload → o último fornecedor a correr "roubava" o produto (preço/stock alternavam entre Teletech e Depau; 5 Xiaomi nessa condição a 08/07). |
+| "Atualiza o stock mas não zera os produtos" | Teletech tinha `isInStockList: true`, portanto ausências NUNCA zeravam (39 produtos com 764 unidades fantasma à venda, validado por API + ficheiro de 02/07). Na Depau a zeragem exigia um modal manual diário que propunha os MESMOS ~70 produtos já a zero todos os dias. |
+| "Novos da DEPAU ficam esgotados" | Produtos novos **sem SKU nem EAN** → nenhum upload os encontra → stock congela no valor de criação (ex.: ASUS V16 a 0 no site com 89 unidades na Depau). Origem confirmada (assinatura título "base - cor" + variante única + descrições SEO): o fluxo **Separar Variantes** herdava silenciosamente o vazio quando a variante original não tinha códigos. Agravante: a app criava DRAFTs e o sync só puxava ACTIVE. |
+| "As listagens sobrepõem-se" | A tag `sup:` era substituída a cada upload: o último fornecedor a correr "roubava" o produto e o preço/stock alternava entre listagens. |
 
-## O modelo novo
+## O modelo (dono fixo)
 
-**Oferta** = o que um fornecedor tem AGORA para uma variante Shopify.
-`state.supplierOffers[suppId::variantId] = { stock, cost, lastSeen, absentSince, absentCount }`
-Persistido em localStorage + Supabase (`bee_data.supplierOffers`).
-
-Regras:
-
-1. **Upload de S** atualiza as ofertas de S para todas as linhas encontradas
-   (mesmo que nada mude no produto).
-2. **Prioridade** (campo `priority` no fornecedor; menor = mais forte). O
-   stock/preço do produto é gerido pela melhor oferta atual com stock > 0.
-   Um upload de fornecedor não-gestor NÃO altera stock/preço (linha aparece
-   com badge "🔒 gerido por X"); a oferta é registada na mesma.
-3. **Ausência** da listagem → oferta desse fornecedor passa a stock 0:
-   - outro fornecedor com oferta atual e stock? → **handover automático**
-     (stock/preço desse fornecedor, sem modal);
-   - senão, política `zero` → **stock zerado automaticamente**;
-   - produto já a zero → silêncio (fim do ciclo de Sísifo);
-   - política `manter` → só tags de vigilância (revisão na Saúde).
-4. **Oferta expira** se o fornecedor não faz upload há 7 dias (deixa de
-   contar para prioridade/handover).
-5. **Preço por fornecedor**: modo manual → preço nunca é tocado; automático →
-   custo+margem ou PVP, com arredondamento do fornecedor.
-
-## Política de preço na troca de fornecedor (posse do preço)
-
-O problema: Teletech é preço manual (Victor decide), Depau é PVP automático.
-Se um telemóvel gerido pela Teletech esgota e passa para a Depau, o preço de
-venda não pode saltar para o PVP espanhol sem ninguém aprovar.
-
-Regra: **o preço tem um dono** (`state.priceOwners[variantId]` = 'manual' ou
-suppId), e troca de disponibilidade nunca reprecifica sozinha:
-
-- **Handover move só o stock.** O preço fica. Se a regra do novo fornecedor
-  daria outro valor, nasce um alerta "💶 Preço a rever" com os dois números.
-- **Upload de fornecedor automático** só aplica preço se for o gestor E o dono
-  do preço (ou se ninguém for dono ainda: comportamento de sempre da Depau).
-  Sobre posse alheia (manual do Victor, ou de outro fornecedor) a linha aparece
-  com badge "💶 rever (posse: X)" e a checkbox desmarcada: marcar = aceitar,
-  e a posse transfere-se.
-- **Edição ✏ à mão** marca a posse como 'manual': a partir daí os uploads
-  automáticos propõem em vez de sobrescrever.
-- **Aceitar** (checkbox no upload, ou botão "Aplicar €X" no alerta) aplica o
-  preço e passa a posse ao fornecedor sugerente; uploads seguintes dele voltam
-  a ser automáticos.
-- Quando o fornecedor principal recupera stock, retoma a gestão; sendo manual,
-  o preço continua intocado até alguém mexer.
-
-Matriz validada nos testes (secção G do run-offers.mjs).
-
-## Split de variantes herda identidade
-
-O fluxo Separar Variantes agora, quando a variante original não tem SKU/EAN,
-procura o alerta de fornecedor com nome ≥90% e herda EAN+SKU+tag sup:+oferta
-na criação (consumindo o alerta). Sem correspondência, avisa no log de criação
-e o produto aparece em Saúde → Sem EAN. Cor/capacidade/geração diferentes
-nunca herdam (a similaridade zera nesses tokens — secção H dos testes).
+1. **Dono**: a tag `sup:<id>` do produto identifica o único fornecedor que lhe
+   mexe. Nunca muda automaticamente. Para trocar o dono, muda-se a tag
+   (Shopify Admin ou Saúde do Catálogo).
+2. **Upload do fornecedor S**:
+   - produto de S → stock/preço/tags atualizados pelas regras de S
+     (manual = preço só por ✏; automático = regras do ficheiro);
+   - produto de OUTRO fornecedor → linha visível com badge "🔒 pertence a X",
+     **nada é aplicado** (as checkboxes permitem forçar valores à mão em casos
+     excecionais, sem mudar o dono);
+   - produto sem dono → S reclama-o ao aplicar (tag sup:S);
+   - linha sem correspondência → alerta de produto novo (como sempre).
+3. **Ausência da listagem do dono** (política `zero`, default):
+   - com stock → **stock zerado automaticamente**;
+   - já a zero → silêncio (sem ação nem alerta repetido);
+   - política `manter` → só tags de vigilância, revisão na Saúde.
+4. **Preço**: só o dono toca no preço, segundo o modo configurado. Sem posse,
+   sem handover, sem alertas de troca. Se a Teletech esgota um produto, ele
+   fica esgotado no site até a Teletech o repor (ou até alguém trocar o dono
+   de propósito).
 
 ## Travões de segurança (zero automático)
 
@@ -82,30 +46,29 @@ nunca herdam (a similaridade zera nesses tokens — secção H dos testes).
 - **Mudança de EAN**: produto ausente cujo nome bate ≥95% numa linha "nova"
   do ficheiro NÃO é zerado — vai para o relatório para associação.
 
+## Split de variantes herda identidade
+
+Quando a variante original não tem SKU/EAN, o Separar Variantes procura o
+alerta de fornecedor com nome ≥90% e herda EAN+SKU+tag sup: na criação
+(consumindo o alerta). Sem correspondência, avisa no log de criação e o
+produto aparece em Saúde → Sem EAN. Cor/capacidade/geração diferentes nunca
+herdam (a similaridade zera nesses tokens).
+
 ## O que muda no dia a dia da assistente
 
 1. Upload Depau → upload Teletech (ordem indiferente), como sempre.
 2. **Sem modal diário de zerar.** No fim aparece um relatório: atualizados,
-   zerados (ausentes), entregues a outro fornecedor, possíveis mudanças de
-   código, avisos. Zero decisões no caminho feliz.
-3. Produtos novos: criar SEMPRE via app (Alertas → Criar) — nunca à mão no
-   Admin. A app grava EAN+SKU+stock+tag e o upload seguinte já os gere,
-   mesmo em rascunho. Publicar continua a ser passo manual no Admin.
-4. Se aparecer um produto criado à mão: Saúde do Catálogo → tab **"Sem EAN"**
-   → aplicar a sugestão (1 clique liga o produto ao fornecedor e repõe stock).
-
-## Estado inicial (seed)
-
-No primeiro arranque pós-deploy, `seedOffersFromTags()` cria ofertas a partir
-das tags `sup:` + stock atual (marker `settings.offersSeededAt`). O primeiro
-upload de cada fornecedor substitui o seed pela verdade da listagem. No
-primeiro upload Teletech é esperado o travão de massa disparar UMA vez
-(±39 produtos fantasma acumulados) — confirmar com OK.
+   zerados (ausentes), doutro fornecedor (não tocados), possíveis mudanças de
+   código, avisos.
+3. Produtos novos: criar SEMPRE via app (Alertas → Criar), nunca à mão no
+   Admin. Publicar continua a ser passo manual no Admin.
+4. Produto sem EAN detetado: Saúde do Catálogo → tab **"Sem EAN"** → aplicar a
+   sugestão (1 clique liga o produto ao fornecedor e repõe o último stock).
 
 ## Testes
 
 ```bash
-node tests/run-offers.mjs                                # motor multi-fornecedor (cenários A-F)
+node tests/run-offers.mjs                                # cenários A-G do modelo dono fixo
 node tests/run-teletech.mjs ~/Downloads/<stocklist>.xlsx # pipeline completo com ficheiro real
 ```
 
@@ -113,10 +76,16 @@ Nota: os checks do PASSO 3 do run-teletech comparam com o fixture congelado
 do ficheiro de 14/05/2026 — com outros ficheiros, esses valores de stock
 específicos falham por design; os veredictos finais é que contam.
 
-## Pendentes conscientes
+## Notas de migração / pendentes
 
-- PcComponentes: 32 produtos com stock alto (ex. Tempest 2946 un.) sem upload
-  desde abril — o motor não mexe neles até haver upload desse fornecedor.
-  Decidir se são stock local intencional ou lixo a zerar.
-- Handover cobre a 1.ª variante do produto (loja é ~100% single-variant).
-- `tek4life` mantém o fluxo próprio (tk*) + sync Python, fora deste motor.
+- A v1 chegou a criar chaves `supplierOffers`/`priceOwners` no Supabase
+  (`bee_data`) e campos `priority` nos fornecedores — ficam órfãos e
+  ignorados; podem ser apagados quando der jeito.
+- Produtos que a v1 tenha deixado com DUAS tags sup: normalizam no próximo
+  upload do dono (a substituição por prefixo remove a tag do outro).
+- No primeiro upload Teletech pós-deploy é esperado o travão de massa disparar
+  UMA vez (±39 produtos fantasma acumulados) — confirmar com OK.
+- PcComponentes: 32 produtos com stock alto sem upload desde abril — o modelo
+  não mexe neles até haver upload desse fornecedor; decidir se são stock
+  local intencional.
+- `tek4life` mantém o fluxo próprio (tk*) + sync Python, fora deste modelo.
