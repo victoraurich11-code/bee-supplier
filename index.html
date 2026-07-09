@@ -1191,10 +1191,17 @@ async function runPostUploadHealthCheck(suppId, processedSkus) {
   if (!supp) return report;
 
   const suppTag = `sup:${suppId}`;
-  // Só produtos ACTIVE entram no ciclo de ausência (drafts não estão à venda)
-  const taggedProducts = state.shopifyProducts.filter(p =>
-    p.tags && p.tags.includes(suppTag) && (p.status || 'ACTIVE') === 'ACTIVE'
-  );
+  // Só produtos ACTIVE cujo DONO é este fornecedor entram no ciclo de ausência
+  // (drafts não estão à venda). Se um produto ficou com duas tags sup: por
+  // legado, conta só para o dono (primeira tag de fornecedor conhecido) e
+  // normaliza para uma única tag no próximo upload dele.
+  const taggedProducts = state.shopifyProducts.filter(p => {
+    if (!p.tags || !p.tags.includes(suppTag)) return false;
+    if ((p.status || 'ACTIVE') !== 'ACTIVE') return false;
+    const ownerId = p.tags.filter(t => t.startsWith('sup:')).map(t => t.slice(4))
+      .find(id => state.suppliers.some(s => s.id === id));
+    return ownerId === suppId;
+  });
   if (!taggedProducts.length) return report;
 
   const matchedInUpload = (p) => p.variants.some(v => {
