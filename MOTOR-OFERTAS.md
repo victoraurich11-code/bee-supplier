@@ -9,7 +9,7 @@ fim.
 | Falha reportada | Causa raiz confirmada |
 |---|---|
 | "Atualiza o stock mas não zera os produtos" | Teletech tinha `isInStockList: true` → ausências NUNCA zeravam (39 produtos com 764 unidades fantasma à venda, validado por API + ficheiro de 02/07). Na Depau a zeragem exigia modal manual diário, que propunha os MESMOS ~70 produtos já a zero todos os dias. |
-| "Novos da DEPAU ficam esgotados" | Produtos novos criados à mão no Shopify Admin **sem SKU nem EAN** → nenhum upload os encontra → stock congela no valor de criação (ex.: ASUS V16 a 0 no site com 89 unidades na Depau). Agravante: a app criava DRAFTs e o sync só puxava ACTIVE, portanto mesmo os criados pela app ficavam invisíveis até publicar. |
+| "Novos da DEPAU ficam esgotados" | Produtos novos **sem SKU nem EAN** → nenhum upload os encontra → stock congela no valor de criação (ex.: ASUS V16 a 0 no site com 89 unidades na Depau). Origem confirmada (2.ª análise, assinatura título "base - cor" + variante única + descrições SEO): o fluxo **Separar Variantes** da própria app herdava silenciosamente o vazio quando a variante original não tinha códigos. Agravante: a app criava DRAFTs e o sync só puxava ACTIVE, portanto ficavam invisíveis até publicar. |
 | "As listagens sobrepõem-se" | A tag `sup:` era substituída a cada upload → o último fornecedor a correr "roubava" o produto (preço/stock alternavam entre Teletech e Depau; 5 Xiaomi nessa condição a 08/07). |
 
 ## O modelo novo
@@ -36,6 +36,40 @@ Regras:
    contar para prioridade/handover).
 5. **Preço por fornecedor**: modo manual → preço nunca é tocado; automático →
    custo+margem ou PVP, com arredondamento do fornecedor.
+
+## Política de preço na troca de fornecedor (posse do preço)
+
+O problema: Teletech é preço manual (Victor decide), Depau é PVP automático.
+Se um telemóvel gerido pela Teletech esgota e passa para a Depau, o preço de
+venda não pode saltar para o PVP espanhol sem ninguém aprovar.
+
+Regra: **o preço tem um dono** (`state.priceOwners[variantId]` = 'manual' ou
+suppId), e troca de disponibilidade nunca reprecifica sozinha:
+
+- **Handover move só o stock.** O preço fica. Se a regra do novo fornecedor
+  daria outro valor, nasce um alerta "💶 Preço a rever" com os dois números.
+- **Upload de fornecedor automático** só aplica preço se for o gestor E o dono
+  do preço (ou se ninguém for dono ainda: comportamento de sempre da Depau).
+  Sobre posse alheia (manual do Victor, ou de outro fornecedor) a linha aparece
+  com badge "💶 rever (posse: X)" e a checkbox desmarcada: marcar = aceitar,
+  e a posse transfere-se.
+- **Edição ✏ à mão** marca a posse como 'manual': a partir daí os uploads
+  automáticos propõem em vez de sobrescrever.
+- **Aceitar** (checkbox no upload, ou botão "Aplicar €X" no alerta) aplica o
+  preço e passa a posse ao fornecedor sugerente; uploads seguintes dele voltam
+  a ser automáticos.
+- Quando o fornecedor principal recupera stock, retoma a gestão; sendo manual,
+  o preço continua intocado até alguém mexer.
+
+Matriz validada nos testes (secção G do run-offers.mjs).
+
+## Split de variantes herda identidade
+
+O fluxo Separar Variantes agora, quando a variante original não tem SKU/EAN,
+procura o alerta de fornecedor com nome ≥90% e herda EAN+SKU+tag sup:+oferta
+na criação (consumindo o alerta). Sem correspondência, avisa no log de criação
+e o produto aparece em Saúde → Sem EAN. Cor/capacidade/geração diferentes
+nunca herdam (a similaridade zera nesses tokens — secção H dos testes).
 
 ## Travões de segurança (zero automático)
 

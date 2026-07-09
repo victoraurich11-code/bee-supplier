@@ -8,7 +8,7 @@
 //
 // Uso: node tests/run-offers.mjs
 
-import { makeOfferEngine, classifyAbsences, doAnalysis } from './lib/upload-logic.mjs';
+import { makeOfferEngine, classifyAbsences, doAnalysis, decidePriceAction, priceOwnerAfterApply, suggestIdentityFromAlerts } from './lib/upload-logic.mjs';
 
 const PASS = '\x1b[32m✓\x1b[0m';
 const FAIL = '\x1b[31m✗\x1b[0m';
@@ -162,6 +162,71 @@ section('F. Draft criado pela app é encontrado pelo upload seguinte');
     });
     return r.missing.length === 0;
   })());
+}
+
+// ─── G. Política de preço na troca de fornecedor ───────────────────────────────
+// O caso levantado pelo Victor: Teletech (preço manual) esgota, Depau (PVP
+// automático) assume a disponibilidade. O preço de venda foi decidido à mão e
+// NÃO pode saltar para o PVP da Depau sem alguém dizer que sim.
+section('G. Preço: troca de fornecedor nunca reprecifica sozinha');
+{
+  // G1: cenário completo Teletech → Depau → Teletech
+  // Dia 0: produto gerido pela Teletech, preço manual 299€ (owner: manual)
+  let owner = 'manual';
+
+  // Dia 1: Teletech esgota → handover para Depau (stock apenas)
+  // O handover não mexe no preço nem na posse:
+  check('G1a: handover não muda a posse do preço', owner === 'manual');
+
+  // Dia 2: upload Depau. Depau agora é o gestor (managedBy = null p/ Depau),
+  // PVP da Depau daria 329,90 ≠ 299 → priceChanged = true
+  const g2 = decidePriceAction({ supplier: DEPAU, managedBy: null, priceOwner: owner, priceChanged: true });
+  check('G1b: upload Depau PROPÕE (não aplica) preço sobre posse manual', g2 === 'propose');
+
+  // Dia 2, alternativa: assistente aceita a sugestão → posse passa à Depau
+  owner = priceOwnerAfterApply(DEPAU);
+  check('G1c: aceitar a sugestão transfere a posse para a Depau', owner === 'depau');
+
+  // Dia 3: próximo upload Depau já aplica automaticamente (posse dela)
+  const g3 = decidePriceAction({ supplier: DEPAU, managedBy: null, priceOwner: owner, priceChanged: true });
+  check('G1d: com posse da Depau, uploads Depau aplicam preço normalmente', g3 === 'apply');
+
+  // Dia 4: Teletech volta a ter stock → volta a gerir. Upload Teletech (manual):
+  const g4 = decidePriceAction({ supplier: TELETECH, managedBy: null, priceOwner: owner, priceChanged: true });
+  check('G1e: Teletech (manual) nunca aplica preço automaticamente', g4 === 'none');
+
+  // Dia 4: upload Depau com produto gerido pela Teletech → nem propõe
+  const g5 = decidePriceAction({ supplier: DEPAU, managedBy: 'teletech', priceOwner: owner, priceChanged: true });
+  check('G1f: fornecedor não-gestor não aplica nem propõe', g5 === 'none');
+}
+{
+  // G2: produtos nativos Depau (posse nunca definida) — comportamento de sempre
+  const r1 = decidePriceAction({ supplier: DEPAU, managedBy: null, priceOwner: undefined, priceChanged: true });
+  check('G2a: produto sem posse → fornecedor automático aplica (regressão ok)', r1 === 'apply');
+  const r2 = decidePriceAction({ supplier: DEPAU, managedBy: null, priceOwner: 'depau', priceChanged: false });
+  check('G2b: sem alteração de preço → nada acontece', r2 === 'none');
+  // ✏ edição manual num produto Depau → posse manual → Depau passa a propor
+  const ownerAfterEdit = 'manual';
+  const r3 = decidePriceAction({ supplier: DEPAU, managedBy: null, priceOwner: ownerAfterEdit, priceChanged: true });
+  check('G2c: depois de ✏ manual, Depau propõe em vez de sobrescrever', r3 === 'propose');
+}
+
+// ─── H. Split de variantes herda identidade dos alertas ───────────────────────
+section('H. Produto criado sem EAN herda identidade do alerta do fornecedor');
+{
+  const alerts = [
+    { type: 'new_product', dismissed: false, suppId: 'teletech', name: 'Samsung Galaxy Fit 3 40mm - Grey', barcode: '8806095362151', sku: '8806095362151', stock: 9, price: 39.9 },
+    { type: 'new_product', dismissed: false, suppId: 'teletech', name: 'Samsung Galaxy Fit 3 40mm - Silver', barcode: '8806095362199', sku: '8806095362199', stock: 4, price: 39.9 },
+    { type: 'new_product', dismissed: true,  suppId: 'teletech', name: 'Samsung Galaxy Fit 3 40mm - Pink', barcode: '8806095362222', sku: '8806095362222', stock: 2, price: 39.9 },
+  ];
+  const hit = suggestIdentityFromAlerts('Samsung Galaxy Fit 3 40mm - Grey', alerts);
+  check('H1: split "Fit 3 Grey" herda o EAN do alerta certo (não o Silver)', hit?.alert.barcode === '8806095362151' && hit.score === 100);
+  const miss = suggestIdentityFromAlerts('Produto Completamente Diferente XYZ', alerts);
+  check('H2: sem correspondência forte → não inventa identidade', miss === null);
+  const colorGuard = suggestIdentityFromAlerts('Samsung Galaxy Fit 3 40mm - Gold', alerts);
+  check('H3: cor diferente não herda EAN de outra cor', colorGuard === null);
+  const dismissed = suggestIdentityFromAlerts('Samsung Galaxy Fit 3 40mm - Pink', alerts);
+  check('H4: alertas dispensados não são fonte de identidade', dismissed === null);
 }
 
 // ─── Resultado ─────────────────────────────────────────────────────────────────

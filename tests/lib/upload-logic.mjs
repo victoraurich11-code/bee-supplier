@@ -300,6 +300,44 @@ export function makeOfferEngine(suppliers, offers = {}, now = Date.now()) {
   return { offers, priorityOf, offerIsCurrent, upsertOffer, markOfferAbsent, offersForVariant, resolveEffectiveOffer };
 }
 
+// ─── Identidade a partir de alertas (espelho de index.html: suggestIdentityFromAlerts)
+// Para produtos criados sem EAN/SKU (ex.: split de variantes cujo original não
+// tinha códigos): procura o alerta de fornecedor com nome mais parecido e
+// devolve a identidade a herdar. minScore alto porque isto escreve códigos.
+export function suggestIdentityFromAlerts(title, alerts, { minScore = 90, nameSim = nameSimilarity } = {}) {
+  let best = null;
+  for (const a of alerts) {
+    if (a.type !== 'new_product' || a.dismissed) continue;
+    const ean = String(a.barcode || '').trim();
+    const sku = String(a.sku || '').trim();
+    if (!ean && !sku) continue;
+    const score = nameSim(title || '', a.name || '');
+    if (score >= minScore && (!best || score > best.score)) best = { alert: a, score };
+  }
+  return best; // { alert, score } | null
+}
+
+// ─── Política de preço (espelho de index.html: decidePriceAction) ──────────────
+// O preço tem um DONO: o fornecedor cujas regras o definiram, ou 'manual'
+// (humano). Troca de fornecedor por disponibilidade NUNCA reprecifica sozinha:
+// um fornecedor automático só aplica preço se for o gestor E o dono; caso
+// contrário propõe (conflito visível, aceitação transfere a posse).
+//   → 'apply'   aplica automaticamente (e define a posse)
+//   → 'propose' mostra sugestão sem aplicar (conflito de posse)
+//   → 'none'    não mexe (modo manual, sem alteração, ou gerido por outro)
+export function decidePriceAction({ supplier, managedBy, priceOwner, priceChanged }) {
+  if (!priceChanged) return 'none';
+  if (supplier.pricingMode === 'manual') return 'none'; // manual: só por ✏ humano
+  if (managedBy) return 'none';                          // outro fornecedor gere
+  if (!priceOwner || priceOwner === supplier.id) return 'apply';
+  return 'propose';
+}
+
+// Posse resultante de uma aplicação de preço por upload/aceitação.
+export function priceOwnerAfterApply(supplier) {
+  return supplier.pricingMode === 'manual' ? 'manual' : supplier.id;
+}
+
 // ─── Health check pós-upload V2 (espelho de index.html: runPostUploadHealthCheck)
 // Classificação PURA (sem side-effects Shopify): a UI executa o que isto decide.
 // Devolve guards em vez de abrir modals — os testes verificam os travões.

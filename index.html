@@ -773,12 +773,16 @@ let state = {
   // A verdade de "o que cada fornecedor tem AGORA" vive aqui, por variante Shopify.
   // key = `${suppId}::${variantId}`. Absent do último upload → stock:0 + absentSince.
   supplierOffers: DB.get('supplierOffers', {}),        // { [suppId::variantId]: { suppId, productId, variantId, invItemId, stock, cost, lastSeen, absentSince, absentCount } }
+  // Posse do preço por variante: quem definiu o preço atual ('manual' = humano,
+  // senão suppId). Troca de fornecedor por disponibilidade nunca reprecifica:
+  // um fornecedor automático só aplica preço se for gestor E dono; senão propõe.
+  priceOwners: DB.get('priceOwners', {}),              // { [variantId]: { owner: suppId|'manual', setAt } }
   parsedRows: [], uploadSuppId: null, colMap: {}, analysisResult: null,
 };
 
 function save() {
   // Dados críticos guardados primeiro — nunca devem ser perdidos
-  ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','kkCache','productCanonicals','productAliases','negativeMatches','supplierOffers'].forEach(k => DB.set(k, state[k]));
+  ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','kkCache','productCanonicals','productAliases','negativeMatches','supplierOffers','priceOwners'].forEach(k => DB.set(k, state[k]));
   // Cache Shopify: pode ser grande (>5MB) e causar quota exceeded.
   // Guardado por último e de forma isolada para não bloquear os dados críticos acima.
   try {
@@ -847,7 +851,7 @@ async function saveToCloud() {
   const force = _cloudForceSync;
   _cloudForceSync = false;
   try {
-    const allKeys = ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','shopifyProducts','productCanonicals','productAliases','negativeMatches','supplierOffers'];
+    const allKeys = ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','shopifyProducts','productCanonicals','productAliases','negativeMatches','supplierOffers','priceOwners'];
     // Avalia guards em paralelo para chaves críticas
     const guardChecks = await Promise.all(CLOUD_GUARDED_KEYS.map(async k => {
       if (force) return { k, allow: true };
@@ -906,7 +910,7 @@ async function loadFromCloud() {
     const map = Object.fromEntries(rows.map(r => [r.key, r.value]));
     // Aplicar com validação de tipo — garante que arrays são arrays e objetos são objetos
     const arrayKeys = ['suppliers','alerts','uploadHistory','matches','costAlerts','shopifyProducts','productAliases','negativeMatches'];
-    const objectKeys = ['skuHealth','costHistory','productCanonicals','supplierOffers'];
+    const objectKeys = ['skuHealth','costHistory','productCanonicals','supplierOffers','priceOwners'];
     arrayKeys.forEach(k => { if (Array.isArray(map[k])) state[k] = map[k]; });
     objectKeys.forEach(k => { if (map[k] && typeof map[k]==='object' && !Array.isArray(map[k])) state[k] = map[k]; });
     // Restaura settings da cloud mas preserva as credenciais locais (supabase + shopify token)
@@ -915,7 +919,7 @@ async function loadFromCloud() {
       state.settings = { ...DEFAULT_SETTINGS, ...map.settings, ...keep };
     }
     // Persiste no localStorage para offline
-    ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','productCanonicals','productAliases','negativeMatches','supplierOffers'].forEach(k => DB.set(k, state[k]));
+    ['suppliers','alerts','uploadHistory','skuHealth','matches','settings','costHistory','costAlerts','productCanonicals','productAliases','negativeMatches','supplierOffers','priceOwners'].forEach(k => DB.set(k, state[k]));
     try { localStorage.setItem('bsm3_shopifyProducts', JSON.stringify(state.shopifyProducts)); } catch {}
     // Restaura tek4life_mapping
     if (map.tek4life_mapping && typeof map.tek4life_mapping === 'object' && !Array.isArray(map.tek4life_mapping)) {
@@ -1305,6 +1309,86 @@ function seedOffersFromTags() {
   return seeded;
 }
 
+// ── POLÍTICA DE PREÇO (posse) ───────────────────────────────
+// O preço tem um DONO: 'manual' (definido à mão) ou o fornecedor cujas regras
+// o calcularam. Troca de fornecedor por disponibilidade NUNCA reprecifica
+// sozinha: um fornecedor automático só APLICA preço se for o gestor E o dono;
+// sobre posse alheia apenas PROPÕE (aceitar transfere a posse).
+function decidePriceAction({ supplier, managedBy, priceOwner, priceChanged }) {
+  if (!priceChanged) return 'none';
+  if (supplier.pricingMode === 'manual') return 'none'; // manual: só por ✏ humano
+  if (managedBy) return 'none';                          // outro fornecedor gere
+  if (!priceOwner || priceOwner === supplier.id) return 'apply';
+  return 'propose';
+}
+function priceOwnerAfterApply(supplier) {
+  return supplier.pricingMode === 'manual' ? 'manual' : supplier.id;
+}
+function setPriceOwner(variantId, owner) {
+  if (!variantId || !owner) return;
+  state.priceOwners[variantId] = { owner, setAt: new Date().toISOString() };
+}
+function getPriceOwner(variantId) {
+  return state.priceOwners[variantId]?.owner || null;
+}
+
+// ── IDENTIDADE A PARTIR DE ALERTAS ──────────────────────────
+// Para produtos criados sem EAN/SKU (ex.: split de variantes cujo original não
+// tinha códigos por variante): procura o alerta de fornecedor com o nome mais
+// parecido e devolve a identidade a herdar. Score alto: isto escreve códigos.
+function suggestIdentityFromAlerts(title, { minScore = 90 } = {}) {
+  let best = null;
+  for (const a of state.alerts) {
+    if (a.type !== 'new_product' || a.dismissed) continue;
+    const ean = String(a.barcode || '').trim();
+    const sku = String(a.sku || '').trim();
+    if (!ean && !sku) continue;
+    const score = nameSimilarity(title || '', a.name || '');
+    if (score >= minScore && (!best || score > best.score)) best = { alert: a, score };
+  }
+  return best; // { alert, score } | null
+}
+
+// Alerta de revisão de preço (dedup por variante+fornecedor sugerente).
+// Criado quando um fornecedor propõe preço sobre posse alheia, ou num handover
+// em que o novo fornecedor tem regra de preço própria.
+function upsertPriceReviewAlert({ productId, variantId, title, current, suggested, fromOwner, suppId }) {
+  const supp = state.suppliers.find(s => s.id === suppId);
+  const existing = state.alerts.find(a => a.type === 'price_review' && !a.dismissed && a.variantId === variantId && a.suppId === suppId);
+  const payload = {
+    type: 'price_review',
+    title: 'Preço a rever (troca de fornecedor)',
+    desc: `${title} — preço atual €${Number(current).toFixed(2)} (posse: ${fromOwner === 'manual' ? 'manual' : (state.suppliers.find(s=>s.id===fromOwner)?.name || fromOwner || 'n/d')}); regra ${supp?.name || suppId} daria €${Number(suggested).toFixed(2)}`,
+    productId, variantId, suppId,
+    currentPrice: Number(current), suggestedPrice: Number(suggested),
+  };
+  if (existing) {
+    Object.assign(existing, payload);
+    existing.seenCount = (existing.seenCount || 1) + 1;
+    existing.lastSeen = new Date().toISOString();
+  } else {
+    state.alerts.push({ ...payload, id: 'alert_' + Date.now() + Math.random(), date: new Date().toISOString(), lastSeen: new Date().toISOString(), seenCount: 1, dismissed: false });
+  }
+}
+
+// Aceitar a sugestão de preço de um alerta price_review: aplica o preço,
+// transfere a posse para o fornecedor sugerente e dispensa o alerta.
+window.applyPriceReview = async function(alertId) {
+  const a = state.alerts.find(x => x.id === alertId);
+  if (!a || a.type !== 'price_review') return;
+  const p = state.shopifyProducts.find(x => x.id === a.productId);
+  try {
+    await updateVariantPrice(a.productId, a.variantId, a.suggestedPrice.toFixed(2));
+    const v = p?.variants.find(x => x.id === a.variantId);
+    if (v) v.price = a.suggestedPrice.toFixed(2);
+    setPriceOwner(a.variantId, a.suppId);
+    a.dismissed = true;
+    save(); updateBadges();
+    toast(`✓ Preço €${a.suggestedPrice.toFixed(2)} aplicado — posse passa a ${state.suppliers.find(s=>s.id===a.suppId)?.name || a.suppId}`, 'success');
+    document.getElementById('alert-' + alertId)?.remove();
+  } catch (e) { toast(`Erro ao aplicar preço: ${e.message}`, 'error'); }
+};
+
 // ═══════════════════════════════════════════
 // POST-UPLOAD HEALTH CHECK (motor de ofertas)
 // Produtos tagged sup:<suppId> ausentes deste upload:
@@ -1433,21 +1517,33 @@ async function runPostUploadHealthCheck(suppId, processedSkus) {
 
   const locationId = await getLocationId().catch(()=>null);
 
-  // Execução: handovers
+  // Execução: handovers — SÓ STOCK. O preço nunca muda por troca de fornecedor:
+  // se o novo fornecedor tem regra de preço própria e o valor diverge, fica uma
+  // sugestão no relatório + alerta "Preço a rever" (aceitar transfere a posse).
   for (const h of toHandover) {
     const p = h.product, off = h.offer;
     const winner = state.suppliers.find(s=>s.id===off.suppId);
     try {
       const v = p.variants[0];
       if (locationId && v?.inventoryItemId) await updateVariantStock(v.inventoryItemId, locationId, off.stock);
-      const newPrice = priceFromOffer(winner, off.cost);
-      if (newPrice !== null && v?.id) await updateVariantPrice(p.id, v.id, newPrice.toFixed(2));
       const newTags = buildTagUpdate(p.tags||[], [`sup:${off.suppId}`, 'cat:atualizado', `last-seen:${YYYYMM()}`]);
       await updateProductTags(p.id, newTags);
       // cache local
       p.tags = newTags;
-      if (v) { v.stock = off.stock; if (newPrice !== null) v.price = String(newPrice.toFixed(2)); }
-      report.handedOver.push({ title: p.title, from: supp.name, to: winner?.name || off.suppId, stock: off.stock, price: newPrice });
+      if (v) v.stock = off.stock;
+      // Sugestão de preço do novo fornecedor (não aplicada)
+      let suggested = null;
+      const currentPrice = parseFloat(v?.price) || 0;
+      const target = priceFromOffer(winner, off.cost);
+      if (target !== null && currentPrice > 0 && target.toFixed(2) !== currentPrice.toFixed(2)) {
+        suggested = target;
+        upsertPriceReviewAlert({
+          productId: p.id, variantId: v.id, title: p.title,
+          current: currentPrice, suggested: target,
+          fromOwner: getPriceOwner(v.id), suppId: off.suppId,
+        });
+      }
+      report.handedOver.push({ title: p.title, from: supp.name, to: winner?.name || off.suppId, stock: off.stock, price: null, suggested, current: currentPrice });
     } catch(e) { report.errors.push(`Handover ${p.title.slice(0,40)}: ${e.message}`); }
     await sleep(350);
   }
@@ -3041,6 +3137,13 @@ function runAnalysis() {
         const managedBy = (winner && winner.suppId !== supp.id) ? winner.suppId : null;
         const managedByName = managedBy ? (state.suppliers.find(s=>s.id===managedBy)?.name || managedBy) : null;
 
+        // Posse do preço: automático só aplica se for gestor E dono; sobre posse
+        // alheia (ex.: preço manual do Victor num produto que passou p/ Depau)
+        // apenas propõe — a linha aparece com aviso e checkbox desmarcada.
+        const priceOwner = getPriceOwner(match.variant.id);
+        const priceAction = decidePriceAction({ supplier: supp, managedBy, priceOwner, priceChanged });
+        const priceOwnerName = priceOwner === 'manual' ? 'manual' : (priceOwner ? (state.suppliers.find(s=>s.id===priceOwner)?.name || priceOwner) : null);
+
         const rowData = { name, sku, barcode, stockVal, costRaw, rawPrice: effectiveRawPrice, finalPrice: effectiveFinalPrice, suppId: supp.id, suppName: supp.name, histKey };
         found.push({
           ...rowData,
@@ -3051,8 +3154,10 @@ function runAnalysis() {
           currentStock: match.variant.stock ?? 0,
           matchedBy,
           managedBy, managedByName,
+          priceOwner, priceOwnerName,
+          priceConflict: priceAction === 'propose',
           isDraft: (match.product.status || 'ACTIVE') === 'DRAFT',
-          applyPrice: managedBy ? false : (isManual ? false : priceChanged), // manual: false por defeito, ativado ao editar com ✏
+          applyPrice: priceAction === 'apply',
           applyStock: managedBy ? false : stockChanged,
           _selected: true,
           costChange,
@@ -3498,6 +3603,7 @@ function renderAnalysis(found, notFound, isNew, supp) {
               <td>
                 <span class="badge ${p.matchedBy==='SKU'?'badge-blue':'badge-orange'}" style="font-size:10px">${p.matchedBy}</span>
                 ${p.managedBy?`<span class="badge badge-gray" style="font-size:10px;margin-left:4px" title="Outro fornecedor tem prioridade e stock para este produto. Stock/preço não serão alterados por este upload (podes forçar com as checkboxes).">🔒 ${p.managedByName}</span>`:''}
+                ${p.priceConflict?`<span class="badge badge-orange" style="font-size:10px;margin-left:4px" title="O preço atual foi definido por ${p.priceOwnerName==='manual'?'edição manual':p.priceOwnerName}. A regra deste fornecedor daria €${p.finalPrice.toFixed(2)}. Marca a checkbox 💶 para aceitar (a posse do preço passa para este fornecedor).">💶 rever (posse: ${p.priceOwnerName})</span>`:''}
                 ${p.isDraft?`<span class="badge badge-gray" style="font-size:10px;margin-left:4px" title="Produto em rascunho — recebe stock/preço mas não está publicado">rascunho</span>`:''}
               </td>
               <td style="text-align:center"><input type="checkbox" class="chk-price" data-idx="${i}" ${p.applyPrice?'checked':''} ${!priceChanged?'disabled':''} onchange="state.analysisResult.found[${i}].applyPrice=this.checked;updateApplySummary()"></td>
@@ -3624,7 +3730,7 @@ function editPrice(idx) {
   input.style.cssText='width:80px;padding:3px 6px;font-family:"DM Mono",monospace;font-size:12px;border:1px solid var(--blue);border-radius:5px;color:var(--text);background:var(--surface);outline:none;';
   const confirmBtn=document.createElement('button'); confirmBtn.textContent='✓'; confirmBtn.style.cssText='background:var(--green);color:white;border:none;border-radius:5px;padding:3px 7px;cursor:pointer;font-size:12px;margin-left:4px;';
   const cancelBtn=document.createElement('button'); cancelBtn.textContent='✕'; cancelBtn.style.cssText='background:var(--panel);color:var(--text2);border:1px solid var(--border);border-radius:5px;padding:3px 7px;cursor:pointer;font-size:12px;margin-left:3px;';
-  const save=()=>{ const newVal=parseFloat(input.value); if(isNaN(newVal)||newVal<=0){toast('Preço inválido','error');return;} p.finalPrice=newVal; p.applyPrice=true; displayEl.textContent='€'+newVal.toFixed(2); displayEl.style.display=''; if(editBtn) editBtn.style.display=''; input.remove(); confirmBtn.remove(); cancelBtn.remove(); const priceChk=document.querySelector(`.chk-price[data-idx="${idx}"]`); if(priceChk){priceChk.disabled=false;priceChk.checked=true;} updateApplySummary(); toast('Preço atualizado','success'); };
+  const save=()=>{ const newVal=parseFloat(input.value); if(isNaN(newVal)||newVal<=0){toast('Preço inválido','error');return;} p.finalPrice=newVal; p.applyPrice=true; p._manualPriceEdit=true; displayEl.textContent='€'+newVal.toFixed(2); displayEl.style.display=''; if(editBtn) editBtn.style.display=''; input.remove(); confirmBtn.remove(); cancelBtn.remove(); const priceChk=document.querySelector(`.chk-price[data-idx="${idx}"]`); if(priceChk){priceChk.disabled=false;priceChk.checked=true;} updateApplySummary(); toast('Preço atualizado','success'); };
   const cancel=()=>{ displayEl.style.display=''; if(editBtn) editBtn.style.display=''; input.remove(); confirmBtn.remove(); cancelBtn.remove(); };
   confirmBtn.onclick=save; cancelBtn.onclick=cancel; input.onkeydown=(e)=>{if(e.key==='Enter')save();if(e.key==='Escape')cancel();};
   parent.appendChild(input); parent.appendChild(confirmBtn); parent.appendChild(cancelBtn); input.focus(); input.select();
@@ -3711,7 +3817,13 @@ async function applyChanges() {
     setUI(undefined, undefined, undefined, Math.round((i/total)*85), shortTitle);
     setCount(i+1);
     try {
-      if(p.applyPrice) { await updateVariantPrice(p.shopifyProduct.id, p.shopifyVariant.id, p.finalPrice.toFixed(2)); priceUpdated++; }
+      if(p.applyPrice) {
+        await updateVariantPrice(p.shopifyProduct.id, p.shopifyVariant.id, p.finalPrice.toFixed(2));
+        // Posse do preço: edição ✏ = humano; aplicação por regra = fornecedor.
+        // Aceitar um conflito (marcar 💶 numa linha "rever") também transfere posse.
+        setPriceOwner(p.shopifyVariant.id, p._manualPriceEdit ? 'manual' : priceOwnerAfterApply(supp));
+        priceUpdated++;
+      }
       if(p.applyStock&&locationId&&p.shopifyVariant.inventoryItemId) {
         try {
           await shopifyGQL(`mutation($id:ID!,$input:InventoryItemInput!){inventoryItemUpdate(id:$id,input:$input){inventoryItem{id tracked}userErrors{message}}}`,{id:p.shopifyVariant.inventoryItemId,input:{tracked:true}});
@@ -3826,6 +3938,22 @@ async function applyChanges() {
     } catch(e) { console.warn('Tag proveniência:', e.message); }
   }
 
+  // Conflitos de preço não aceites nesta análise → alerta de revisão (dedup),
+  // para a decisão não se perder quando o relatório fechar.
+  let priceReviews = 0;
+  found.filter(p => p._selected !== false && p.priceConflict && !p.applyPrice).forEach(p => {
+    upsertPriceReviewAlert({
+      productId: p.shopifyProduct.id,
+      variantId: p.shopifyVariant.id,
+      title: p.shopifyTitle,
+      current: p.currentPrice,
+      suggested: p.finalPrice,
+      fromOwner: p.priceOwner,
+      suppId: state.uploadSuppId,
+    });
+    priceReviews++;
+  });
+
   const histEntry = { id:'upl_'+Date.now(), supplierId:state.uploadSuppId, supplierName:supp.name, date:new Date().toISOString(), total:uploadTotal, updated, errors, newProducts:isNew.length };
   state.uploadHistory.unshift(histEntry);
   state.suppliers = state.suppliers.map(s=>s.id===state.uploadSuppId?{...s,lastUpload:new Date().toISOString()}:s);
@@ -3873,6 +4001,7 @@ async function applyChanges() {
       {n:stockUpdated, lbl:'Stocks', color:'var(--blue)'},
       ...(healthReport && healthReport.zeroed.length>0?[{n:healthReport.zeroed.length, lbl:'Zerados (ausentes)', color:'var(--red)'}]:[]),
       ...(healthReport && healthReport.handedOver.length>0?[{n:healthReport.handedOver.length, lbl:'Passaram de fornecedor', color:'var(--blue)'}]:[]),
+      ...(priceReviews>0?[{n:priceReviews, lbl:'Preços a rever', color:'var(--orange)'}]:[]),
       ...(managedElsewhere>0?[{n:managedElsewhere, lbl:'Geridos por outro forn.', color:'var(--text2)'}]:[]),
       ...(alertsCreated>0?[{n:alertsCreated, lbl:'Novos alertas', color:'var(--orange)'}]:[]),
       ...(costChangesRegistered.length>0?[{n:costChangesRegistered.length, lbl:'Alertas custo', color:'var(--purple)'}]:[]),
@@ -3905,8 +4034,8 @@ function renderUploadReport(rep, supp) {
     rep.errors.length ? section('⚠ Atenção', 'var(--red)', rep.errors.map(e=>`<div>• ${esc(e)}</div>`)) : '',
     section(`🔴 Stock zerado automaticamente (ausentes da listagem ${esc(supp.name)})`, 'var(--red)',
       rep.zeroed.map(z=>`<div>• ${esc(z.title)} <span style="color:var(--text3)">(tinha ${z.prevStock})</span></div>`)),
-    section('⇄ Entregues a outro fornecedor (continuam à venda)', 'var(--blue)',
-      rep.handedOver.map(h=>`<div>• ${esc(h.title)} <span style="color:var(--text3)">→ ${esc(h.to)}, stock ${h.stock}${h.price!==null&&h.price!==undefined?', €'+Number(h.price).toFixed(2):''}</span></div>`)),
+    section('⇄ Entregues a outro fornecedor (continuam à venda, preço mantido)', 'var(--blue)',
+      rep.handedOver.map(h=>`<div>• ${esc(h.title)} <span style="color:var(--text3)">→ ${esc(h.to)}, stock ${h.stock}${h.suggested!==null&&h.suggested!==undefined?` · preço mantido €${Number(h.current).toFixed(2)}; regra ${esc(h.to)} daria €${Number(h.suggested).toFixed(2)} (alerta "Preço a rever" criado)`:''}</span></div>`)),
     section('🔎 Possível mudança de código no fornecedor (revê e associa — NÃO foram zerados)', 'var(--orange)',
       rep.eanChange.map(e=>`<div>• ${esc(e.product?.title || e.title)} <span style="color:var(--text3)">≈ ${esc(e.candidate?.name || e.candidate)} (${e.score}%)</span></div>`)),
     section('⏸ Adiados por segurança', 'var(--text2)',
@@ -3976,6 +4105,7 @@ function renderIssuesTab(issues) {
   el.innerHTML = `
     <div style="display:flex;gap:var(--space-2);margin-bottom:var(--space-3);flex-wrap:wrap">
       <button class="btn btn-ghost btn-sm" onclick="filterIssueAlerts('all',this)" data-filter="all">Todos (${issues.length})</button>
+      <button class="btn btn-ghost btn-sm" onclick="filterIssueAlerts('price_review',this)" data-filter="price_review">💶 Preços a Rever (${byType('price_review').length})</button>
       <button class="btn btn-ghost btn-sm" onclick="filterIssueAlerts('no_update',this)" data-filter="no_update">Sem Update (${byType('no_update').length})</button>
       <button class="btn btn-ghost btn-sm" onclick="filterIssueAlerts('zero_stock',this)" data-filter="zero_stock">Stock Zerado (${byType('zero_stock').length})</button>
       <button class="btn btn-ghost btn-sm" onclick="filterIssueAlerts('no_origin',this)" data-filter="no_origin">Sem Origem (${byType('no_origin').length})</button>
@@ -4170,7 +4300,7 @@ window.dismissAllIssueAlerts = function() {
   save(); alerts(); updateBadges();
 };
 
-const alertIcon = { new_product:'🆕', no_update:'⚠', zero_stock:'🔴', no_origin:'🔍' };
+const alertIcon = { new_product:'🆕', no_update:'⚠', zero_stock:'🔴', no_origin:'🔍', price_review:'💶' };
 
 function renderAlertList(list) {
   if(!list.length) return `<div class="empty-state"><div class="empty-icon">🔔</div><p>Sem alertas ativos</p></div>`;
@@ -4193,7 +4323,8 @@ function renderAlertList(list) {
         <div class="alert-actions">
           ${a.type==='new_product'?`<button class="btn btn-success btn-sm" onclick="suggestCreate('${a.id}')">+ Criar no Shopify</button>`:''}
           ${a.type==='no_origin'?`<button class="btn btn-purple btn-sm" onclick="navigate('health')">Ver no Catálogo</button>`:''}
-          <button class="btn btn-ghost btn-sm" onclick="dismissAlert('${a.id}')">Dispensar</button>
+          ${a.type==='price_review'?`<button class="btn btn-primary btn-sm" onclick="applyPriceReview('${a.id}')">✓ Aplicar €${Number(a.suggestedPrice).toFixed(2)}</button>`:''}
+          <button class="btn btn-ghost btn-sm" onclick="dismissAlert('${a.id}')">${a.type==='price_review'?'Manter preço atual':'Dispensar'}</button>
         </div>
       </div>
     </div>`;
@@ -5870,6 +6001,18 @@ async function svExecuteCreate() {
         const newTitle = svBuildTitle(original.title, v.selectedOptions);
         const media = svBuildMedia(v.image, productImages);
 
+        // Identidade: se a variante original não tem SKU nem EAN, o produto novo
+        // nasceria invisível aos uploads (stock congelado "esgotado" — o caso
+        // Ray-Ban/GoPro/ASUS de jun-jul 2026). Herda do alerta de fornecedor
+        // com nome ≥90% antes de criar; se não houver, avisa no log.
+        const hasOwnIdentity = !!((v.sku||'').trim() || (v.barcode||'').trim());
+        const inherited = hasOwnIdentity ? null : suggestIdentityFromAlerts(newTitle);
+        const effBarcode = (v.barcode||'').trim() || (inherited ? String(inherited.alert.barcode||'').trim() : '');
+        const effSku = (v.sku||'').trim() || (inherited ? String(inherited.alert.sku||'').trim() : '');
+        const effTags = inherited
+          ? [...new Set([...cleanTags, `sup:${inherited.alert.suppId}`, 'cat:atualizado', `last-seen:${YYYYMM()}`])]
+          : cleanTags;
+
         try {
           // 1) productCreate (DRAFT, single-variant)
           const createRes = await shopifyGQL(
@@ -5879,7 +6022,7 @@ async function svExecuteCreate() {
                 vendor: original.vendor || undefined,
                 productType: original.productType || undefined,
                 descriptionHtml: original.descriptionHtml || undefined,
-                tags: cleanTags,
+                tags: effTags,
                 status: 'DRAFT',
               },
               media: media.length ? media : undefined
@@ -5893,18 +6036,31 @@ async function svExecuteCreate() {
           // 2) preço + barcode na variante default
           await shopifyGQL(
             `mutation($productId:ID!,$variants:[ProductVariantsBulkInput!]!){productVariantsBulkUpdate(productId:$productId,variants:$variants){userErrors{message field}}}`,
-            { productId: newProd.id, variants: [{ id: newVariantId, price: String(v.price), barcode: v.barcode || undefined }] }
+            { productId: newProd.id, variants: [{ id: newVariantId, price: String(v.price), barcode: effBarcode || undefined }] }
           );
 
-          // 3) SKU via inventoryItemUpdate (apenas se existir)
-          if (newInvId && v.sku) {
-            await updateVariantSKU(newInvId, v.sku);
+          // 3) SKU via inventoryItemUpdate
+          if (newInvId && effSku) {
+            await updateVariantSKU(newInvId, effSku);
           }
 
-          // 4) stock no location BeeStore
-          if (newInvId && typeof v.inventoryQuantity === 'number') {
-            try { await updateVariantStock(newInvId, locationId, v.inventoryQuantity); }
+          // 4) stock no location BeeStore (tracked + activate + set, mesmo 0)
+          if (newInvId) {
+            try {
+              await shopifyGQL(`mutation($id:ID!,$input:InventoryItemInput!){inventoryItemUpdate(id:$id,input:$input){userErrors{message}}}`, { id: newInvId, input: { tracked: true } });
+              await shopifyGQL(`mutation($inventoryItemId:ID!,$locationId:ID!){inventoryActivate(inventoryItemId:$inventoryItemId,locationId:$locationId){userErrors{message}}}`, { inventoryItemId: newInvId, locationId });
+              await updateVariantStock(newInvId, locationId, typeof v.inventoryQuantity === 'number' ? v.inventoryQuantity : 0);
+            }
             catch (stockErr) { log(`  ⚠ stock falhou: ${stockErr.message}`, '#fbbf24'); }
+          }
+
+          // 4b) identidade herdada: oferta + alerta consumido; sem identidade: aviso
+          if (inherited) {
+            upsertOffer({ suppId: inherited.alert.suppId, productId: newProd.id, variantId: newVariantId, invItemId: newInvId, stock: inherited.alert.stock || 0, cost: inherited.alert.price });
+            inherited.alert.dismissed = true;
+            log(`  🔗 identidade herdada do alerta "${(inherited.alert.name||'').slice(0,45)}" (${inherited.score}%) — EAN ${effBarcode||'—'}`, '#93c5fd');
+          } else if (!effBarcode && !effSku) {
+            log(`  ⚠ criado SEM EAN/SKU — os uploads não vão conseguir atualizá-lo. Corrige em Saúde → Sem EAN.`, '#fbbf24');
           }
 
           svState.created.push({ originalId: original.id, originalTitle: original.title, draftId: newProd.id, draftTitle: newTitle, variantTitle: v.title });
