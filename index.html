@@ -4185,6 +4185,12 @@ async function createFromAlert(alertId) {
   if (!title) { toast('Título obrigatório', 'error'); return; }
   const a = state.alerts.find(x => x.id === alertId);
   if (!a) { toast('Alerta não encontrado', 'error'); return; }
+  // Sem EAN nem SKU o produto nasce invisível aos uploads (nunca recebe
+  // stock/preço). O alerta traz sempre o EAN: só se o campo for apagado à mão
+  // é que se chega aqui — e tem de ser uma decisão consciente.
+  if (!sku && !barcode) {
+    if (!confirm('⚠ Este produto vai ser criado SEM EAN e SEM SKU.\n\nOs uploads dos fornecedores nunca vão conseguir atualizá-lo (fica com o stock congelado até alguém o corrigir na Saúde → Sem EAN).\n\nCriar mesmo assim?')) return;
+  }
 
   toast('A criar produto...', 'info');
   try {
@@ -4912,6 +4918,12 @@ window.toCreateBulkCreate = async function() {
     idx++;
     const data = inferProductDataFromAlert(alert);
     const labelShort = (data.title || 'produto').slice(0, 60);
+    // Nunca criar produto sem identidade: sem EAN/SKU os uploads não o encontram.
+    if (!data.barcode && !data.sku) {
+      fail++;
+      ProgressPanel.update(idx, `${labelShort}: alerta sem EAN/SKU — não criado (corrige o alerta ou cria individualmente)`, 'fail');
+      continue;
+    }
     try {
       // 1) Cria produto base DRAFT
       const productInput = {
@@ -5659,6 +5671,32 @@ async function svExecuteCreate() {
     const selected = svState.candidates.filter(p => svState.selectedIds.has(p.id));
     let totalVariants = 0; selected.forEach(p => totalVariants += p.variants.edges.length);
     log(`🎯 ${selected.length} produto(s) selecionado(s) · ${totalVariants} variante(s) a criar`);
+
+    // Pré-verificação de identidade: variantes sem SKU/EAN próprios e sem
+    // correspondência nos alertas de fornecedor nasceriam invisíveis aos
+    // uploads (a causa dos "esgotados" de jun-jul 2026). Decisão única aqui.
+    const semIdentidade = [];
+    for (const original of selected) {
+      for (const vEdge of original.variants.edges) {
+        const v = vEdge.node;
+        if ((v.sku||'').trim() || (v.barcode||'').trim()) continue;
+        const t = svBuildTitle(original.title, v.selectedOptions);
+        if (!suggestIdentityFromAlerts(t)) semIdentidade.push(t);
+      }
+    }
+    if (semIdentidade.length > 0) {
+      const goOn = confirm(
+        `⚠ ${semIdentidade.length} variante(s) não têm EAN/SKU nem correspondência nos alertas de fornecedor:\n\n` +
+        semIdentidade.slice(0,6).map(t=>`  • ${t.slice(0,55)}`).join('\n') +
+        (semIdentidade.length>6?`\n  …e mais ${semIdentidade.length-6}`:'') +
+        `\n\nSe criares, estes produtos NUNCA serão atualizados pelos uploads (stock congelado até corrigires em Saúde → Sem EAN).\n\nOK = criar mesmo assim · Cancelar = parar e rever`
+      );
+      if (!goOn) {
+        log('🛑 Cancelado: variantes sem identidade. Corrige os SKUs/EANs no produto original ou garante que o alerta do fornecedor existe.', '#fca5a5');
+        svState.creating = false;
+        return;
+      }
+    }
 
     let done = 0;
     for (const original of selected) {
