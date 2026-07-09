@@ -3668,7 +3668,10 @@ async function applyChanges() {
   const isManualMode = state.analysisResult?.isManual;
   const toUpdate = found.filter(p=>p._selected!==false&&(p.applyPrice||p.applyStock));
   const hasCostChanges = isManualMode && (state.analysisResult?.costChanges?.length > 0);
-  if(!toUpdate.length&&!isNew.length&&!hasCostChanges){ toast('Nada selecionado para aplicar','error'); return; }
+  // found.length conta mesmo sem alterações de valor: o apply regista as ofertas
+  // do dia e corre o ciclo de ausências (zeros/handover), que não dependem de
+  // haver preços/stocks diferentes.
+  if(!toUpdate.length&&!isNew.length&&!hasCostChanges&&!found.length){ toast('Nada para aplicar','error'); return; }
 
   document.getElementById('step-analysis').style.display='none';
   document.getElementById('step-mapping').style.display='none';
